@@ -1,0 +1,70 @@
+# Titan Compositor Configuration
+# ~/.config/titan/config.toml
+
+[colors]
+# 背景
+background = "#1a1a2e"
+# 焦点窗口边框
+focus_border = "#7aa2f7"
+# 非焦点窗口边框
+unfocus_border = "#3b3d57"
+# Headbar 背景
+bar_background = "#16161e"
+# Headbar 文字
+bar_foreground = "#c0caf5"
+# Headbar 活跃工作区
+bar_workspace_active = "#7aa2f7"
+# Headbar 非活跃工作区
+bar_workspace_inactive = "#3b3d57"
+# 状态指示器（时钟等）
+bar_status = "#9ece6a"
+# 警告/紧急
+bar_urgent = "#f7768e"
+
+[bar]
+# 是否显示顶部栏
+enabled = true
+# 栏高度（像素）
+height = 32
+# 字体大小（像素）
+font_size = 14
+# 工作区按钮圆角
+workspace_radius = 4
+# 工作区间距
+workspace_spacing = 8
+# 左侧内边距
+padding_left = 16
+# 右侧内边距
+padding_right = 16
+
+[layout]
+# 平铺边框宽度（像素）
+border_width = 2
+# 窗口间距（像素）
+gap = 4
+# 每侧内边距（像素）
+margin = 0
+
+[keybindings]
+# 格式: "modifier+key" = "action"
+# modifier: super, ctrl, alt, shift（可组合，用 + 连接）
+# key: a-z, 0-9, return, space, escape, tab, f1-f12 等
+"super+return" = "terminal"
+"super+q" = "close"
+"super+d" = "launcher"
+"super+f" = "fullscreen"
+"super+shift+escape" = "quit"
+"super+1" = "workspace_1"
+"super+2" = "workspace_2"
+"super+3" = "workspace_3"
+"super+4" = "workspace_4"
+
+[terminal]
+command = "foot"
+font = "monospace"
+font_size = 12
+
+[launcher]
+command = "wmenu"
+prompt = "Launch"
+lines = 10
