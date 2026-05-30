@@ -1,0 +1,44 @@
+[package]
+name = "titan"
+version = "0.5.0"
+edition = "2021"
+description = "Minimal tiling Wayland compositor for NVIDIA GPUs"
+
+[features]
+default = ["drm"]
+drm = [
+    "smithay/backend_drm",
+    "smithay/backend_gbm",
+    "smithay/backend_libinput",
+    "smithay/backend_udev",
+    "smithay/backend_session_libseat",
+    "smithay/backend_egl",
+]
+winit = ["smithay/backend_winit", "dep:winit"]
+
+[dependencies]
+smithay = { version = "0.7", default-features = false, features = [
+    "renderer_gl",
+    "renderer_pixman",
+    "wayland_frontend",
+] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+wayland-server = "0.31"
+wayland-protocols = "0.32"
+xkbcommon = "0.8"
+winit = { version = "0.30", optional = true }
+libc = "0.2"
+
+[[bin]]
+name = "titan"
+path = "src/main.rs"
+
+[[bin]]
+name = "titan-winit"
+path = "src/main_winit.rs"
+required-features = ["winit"]
+
+[profile.release]
+opt-level = 2
+lto = true

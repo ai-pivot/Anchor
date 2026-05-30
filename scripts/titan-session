@@ -1,0 +1,22 @@
+#!/bin/bash
+# Titan Wayland 会话 — 由 GDM 调用
+# 不传 --direct，让 Titan 通过 libseat 获取 DRM master
+
+export TERMINAL="${TERMINAL:-foot}"
+export XDG_SESSION_TYPE=wayland
+export XDG_CURRENT_DESKTOP=titan
+export MOZ_ENABLE_WAYLAND=1
+export GDK_BACKEND=wayland
+export QT_QPA_PLATFORM=wayland
+export SDL_VIDEODRIVER=wayland
+
+# NVIDIA 环境变量
+export GBM_BACKEND=nvidia-drm
+export __GLX_VENDOR_LIBRARY_NAME=nvidia
+export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json
+
+# 确保 XDG_RUNTIME_DIR
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+mkdir -p "$XDG_RUNTIME_DIR"
+
+exec ./target/release/titan 2>&1 | tee /tmp/titan-session.log
