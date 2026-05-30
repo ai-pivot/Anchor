@@ -39,11 +39,13 @@ gradient_top = "#1a1a3e"
 gradient_bottom = "#0f0f1a"
 change_interval = 0
 scaling = "fill"
+# NVIDIA block-linear: 每个 block 的 GOB 数量 (0=禁用, 16=典型值)
+block_height_gobs = 0
 
 [layout]
-border_width = 2
-gap = 6
-margin = 0
+border_width = 3
+gap = 8
+margin = 2
 
 [keybindings]
 "super+return" = "terminal"

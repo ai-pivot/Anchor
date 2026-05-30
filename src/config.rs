@@ -95,6 +95,9 @@ pub struct Wallpaper {
     /// "fill" | "fit" | "stretch" | "center"
     #[serde(default = "Wallpaper::default_scaling")]
     pub scaling: String,
+    /// NVIDIA block-linear 参数: 每个 block 的 GOB 高度 (0=禁用转换, 16=典型值)
+    #[serde(default = "Wallpaper::default_block_height_gobs")]
+    pub block_height_gobs: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -216,6 +219,7 @@ impl Default for Wallpaper { fn default() -> Self { Self {
     path: String::new(), directory: String::new(),
     gradient_top: Wallpaper::default_gradient_top(), gradient_bottom: Wallpaper::default_gradient_bottom(),
     change_interval: 0, scaling: Wallpaper::default_scaling(),
+    block_height_gobs: Wallpaper::default_block_height_gobs(),
 } } }
 impl Default for Layout { fn default() -> Self { Self { border_width: 2, gap: 6, margin: 0 } } }
 impl Default for Keybindings { fn default() -> Self { Self { bindings: Keybindings::default_bindings() } } }
@@ -244,6 +248,7 @@ impl Wallpaper {
     fn default_gradient_top() -> String { "#1a1a3e".into() }
     fn default_gradient_bottom() -> String { "#0f0f1a".into() }
     fn default_scaling() -> String { "fill".into() }
+    fn default_block_height_gobs() -> usize { 16 }
 }
 impl Keybindings {
     fn default_bindings() -> std::collections::HashMap<String, String> {

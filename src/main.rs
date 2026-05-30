@@ -4,6 +4,7 @@
 mod config;
 mod layout;
 mod font;
+mod block_linear;
 
 use std::{
     os::unix::io::OwnedFd,
@@ -505,21 +506,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     // 壁纸/背景
                     layout::render_wallpaper(&mut f, &state.cfg, state.osize.w, state.osize.h, state.frame);
 
+                    // 窗口内容
+                    draw_render_elements(&mut f, 1.0, &elems, &[dmg])?;
+
                     let focus_idx = state.focus_idx();
 
-                    // 窗口边框 + 阴影
+                    // ★ 窗口装饰在内容之后 — glow/阴影覆盖在窗口边缘 ★
                     if state.fullscreen.is_none() {
                         for (i, _) in state.tops.iter().enumerate() {
                             layout::render_window_decorations(&mut f, &state.cfg, i, state.tops.len(), focus_idx, state.osize.w, state.osize.h, bar_h);
                         }
                     }
 
-                    // 窗口内容
-                    draw_render_elements(&mut f, 1.0, &elems, &[dmg])?;
-
                     // ★ Headbar 渲染在窗口之后 — 确保永远在最顶层 ★
                     let time_secs = start.elapsed().as_secs();
-                    layout::render_headbar(&mut f, &state.cfg, state.osize.w, state.osize.h, state.tops.len(), focus_idx, time_secs);
+                    // TODO: 获取窗口标题（需要 XDG shell 标题 API）
+                    let window_title = "";
+                    layout::render_headbar(&mut f, &state.cfg, state.osize.w, state.osize.h, state.tops.len(), focus_idx, time_secs, window_title);
 
                     // 光标
                     let cx = state.pointer_pos.0 as i32;
@@ -531,6 +534,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     let _ = f.finish()?;
                     drop(target);
+
+                    // ★ Block-linear 转换：Pixman 渲染线性像素 → NVIDIA scanout 期望 block-linear ★
+                    let fb_size = (state.osize.w * state.osize.h * 4) as usize;
+                    let bh_gobs = state.cfg.wallpaper.block_height_gobs;
+                    if bh_gobs > 0 {
+                        use smithay::backend::allocator::dmabuf::{DmabufMappingMode, DmabufSyncFlags};
+                        if let Ok(mapping) = dmabuf.map_plane(0, DmabufMappingMode::READ | DmabufMappingMode::WRITE) {
+                            let ptr = mapping.ptr();
+                            if !ptr.is_null() {
+                                let slice = unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, fb_size) };
+                                block_linear::convert_in_place(slice, state.osize.w as usize, state.osize.h as usize, bh_gobs);
+                            }
+                            let _ = dmabuf.sync_plane(0, DmabufSyncFlags::WRITE);
+                            drop(mapping);
+                        }
+                    }
+
                     buf_surf.queue_buffer(None, None, ())?;
                     pending_flip = true;
                     state.dirty = false;
