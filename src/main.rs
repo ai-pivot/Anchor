@@ -136,27 +136,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         use smithay::reexports::rustix::fs::OFlags;
         let fd = session.open(&gpu_path, OFlags::RDWR)?;
         info!("✅ DRM 设备已打开 (via libseat)");
-        // 手动获取 DRM master（libseat/logind 的 fd 可能需要显式获取）
-        let raw_fd = fd.as_raw_fd();
-        let ret = unsafe { libc::ioctl(raw_fd, 0x4000641eu64 as _) };
-        if ret == 0 {
-            info!("✅ DRM master (ioctl)");
-        } else {
-            let err = std::io::Error::last_os_error();
-            warn!("⚠️  drmSetMaster: {} — 等待重试...", err);
-            // 可能前一个 session 还没释放 master，等一下重试
-            for i in 1..=10 {
-                std::thread::sleep(std::time::Duration::from_millis(200));
-                let ret = unsafe { libc::ioctl(raw_fd, 0x4000641eu64 as _) };
-                if ret == 0 {
-                    info!("✅ DRM master (retry #{})", i);
-                    break;
-                }
-                if i == 10 {
-                    warn!("❌ drmSetMaster 重试10次仍失败: {}", std::io::Error::last_os_error());
-                }
-            }
-        }
+        // 不手动调 drmSetMaster！logind TakeDevice 给的 fd 已隐含 DRM master 权限。
+        // 额外调用 drmSetMaster 在 NVIDIA 上会触发 "Failed to grab modeset ownership"
+        // 并可能破坏 fd 的 master 状态。DrmDeviceFd::new 内部也会调，让它自己处理。
         (DrmDeviceFd::new(DeviceFd::from(fd)), Some(session))
     };
 
