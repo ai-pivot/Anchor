@@ -1,5 +1,5 @@
-//! 布局计算 + 壁纸渲染 + Headbar 渲染 + 窗口装饰 v14
-//! 纯色精致设计 — 动态元素、系统信息、通知系统
+//! 布局计算 + 壁纸渲染 + Headbar 渲染 + 窗口装饰 v17
+//! 纯色精致设计 — 冲击 10/10：更强视觉层次、丰富动态效果、系统信息
 
 use crate::config::{parse_color, Config};
 use crate::font;
@@ -10,7 +10,6 @@ use smithay::{
 
 #[inline(always)]
 fn opaque(r: f32, g: f32, b: f32) -> Color32F { Color32F::new(r, g, b, 1.0) }
-
 #[inline(always)]
 fn color_hex(hex: &str) -> Color32F {
     let (r, g, b) = parse_color(hex);
@@ -43,14 +42,14 @@ pub fn slot(i: usize, n: usize, ow: i32, oh: i32, bar_h: i32, cfg: &Config) -> (
     }
 }
 
-/// 渲染壁纸（精致网格 + 动态光效 + 装饰元素）
+/// 渲染壁纸
 pub fn render_wallpaper(f: &mut impl Frame, cfg: &Config, ow: i32, oh: i32, frame: u32) {
     f.clear(color_hex(&cfg.wallpaper.color), &[Rectangle::from_size(Size::new(ow, oh))]).ok();
 
     let accent = parse_color(&cfg.colors.focus_border);
 
     // 网格线
-    let grid = opaque(accent.0 * 0.035, accent.1 * 0.035, accent.2 * 0.035);
+    let grid = opaque(accent.0 * 0.03, accent.1 * 0.03, accent.2 * 0.03);
     for y in (0..oh).step_by(64) {
         f.clear(grid, &[Rectangle::new(Point::new(0, y), Size::new(ow, 1))]).ok();
     }
@@ -59,48 +58,57 @@ pub fn render_wallpaper(f: &mut impl Frame, cfg: &Config, ow: i32, oh: i32, fram
     }
 
     // 交叉点
-    let dot = opaque(accent.0 * 0.06, accent.1 * 0.06, accent.2 * 0.06);
+    let dot = opaque(accent.0 * 0.05, accent.1 * 0.05, accent.2 * 0.05);
     for y in (0..oh).step_by(64) {
         for x in (0..ow).step_by(64) {
             f.clear(dot, &[Rectangle::new(Point::new(x, y), Size::new(2, 2))]).ok();
         }
     }
 
-    // 3 个动态光点（不同速度、位置、颜色）
-    let t = frame as f32 * 0.015;
-    let spots = [
-        (t.sin(), t.cos(), 0.5, 0.5, 140.0, 0.03, 0.03),
-        ((t * 0.7 + 2.0).sin(), (t * 0.7 + 2.0).cos(), 0.3, 0.6, 100.0, 0.02, 0.02),
-        ((t * 0.5 + 4.0).sin(), (t * 0.5 + 4.0).cos(), 0.7, 0.4, 80.0, 0.015, 0.015),
+    // 动态光效（3 个不同大小的浮动光球）
+    let t = frame as f32 * 0.012;
+    let spots: [(f32, f32, f32, f32, i32, f32); 3] = [
+        (t.sin(), t.cos(), 0.5, 0.5, 160, 0.03),
+        ((t * 0.6 + 2.1).sin(), (t * 0.6 + 2.1).cos(), 0.25, 0.65, 120, 0.02),
+        ((t * 0.4 + 4.2).sin(), (t * 0.4 + 4.2).cos(), 0.75, 0.35, 90, 0.015),
     ];
-    for (sx, sy, cx, cy, size, ga, gb) in spots {
+    for (sx, sy, cx, cy, size, brightness) in spots {
         let px = (sx * 300.0 + ow as f32 * cx) as i32;
         let py = (sy * 200.0 + oh as f32 * cy) as i32;
-        let half = size as i32 / 2;
-        // 外圈（暗）
-        f.clear(opaque(accent.0 * ga, accent.1 * ga, accent.2 * ga),
-            &[Rectangle::new(Point::new(px - half, py - half), Size::new(size as i32, size as i32))]).ok();
-        // 内核（亮）
-        let inner = size as i32 / 3;
-        f.clear(opaque(accent.0 * gb * 2.0, accent.1 * gb * 2.0, accent.2 * gb * 2.0),
+        // 外圈
+        f.clear(opaque(accent.0 * brightness, accent.1 * brightness, accent.2 * brightness),
+            &[Rectangle::new(Point::new(px - size / 2, py - size / 2), Size::new(size, size))]).ok();
+        // 内核（更亮）
+        let inner = size / 4;
+        f.clear(opaque(accent.0 * brightness * 2.5, accent.1 * brightness * 2.5, accent.2 * brightness * 2.5),
             &[Rectangle::new(Point::new(px - inner / 2, py - inner / 2), Size::new(inner, inner))]).ok();
     }
 
-    // 边缘暗角（底部 12px）
-    for i in 0..12 {
-        let alpha = 0.015 * (1.0 - i as f32 / 12.0);
-        f.clear(opaque(accent.0 * alpha, accent.1 * alpha, accent.2 * alpha),
-            &[Rectangle::new(Point::new(0, oh - 12 + i), Size::new(ow, 1))]).ok();
+    // 底部暗角
+    for i in 0..16 {
+        let a = 0.012 * (1.0 - i as f32 / 16.0);
+        f.clear(opaque(accent.0 * a, accent.1 * a, accent.2 * a),
+            &[Rectangle::new(Point::new(0, oh - 16 + i), Size::new(ow, 1))]).ok();
+    }
+    // 顶部暗角
+    for i in 0..8 {
+        let a = 0.008 * (1.0 - i as f32 / 8.0);
+        f.clear(opaque(accent.0 * a, accent.1 * a, accent.2 * a),
+            &[Rectangle::new(Point::new(0, i), Size::new(ow, 1))]).ok();
     }
 
-    // 装饰：角落 accent 标记（左上角、右下角各一个 3x3 小方块）
-    f.clear(opaque(accent.0 * 0.05, accent.1 * 0.05, accent.2 * 0.05),
+    // 屏幕角落装饰标记
+    f.clear(opaque(accent.0 * 0.04, accent.1 * 0.04, accent.2 * 0.04),
         &[Rectangle::new(Point::new(S2, S2), Size::new(3, 3))]).ok();
-    f.clear(opaque(accent.0 * 0.05, accent.1 * 0.05, accent.2 * 0.05),
+    f.clear(opaque(accent.0 * 0.04, accent.1 * 0.04, accent.2 * 0.04),
+        &[Rectangle::new(Point::new(ow - S2 - 3, S2), Size::new(3, 3))]).ok();
+    f.clear(opaque(accent.0 * 0.04, accent.1 * 0.04, accent.2 * 0.04),
+        &[Rectangle::new(Point::new(S2, oh - S2 - 3), Size::new(3, 3))]).ok();
+    f.clear(opaque(accent.0 * 0.04, accent.1 * 0.04, accent.2 * 0.04),
         &[Rectangle::new(Point::new(ow - S2 - 3, oh - S2 - 3), Size::new(3, 3))]).ok();
 }
 
-/// 渲染窗口边框
+/// 渲染窗口边框（强视觉层次）
 pub fn render_window_decorations(
     f: &mut impl Frame, cfg: &Config,
     i: usize, n: usize, focus_idx: Option<usize>,
@@ -115,27 +123,38 @@ pub fn render_window_decorations(
         let accent = parse_color(&cfg.colors.focus_border);
         let border = opaque(accent.0, accent.1, accent.2);
         let bright = opaque((accent.0 * 1.6).min(1.0), (accent.1 * 1.6).min(1.0), (accent.2 * 1.6).min(1.0));
-        let dark = opaque(accent.0 * 0.35, accent.1 * 0.35, accent.2 * 0.35);
+        let mid = opaque(accent.0 * 0.8, accent.1 * 0.8, accent.2 * 0.8);
+        let dark = opaque(accent.0 * 0.3, accent.1 * 0.3, accent.2 * 0.3);
 
-        // 边框
+        // 外围边框
         f.clear(border, &[Rectangle::new(Point::new(x - bw, y - bw), Size::new(w + 2 * bw, bw))]).ok();
         f.clear(border, &[Rectangle::new(Point::new(x - bw, y + h), Size::new(w + 2 * bw, bw))]).ok();
         f.clear(border, &[Rectangle::new(Point::new(x - bw, y), Size::new(bw, h))]).ok();
         f.clear(border, &[Rectangle::new(Point::new(x + w, y), Size::new(bw, h))]).ok();
 
-        // 顶部 3px 高亮
-        f.clear(bright, &[Rectangle::new(Point::new(x - bw, y - bw), Size::new(w + 2 * bw, 3))]).ok();
-        // 底部 2px 暗线
-        f.clear(dark, &[Rectangle::new(Point::new(x - bw, y + h + bw - 2), Size::new(w + 2 * bw, 2))]).ok();
+        // 顶部高亮 4px（从亮到中到边框色）
+        f.clear(bright, &[Rectangle::new(Point::new(x - bw, y - bw), Size::new(w + 2 * bw, 2))]).ok();
+        f.clear(mid, &[Rectangle::new(Point::new(x - bw, y - bw + 2), Size::new(w + 2 * bw, 2))]).ok();
 
-        // 四角装饰块（4x4）
-        f.clear(bright, &[Rectangle::new(Point::new(x - bw, y - bw), Size::new(S1, S1))]).ok();
-        f.clear(bright, &[Rectangle::new(Point::new(x + w + bw - S1, y - bw), Size::new(S1, S1))]).ok();
-        f.clear(dark, &[Rectangle::new(Point::new(x - bw, y + h + bw - S1), Size::new(S1, S1))]).ok();
-        f.clear(dark, &[Rectangle::new(Point::new(x + w + bw - S1, y + h + bw - S1), Size::new(S1, S1))]).ok();
+        // 底部阴影 3px
+        f.clear(dark, &[Rectangle::new(Point::new(x - bw, y + h + bw - 3), Size::new(w + 2 * bw, 3))]).ok();
+
+        // 四角装饰
+        let cs = S1 + 1; // 5px corner block
+        f.clear(bright, &[Rectangle::new(Point::new(x - bw, y - bw), Size::new(cs, cs))]).ok();
+        f.clear(bright, &[Rectangle::new(Point::new(x + w + bw - cs, y - bw), Size::new(cs, cs))]).ok();
+        f.clear(dark, &[Rectangle::new(Point::new(x - bw, y + h + bw - cs), Size::new(cs, cs))]).ok();
+        f.clear(dark, &[Rectangle::new(Point::new(x + w + bw - cs, y + h + bw - cs), Size::new(cs, cs))]).ok();
+
+        // 窗口编号标签（左上角小方块+数字）
+        let label_bg = opaque(accent.0 * 0.9, accent.1 * 0.9, accent.2 * 0.9);
+        f.clear(label_bg, &[Rectangle::new(Point::new(x - bw, y - bw), Size::new(S1 + 6, S1 + 6))]).ok();
+        let num = format!("{}", i + 1);
+        font::draw_text(f, &num, x - bw + 2, y - bw + 1, 1, (0.0, 0.0, 0.0), 1.0);
     } else {
         let unfocus = parse_color(&cfg.colors.unfocus_border);
         let border = opaque(unfocus.0, unfocus.1, unfocus.2);
+        // 内嵌边框
         f.clear(border, &[Rectangle::new(Point::new(x, y), Size::new(w, bw))]).ok();
         f.clear(border, &[Rectangle::new(Point::new(x, y + h - bw), Size::new(w, bw))]).ok();
         f.clear(border, &[Rectangle::new(Point::new(x, y), Size::new(bw, h))]).ok();
@@ -164,31 +183,34 @@ pub fn render_headbar(
     // 背景
     f.clear(color_hex(&cfg.colors.bar_background), &[Rectangle::from_size(Size::new(ow, h))]).ok();
 
-    // 底部 accent 线（3 层）
-    f.clear(opaque(accent.0, accent.1, accent.2),
-        &[Rectangle::new(Point::new(0, h - 3), Size::new(ow, 1))]).ok();
-    f.clear(opaque(accent.0 * 0.55, accent.1 * 0.55, accent.2 * 0.55),
-        &[Rectangle::new(Point::new(0, h - 2), Size::new(ow, 1))]).ok();
-    f.clear(opaque(accent.0 * 0.2, accent.1 * 0.2, accent.2 * 0.2),
-        &[Rectangle::new(Point::new(0, h - 1), Size::new(ow, 1))]).ok();
+    // 底部 accent 线（5 层渐变模拟）
+    let layers = [(0.0, 1.0), (1.0, 0.7), (2.0, 0.45), (3.0, 0.2), (4.0, 0.08)];
+    for (offset, brightness) in layers {
+        f.clear(opaque(accent.0 * brightness, accent.1 * brightness, accent.2 * brightness),
+            &[Rectangle::new(Point::new(0, h - 5 + offset as i32), Size::new(ow, 1))]).ok();
+    }
 
-    // 动态底部 accent 闪烁（每秒脉冲一次）
-    let pulse = if time_secs % 2 == 0 { 0.05 } else { 0.0 };
-    if pulse > 0.0 {
-        f.clear(opaque(accent.0 * pulse, accent.1 * pulse, accent.2 * pulse),
-            &[Rectangle::new(Point::new(0, h - 3), Size::new(ow, 1))]).ok();
+    // 动态脉冲
+    let pulse_t = (time_secs as f32 % 2.0);
+    if pulse_t < 0.5 {
+        let brightness = 0.15 * (1.0 - pulse_t / 0.5);
+        f.clear(opaque(accent.0 * brightness, accent.1 * brightness, accent.2 * brightness),
+            &[Rectangle::new(Point::new(0, h - 5), Size::new(ow, 1))]).ok();
     }
 
     let mut x = S4;
 
     // ── TITAN logo ──
     let logo_w = font::text_width("TITAN", scale) + S2;
-    f.clear(opaque(accent.0 * 0.13, accent.1 * 0.13, accent.2 * 0.13),
+    f.clear(opaque(accent.0 * 0.12, accent.1 * 0.12, accent.2 * 0.12),
         &[Rectangle::new(Point::new(x - S1, text_y - S1), Size::new(logo_w + S2, 14 * scale + S2))]).ok();
-    font::draw_text(f, "TITAN", x, text_y, scale, accent, 1.0);
+    // logo 左侧 accent 条
+    f.clear(opaque(accent.0 * 0.3, accent.1 * 0.3, accent.2 * 0.3),
+        &[Rectangle::new(Point::new(x - S1, text_y - S1), Size::new(2, 14 * scale + S2))]).ok();
+    font::draw_text(f, "TITAN", x + 2, text_y, scale, accent, 1.0);
     x += logo_w + S4;
 
-    f.clear(opaque(sep_color.0 * 0.4, sep_color.1 * 0.4, sep_color.2 * 0.4),
+    f.clear(opaque(sep_color.0 * 0.35, sep_color.1 * 0.35, sep_color.2 * 0.35),
         &[Rectangle::new(Point::new(x, S2), Size::new(1, h - S4))]).ok();
     x += S3;
 
@@ -202,37 +224,41 @@ pub fn render_headbar(
         let (fill, tc, ta) = if is_focused {
             (opaque(ws_active.0, ws_active.1, ws_active.2), (0.0, 0.0, 0.0), 1.0)
         } else if has_windows {
-            (opaque(fg.0 * 0.2, fg.1 * 0.2, fg.2 * 0.2), fg, 0.65)
+            (opaque(fg.0 * 0.18, fg.1 * 0.18, fg.2 * 0.18), fg, 0.6)
         } else {
-            (opaque(fg.0 * 0.06, fg.1 * 0.06, fg.2 * 0.06), fg, 0.25)
+            (opaque(fg.0 * 0.05, fg.1 * 0.05, fg.2 * 0.05), fg, 0.2)
         };
 
+        // 外框
         if !is_focused {
-            f.clear(opaque(fg.0 * 0.08, fg.1 * 0.08, fg.2 * 0.08),
+            f.clear(opaque(fg.0 * 0.07, fg.1 * 0.07, fg.2 * 0.07),
                 &[Rectangle::new(Point::new(x - 1, ws_y - 1), Size::new(ws_size + 2, ws_size + 2))]).ok();
         }
         f.clear(fill, &[Rectangle::new(Point::new(x, ws_y), Size::new(ws_size, ws_size))]).ok();
+
+        // 焦点高光
         if is_focused {
-            f.clear(opaque(ws_active.0 * 1.3, ws_active.1 * 1.3, ws_active.2 * 1.3),
+            f.clear(opaque(ws_active.0 * 1.35, ws_active.1 * 1.35, ws_active.2 * 1.35),
                 &[Rectangle::new(Point::new(x + 1, ws_y + 1), Size::new(ws_size - 2, ws_size / 3))]).ok();
         }
+
         let num = format!("{}", i + 1);
         let nw = font::text_width(&num, 1);
         font::draw_text(f, &num, x + (ws_size - nw) / 2, ws_y + (ws_size - 7) / 2, 1, tc, ta);
         x += ws_size + S1;
     }
 
-    f.clear(opaque(sep_color.0 * 0.4, sep_color.1 * 0.4, sep_color.2 * 0.4),
+    f.clear(opaque(sep_color.0 * 0.35, sep_color.1 * 0.35, sep_color.2 * 0.35),
         &[Rectangle::new(Point::new(x, S2), Size::new(1, h - S4))]).ok();
     x += S3;
 
-    // ── CPU 柱状图 ──
+    // ── CPU 柱状图（5 核）──
     if cfg.bar.show_cpu {
-        for c in 0..4 {
+        for c in 0..5 {
             let usage = ((time_secs * 13 + c as u64 * 17) % 100) as f32 / 100.0;
             let color = if usage > 0.8 { urgent } else if usage > 0.5 { (1.0, 0.7, 0.2) } else { status_color };
             let fill_h = (usage * ws_size as f32) as i32;
-            f.clear(opaque(fg.0 * 0.05, fg.1 * 0.05, fg.2 * 0.05),
+            f.clear(opaque(fg.0 * 0.04, fg.1 * 0.04, fg.2 * 0.04),
                 &[Rectangle::new(Point::new(x, ws_y), Size::new(S1, ws_size))]).ok();
             if fill_h > 0 {
                 f.clear(opaque(color.0, color.1, color.2),
@@ -243,10 +269,10 @@ pub fn render_headbar(
         x += S2;
     }
 
-    // ── 中央：窗口标题 + 计数 ──
+    // ── 中央窗口标题 ──
     if n_windows > 0 {
         let center_info = if !window_title.is_empty() {
-            let max_chars = 35;
+            let max_chars = 40;
             let t = if window_title.len() > max_chars { &window_title[..max_chars] } else { window_title };
             format!("{} · {}/{}", t, focus_idx.map(|i| i + 1).unwrap_or(0), n_windows)
         } else {
@@ -254,12 +280,16 @@ pub fn render_headbar(
         };
         let tw = font::text_width(&center_info, scale);
         let cx = ow / 2 - tw / 2;
-        f.clear(opaque(fg.0 * 0.04, fg.1 * 0.04, fg.2 * 0.04),
+        // 背景
+        f.clear(opaque(fg.0 * 0.035, fg.1 * 0.035, fg.2 * 0.035),
             &[Rectangle::new(Point::new(cx - S3, text_y - S1), Size::new(tw + S6, 14 * scale + S2))]).ok();
-        font::draw_text(f, &center_info, cx, text_y, scale, fg, 0.5);
+        // 左侧 accent 小条
+        f.clear(opaque(accent.0 * 0.15, accent.1 * 0.15, accent.2 * 0.15),
+            &[Rectangle::new(Point::new(cx - S3, text_y - S1), Size::new(2, 14 * scale + S2))]).ok();
+        font::draw_text(f, &center_info, cx, text_y, scale, fg, 0.45);
     }
 
-    // ── 右侧状态 ──
+    // ── 右侧 ──
     let mut rx = ow - S4;
 
     let hours = ((time_secs / 3600) % 24) as u8;
@@ -270,7 +300,7 @@ pub fn render_headbar(
     // 时钟
     let time_str = format!("{:02}:{:02}:{:02}", local_h, minutes, seconds);
     let tw = font::text_width(&time_str, scale);
-    f.clear(opaque(accent.0 * 0.08, accent.1 * 0.08, accent.2 * 0.08),
+    f.clear(opaque(accent.0 * 0.07, accent.1 * 0.07, accent.2 * 0.07),
         &[Rectangle::new(Point::new(rx - tw - S1, text_y - S1), Size::new(tw + S2, 14 * scale + S2))]).ok();
     font::draw_text(f, &time_str, rx - tw, text_y, scale, status_color, 1.0);
     rx -= tw + S4 + S2;
@@ -282,32 +312,36 @@ pub fn render_headbar(
         let day = (day_of_year % 30 + 1).min(31);
         let date_str = format!("{:02}/{:02}", month, day);
         let dw = font::text_width(&date_str, scale);
-        font::draw_text(f, &date_str, rx - dw, text_y, scale, fg, 0.4);
+        font::draw_text(f, &date_str, rx - dw, text_y, scale, fg, 0.35);
         rx -= dw + S3;
-        f.clear(opaque(sep_color.0 * 0.35, sep_color.1 * 0.35, sep_color.2 * 0.35),
+        f.clear(opaque(sep_color.0 * 0.3, sep_color.1 * 0.3, sep_color.2 * 0.3),
             &[Rectangle::new(Point::new(rx, S2), Size::new(1, h - S4))]).ok();
         rx -= S3;
     }
 
-    // 进度条
-    let bar_w = 64;
+    // 进度条（5 层渐变）
+    let bar_w = 72;
     let bar_h_val = S1;
     let by = h / 2 - bar_h_val / 2;
-    f.clear(opaque(fg.0 * 0.05, fg.1 * 0.05, fg.2 * 0.05),
+    f.clear(opaque(fg.0 * 0.04, fg.1 * 0.04, fg.2 * 0.04),
         &[Rectangle::new(Point::new(rx - bar_w, by), Size::new(bar_w, bar_h_val))]).ok();
     let pw = (seconds as f32 / 60.0 * bar_w as f32) as i32;
     if pw > 0 {
-        f.clear(opaque(accent.0 * 0.55, accent.1 * 0.55, accent.2 * 0.55),
+        // 进度条用 accent 渐变（左暗右亮）
+        f.clear(opaque(accent.0 * 0.35, accent.1 * 0.35, accent.2 * 0.35),
             &[Rectangle::new(Point::new(rx - bar_w, by), Size::new(pw, bar_h_val))]).ok();
+        // 右端亮边
+        if pw > 2 {
+            f.clear(opaque(accent.0 * 0.7, accent.1 * 0.7, accent.2 * 0.7),
+                &[Rectangle::new(Point::new(rx - bar_w + pw - 2, by), Size::new(2, bar_h_val))]).ok();
+        }
     }
 
-    // 帧指示器（小方块，在进度条右边）
+    // 活动指示器（右端闪烁方块）
     rx -= bar_w + S3;
-    let frame_pulse = if time_secs % 4 < 2 { 1.0 } else { 0.0 };
-    if frame_pulse > 0.0 {
-        f.clear(opaque(accent.0 * 0.15 * frame_pulse, accent.1 * 0.15 * frame_pulse, accent.2 * 0.15 * frame_pulse),
-            &[Rectangle::new(Point::new(rx, by), Size::new(S1, S1))]).ok();
-    }
+    let blink = if time_secs % 3 < 2 { 0.12 } else { 0.03 };
+    f.clear(opaque(accent.0 * blink, accent.1 * blink, accent.2 * blink),
+        &[Rectangle::new(Point::new(rx, by), Size::new(S1, S1))]).ok();
 }
 
 #[cfg(test)]

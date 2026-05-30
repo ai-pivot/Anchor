@@ -1,11 +1,11 @@
-# Titan Compositor Configuration
+# Titan Compositor Configuration v17
 # ~/.config/titan/config.toml
 
 [colors]
-background = "#0f0f1a"
+background = "#0a0a14"
 focus_border = "#7aa2f7"
-unfocus_border = "#3b3d57"
-bar_background = "#0d0d16"
+unfocus_border = "#2a2c3e"
+bar_background = "#08080f"
 bar_foreground = "#c0caf5"
 bar_workspace_active = "#7aa2f7"
 bar_workspace_inactive = "#3b3d57"
@@ -15,37 +15,35 @@ bar_separator = "#414868"
 
 [bar]
 enabled = true
-height = 36
+height = 42
 font_size = 14
 workspace_radius = 4
-workspace_spacing = 6
-padding_left = 16
-padding_right = 16
+workspace_spacing = 8
+padding_left = 20
+padding_right = 20
 opacity = 0.92
 separator_width = 1
 gradient_top = "#16161e"
-gradient_bottom = "#0d0d16"
+gradient_bottom = "#08080f"
 show_date = true
 show_cpu = true
 show_memory = true
 
 [wallpaper]
-# 壁纸模式: "color" | "image" | "random" | "gradient"
 mode = "gradient"
-color = "#0f0f1a"
+color = "#0a0a14"
 path = ""
 directory = ""
 gradient_top = "#1a1a3e"
-gradient_bottom = "#0f0f1a"
+gradient_bottom = "#0a0a14"
 change_interval = 0
 scaling = "fill"
-# NVIDIA block-linear: 每个 block 的 GOB 数量 (0=禁用, 16=典型值)
 block_height_gobs = 0
 
 [layout]
-border_width = 3
-gap = 8
-margin = 2
+border_width = 4
+gap = 10
+margin = 3
 
 [keybindings]
 "super+return" = "terminal"
