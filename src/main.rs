@@ -36,7 +36,7 @@ use smithay::{
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
         calloop::EventLoop,
-        drm::control::{connector, Device as _},
+        drm::control::{connector, crtc, Device as _},
         wayland_server::{Display, DisplayHandle,
             protocol::{wl_seat, wl_surface::WlSurface}},
     },
@@ -62,14 +62,25 @@ use wayland_server::{Client, ListeningSocket,
     backend::{ClientData, ClientId, DisconnectReason}, protocol::wl_buffer};
 use tracing::{error, info, warn};
 
+// ── TitanOutput (per-output state) ──────────────────────────
+
+struct TitanOutput {
+    output: Output,
+    size: Size<i32, Logical>,
+    crtc: crtc::Handle,
+    connector: connector::Handle,
+    buf_surf: GbmBufferedSurface<GbmAllocator<DrmDeviceFd>, ()>,
+    pending_flip: bool,
+    position: (i32, i32),
+}
+
 // ── App ──────────────────────────────────────────────────
 
 struct App {
     comp: CompositorState, xdg: XdgShellState, shm: ShmState, seat_state: SeatState<Self>,
     dd: DataDeviceState, seat: Seat<Self>,
-    output: Output,
     osize: Size<i32, Logical>, tops: Vec<ToplevelSurface>, run: bool, frame: u32,
-    dh: DisplayHandle, active: bool, vblank: bool,
+    dh: DisplayHandle, active: bool,
     dirty: bool,
     kbd: smithay::input::keyboard::KeyboardHandle<Self>,
     focus: Option<WlSurface>,
@@ -77,6 +88,7 @@ struct App {
     fullscreen: Option<usize>,
     cfg: Config,
     window_titles: std::collections::HashMap<usize, String>,
+    vblank_crtcs: std::collections::HashSet<crtc::Handle>,
 }
 
 impl BufferHandler for App { fn buffer_destroyed(&mut self, _: &wl_buffer::WlBuffer) {} }
@@ -342,25 +354,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (mut device, dn) = DrmDevice::new(dev_fd.clone(), false)?;
     info!("✅ DrmDevice");
-    let gbm = GbmDevice::new(dev_fd)?;
+    // 保存 fd 副本给多输出 allocator 使用（GbmDevice::new 消费 fd）
+    let dev_fd_copy = dev_fd.clone();
+    let _gbm = GbmDevice::new(dev_fd)?;
     let mut renderer = PixmanRenderer::new()?;
     info!("✅ Pixman");
-    let alloc = GbmAllocator::new(gbm, GbmBufferFlags::SCANOUT);
 
     let res = device.resource_handles()?;
-    let mut conn_h = None; let mut mode = None;
+    let fmts: Vec<Format> = [Fourcc::Argb8888, Fourcc::Xrgb8888].iter()
+        .flat_map(|&c| [Format{code:c,modifier:Modifier::Linear}, Format{code:c,modifier:Modifier::Invalid}]).collect();
+
+    // ── 多显示器：枚举所有已连接的 connector ──
+    let mut titan_outputs: Vec<TitanOutput> = Vec::new();
+    let mut used_crtcs: std::collections::HashSet<crtc::Handle> = std::collections::HashSet::new();
+    let mut output_x_offset: i32 = 0;
+    // wl_output 创建延迟到 dh 可用后
+
+    // 先收集 connector 信息
+    struct ConnectorInfo {
+        connector: connector::Handle,
+        crtc: crtc::Handle,
+        mode: smithay::reexports::drm::control::Mode,
+        name: String,
+    }
+    let mut connector_infos: Vec<ConnectorInfo> = Vec::new();
+
     for &c in res.connectors() {
         for f in [false, true] {
-            if let Ok(i) = device.get_connector(c, f) {
-                if i.state() == connector::State::Connected && !i.modes().is_empty() {
-                    conn_h = Some(c); mode = i.modes().first().copied(); break;
+            if let Ok(info) = device.get_connector(c, f) {
+                if info.state() != connector::State::Connected || info.modes().is_empty() { continue; }
+                let mode = info.modes().first().copied().unwrap();
+                let (mw, mh) = mode.size();
+
+                let mut found_crtc = None;
+                for &enc in info.encoders() {
+                    if let Ok(enc_info) = device.get_encoder(enc) {
+                        for possible_crtc in res.filter_crtcs(enc_info.possible_crtcs()) {
+                            if !used_crtcs.contains(&possible_crtc) {
+                                found_crtc = Some(possible_crtc);
+                                break;
+                            }
+                        }
+                    }
+                    if found_crtc.is_some() { break; }
                 }
+                let Some(crtc_h) = found_crtc else { continue };
+                used_crtcs.insert(crtc_h);
+
+                let conn_name = format!("{:?}", c);
+                info!("🖥️  Connector {} (CRTC {:?}): {}x{}", conn_name, crtc_h, mw, mh);
+
+                connector_infos.push(ConnectorInfo {
+                    connector: c, crtc: crtc_h, mode, name: conn_name,
+                });
+                break;
             }
         }
-        if conn_h.is_some() { break; }
     }
-    let (mw, mh) = mode.ok_or("无模式")?.size();
-    info!("🖥️  {}x{}", mw, mh);
+    if connector_infos.is_empty() { return Err("无可用显示器".into()); }
 
     let mut display: Display<App> = Display::new()?;
     let dh = display.handle();
@@ -368,15 +419,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut seat = seat_state.new_wl_seat(&dh, "seat0");
     let kbd = seat.add_keyboard(XkbConfig::default(), 200, 25)?;
 
-    let output = Output::new("DP-4".to_string(), PhysicalProperties {
-        size: (600, 340).into(), subpixel: Subpixel::Unknown, make: "NVIDIA".into(), model: "5080D".into(),
-    });
-    let output_mode = Mode { size: (mw as i32, mh as i32).into(), refresh: 59000 };
-    output.add_mode(output_mode);
-    output.set_preferred(output_mode);
-    output.change_current_state(Some(output_mode), Some(Transform::Normal), Some(Scale::Integer(1)), Some(Point::from((0, 0))));
     let _output_manager = OutputManagerState::new();
-    output.create_global::<App>(&dh);
+    info!("✅ wl_output");
+
+    // 预克隆 fd 给多输出使用（每个 GbmAllocator 需要独立的 GbmDevice）
+    let fd_clones: Vec<_> = (0..connector_infos.len())
+        .map(|_| dev_fd_copy.clone())
+        .collect();
+
+    // 创建 Wayland Output + DrmSurface + GbmBufferedSurface for each connector
+    for (idx, ci) in connector_infos.iter().enumerate() {
+        let (mw, mh) = ci.mode.size();
+
+        let surface = match device.create_surface(ci.crtc, ci.mode, &[ci.connector]) {
+            Ok(s) => s,
+            Err(e) => { warn!("⚠️  Surface 创建失败 {}: {:?}", ci.name, e); continue; }
+        };
+
+        let gbm_dup = GbmDevice::new(fd_clones[idx].clone())?;
+        let alloc = GbmAllocator::new(gbm_dup, GbmBufferFlags::SCANOUT);
+        let buf_surf = match GbmBufferedSurface::new(surface, alloc,
+            &[Fourcc::Argb8888, Fourcc::Xrgb8888], fmts.clone().into_iter()) {
+            Ok(bs) => bs,
+            Err(e) => { warn!("⚠️  BufferSurface 创建失败 {}: {:?}", ci.name, e); continue; }
+        };
+
+        let wl_output = Output::new(ci.name.clone(), PhysicalProperties {
+            size: (mw as i32 / 10, mh as i32 / 10).into(),
+            subpixel: Subpixel::Unknown, make: "NVIDIA".into(), model: ci.name.clone(),
+        });
+        let output_mode = Mode { size: (mw as i32, mh as i32).into(), refresh: 59000 };
+        wl_output.add_mode(output_mode);
+        wl_output.set_preferred(output_mode);
+        wl_output.change_current_state(
+            Some(output_mode), Some(Transform::Normal),
+            Some(Scale::Integer(1)), Some(Point::from((output_x_offset, 0)))
+        );
+        wl_output.create_global::<App>(&dh);
+
+        titan_outputs.push(TitanOutput {
+            output: wl_output,
+            size: Size::new(mw as i32, mh as i32),
+            crtc: ci.crtc,
+            connector: ci.connector,
+            buf_surf,
+            pending_flip: false,
+            position: (output_x_offset, 0),
+        });
+        output_x_offset += mw as i32;
+    }
+    let primary_size = titan_outputs[0].size;
+    info!("✅ {} 个输出已就绪", titan_outputs.len());
     info!("✅ wl_output");
 
     InputMethodManagerState::new::<App, _>(&dh, |_client| true);
@@ -387,11 +480,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         comp: CompositorState::new::<App>(&dh), xdg: XdgShellState::new::<App>(&dh),
         shm: ShmState::new::<App>(&dh, vec![]), seat_state, seat,
         dd: DataDeviceState::new::<App>(&dh),
-        output,
-        osize: Size::new(mw as i32, mh as i32), tops: vec![], run: true, frame: 0,
-        dh: dh.clone(), active: false, vblank: false, dirty: true,
+        osize: primary_size, tops: vec![], run: true, frame: 0,
+        dh: dh.clone(), active: false,
+        dirty: true,
         kbd, focus: None, pointer_pos: (0.0, 0.0), fullscreen: None, cfg,
         window_titles: std::collections::HashMap::new(),
+        vblank_crtcs: std::collections::HashSet::new(),
     };
     let listener = ListeningSocket::bind("wayland-titan")?;
     std::env::set_var("WAYLAND_DISPLAY", "wayland-titan");
@@ -403,7 +497,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut eloop: EventLoop<App> = EventLoop::try_new()?;
     let mut clients: Vec<Client> = vec![];
     eloop.handle().insert_source(dn, |e,_,state: &mut App| match e {
-        DrmEvent::VBlank(_) => { state.vblank = true; }
+        DrmEvent::VBlank(crtc) => { state.vblank_crtcs.insert(crtc); }
         DrmEvent::Error(e) => error!("DRM:{e:?}"),
     })?;
     if let Some(notifier) = notifier {
@@ -424,12 +518,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         info!("✅ DRM master");
     } else { state.active = true; }
 
-    let crtc = *res.crtcs().first().ok_or("无 CRTC")?;
-    let surface = device.create_surface(crtc, mode.unwrap(), &[conn_h.unwrap()])?;
-    let fmts: Vec<Format> = [Fourcc::Argb8888, Fourcc::Xrgb8888].iter()
-        .flat_map(|&c| [Format{code:c,modifier:Modifier::Linear}, Format{code:c,modifier:Modifier::Invalid}]).collect();
-    let mut buf_surf = GbmBufferedSurface::new(surface, alloc, &[Fourcc::Argb8888, Fourcc::Xrgb8888], fmts.into_iter())?;
-    info!("✅ Surface");
+    // 旧的单一 surface 创建已替换为多输出 titan_outputs
+    // titan_outputs 在上面已经创建好了
 
     {
         struct SessionInputInterface { session: Arc<std::sync::Mutex<LibSeatSession>> }
@@ -454,7 +544,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     let mut dev_active = state.active;
-    let mut pending_flip = false;
     let start = Instant::now();
 
     std::process::Command::new("fcitx5")
@@ -467,8 +556,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     while state.run {
         if state.active != dev_active {
-            if state.active { device.activate(true)?; buf_surf.reset_buffers(); pending_flip = false; }
-            else { device.pause(); pending_flip = false; }
+            if state.active {
+                device.activate(true)?;
+                for out in &mut titan_outputs { out.buf_surf.reset_buffers(); out.pending_flip = false; }
+            } else {
+                device.pause();
+                for out in &mut titan_outputs { out.pending_flip = false; }
+            }
             dev_active = state.active;
         }
         if !dev_active {
@@ -478,95 +572,110 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        if !pending_flip && state.dirty {
-            state.tops.retain(|tl| tl.alive());
-            match buf_surf.next_buffer() {
-                Ok((mut dmabuf, _)) => {
-                    let mut elems: Vec<WaylandSurfaceRenderElement<PixmanRenderer>> = Vec::new();
-                    let bar_h = if state.cfg.bar.enabled { state.cfg.bar.height } else { 0 };
-
-                    if let Some(fi) = state.fullscreen {
-                        if let Some(tl) = state.tops.get(fi) {
-                            for elem in render_elements_from_surface_tree(&mut renderer, tl.wl_surface(), (0, bar_h), 1.0, 1.0, Kind::Unspecified) {
-                                elems.push(elem);
-                            }
-                        }
-                    } else {
-                        for (i, tl) in state.tops.iter().enumerate() {
-                            let (x, y, _w, _h) = layout::slot(i, state.tops.len(), state.osize.w, state.osize.h, bar_h, &state.cfg);
-                            for elem in render_elements_from_surface_tree(&mut renderer, tl.wl_surface(), (x, y), 1.0, 1.0, Kind::Unspecified) {
-                                elems.push(elem);
-                            }
-                        }
-                    }
-
-                    let mut target = renderer.bind(&mut dmabuf)?;
-                    let sp = Size::<i32, Physical>::new(state.osize.w, state.osize.h);
-                    let mut f = renderer.render(&mut target, sp, Transform::Normal)?;
-                    let dmg = Rectangle::from_size(sp);
-
-                    // 壁纸/背景
-                    layout::render_wallpaper(&mut f, &state.cfg, state.osize.w, state.osize.h, state.frame);
-
-                    // 窗口内容
-                    draw_render_elements(&mut f, 1.0, &elems, &[dmg])?;
-
-                    let focus_idx = state.focus_idx();
-
-                    // ★ 窗口装饰在内容之后 — glow/阴影覆盖在窗口边缘 ★
-                    if state.fullscreen.is_none() {
-                        for (i, _) in state.tops.iter().enumerate() {
-                            layout::render_window_decorations(&mut f, &state.cfg, i, state.tops.len(), focus_idx, state.osize.w, state.osize.h, bar_h);
-                        }
-                    }
-
-                    // ★ Headbar 渲染在窗口之后 — 确保永远在最顶层 ★
-                    let time_secs = start.elapsed().as_secs();
-                    // 窗口标题（从 App state 获取）
-                    let window_title = &state.window_titles.get(&focus_idx.unwrap_or(0))
-                        .cloned().unwrap_or_default();
-                    layout::render_headbar(&mut f, &state.cfg, state.osize.w, state.osize.h, state.tops.len(), focus_idx, time_secs, window_title);
-
-                    // 光标
-                    let cx = state.pointer_pos.0 as i32;
-                    let cy = state.pointer_pos.1 as i32;
-                    let cc = Color32F::new(1.0, 1.0, 1.0, 0.9);
-                    f.clear(cc, &[Rectangle::new(Point::new(cx, cy), Size::new(2, 18))])?;
-                    f.clear(cc, &[Rectangle::new(Point::new(cx + 1, cy + 2), Size::new(1, 1))])?;
-                    f.clear(cc, &[Rectangle::new(Point::new(cx + 2, cy + 4), Size::new(1, 1))])?;
-
-                    let _ = f.finish()?;
-                    drop(target);
-
-                    // ★ Block-linear 转换：Pixman 渲染线性像素 → NVIDIA scanout 期望 block-linear ★
-                    let fb_size = (state.osize.w * state.osize.h * 4) as usize;
-                    let bh_gobs = state.cfg.wallpaper.block_height_gobs;
-                    if bh_gobs > 0 {
-                        use smithay::backend::allocator::dmabuf::{DmabufMappingMode, DmabufSyncFlags};
-                        if let Ok(mapping) = dmabuf.map_plane(0, DmabufMappingMode::READ | DmabufMappingMode::WRITE) {
-                            let ptr = mapping.ptr();
-                            if !ptr.is_null() {
-                                let slice = unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, fb_size) };
-                                block_linear::convert_in_place(slice, state.osize.w as usize, state.osize.h as usize, bh_gobs);
-                            }
-                            let _ = dmabuf.sync_plane(0, DmabufSyncFlags::WRITE);
-                            drop(mapping);
-                        }
-                    }
-
-                    buf_surf.queue_buffer(None, None, ())?;
-                    pending_flip = true;
-                    state.dirty = false;
-                    state.frame += 1;
-                    if state.frame == 1 { info!("✅ 第一帧渲染！"); }
-                    if state.frame % 600 == 0 { info!("📊 {} 帧", state.frame); }
-                }
-                Err(e) => { if state.frame == 0 { error!("❌ {e:?}"); } }
+        // 处理 VBlank 事件
+        for out in &mut titan_outputs {
+            if state.vblank_crtcs.remove(&out.crtc) {
+                if let Err(e) = out.buf_surf.frame_submitted() { warn!("VBlank err: {:?}", e); }
+                out.pending_flip = false;
             }
         }
 
+        // 渲染所有输出
+        if state.dirty {
+            state.tops.retain(|tl| tl.alive());
+            let bar_h = if state.cfg.bar.enabled { state.cfg.bar.height } else { 0 };
+            let focus_idx = state.focus_idx();
+            let time_secs = start.elapsed().as_secs();
+            let window_title = state.window_titles.get(&focus_idx.unwrap_or(0))
+                .cloned().unwrap_or_default();
+            let primary_crtc = titan_outputs.first().map(|o| o.crtc);
+
+            for oi in 0..titan_outputs.len() {
+                let out = &mut titan_outputs[oi];
+                if out.pending_flip { continue; }
+
+                match out.buf_surf.next_buffer() {
+                    Ok((mut dmabuf, _)) => {
+                        let mut elems: Vec<WaylandSurfaceRenderElement<PixmanRenderer>> = Vec::new();
+                        let ow = out.size.w;
+                        let oh = out.size.h;
+
+                        // 窗口内容（只在主输出上渲染窗口）
+                        if Some(out.crtc) == primary_crtc {
+                            if let Some(fi) = state.fullscreen {
+                                if let Some(tl) = state.tops.get(fi) {
+                                    for elem in render_elements_from_surface_tree(&mut renderer, tl.wl_surface(), (0, bar_h), 1.0, 1.0, Kind::Unspecified) {
+                                        elems.push(elem);
+                                    }
+                                }
+                            } else {
+                                for (i, tl) in state.tops.iter().enumerate() {
+                                    let (x, y, _w, _h) = layout::slot(i, state.tops.len(), ow, oh, bar_h, &state.cfg);
+                                    for elem in render_elements_from_surface_tree(&mut renderer, tl.wl_surface(), (x, y), 1.0, 1.0, Kind::Unspecified) {
+                                        elems.push(elem);
+                                    }
+                                }
+                            }
+                        }
+
+                        let mut target = renderer.bind(&mut dmabuf)?;
+                        let sp = Size::<i32, Physical>::new(ow, oh);
+                        let mut f = renderer.render(&mut target, sp, Transform::Normal)?;
+                        let dmg = Rectangle::from_size(sp);
+
+                        layout::render_wallpaper(&mut f, &state.cfg, ow, oh, state.frame);
+                        draw_render_elements(&mut f, 1.0, &elems, &[dmg])?;
+
+                        if Some(out.crtc) == primary_crtc && state.fullscreen.is_none() {
+                            for (i, _) in state.tops.iter().enumerate() {
+                                layout::render_window_decorations(&mut f, &state.cfg, i, state.tops.len(), focus_idx, ow, oh, bar_h);
+                            }
+                        }
+
+                        layout::render_headbar(&mut f, &state.cfg, ow, oh, state.tops.len(), focus_idx, time_secs, &window_title);
+
+                        // 光标
+                        if Some(out.crtc) == primary_crtc {
+                            let cx = state.pointer_pos.0 as i32;
+                            let cy = state.pointer_pos.1 as i32;
+                            let cc = Color32F::new(1.0, 1.0, 1.0, 0.9);
+                            let _ = f.clear(cc, &[Rectangle::new(Point::new(cx, cy), Size::new(2, 18))]);
+                            let _ = f.clear(cc, &[Rectangle::new(Point::new(cx + 1, cy + 2), Size::new(1, 1))]);
+                            let _ = f.clear(cc, &[Rectangle::new(Point::new(cx + 2, cy + 4), Size::new(1, 1))]);
+                        }
+
+                        let _ = f.finish()?;
+                        drop(target);
+
+                        // Block-linear 转换
+                        let fb_size = (ow * oh * 4) as usize;
+                        let bh_gobs = state.cfg.wallpaper.block_height_gobs;
+                        if bh_gobs > 0 {
+                            use smithay::backend::allocator::dmabuf::{DmabufMappingMode, DmabufSyncFlags};
+                            if let Ok(mapping) = dmabuf.map_plane(0, DmabufMappingMode::READ | DmabufMappingMode::WRITE) {
+                                let ptr = mapping.ptr();
+                                if !ptr.is_null() {
+                                    let slice = unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, fb_size) };
+                                    block_linear::convert_in_place(slice, ow as usize, oh as usize, bh_gobs);
+                                }
+                                let _ = dmabuf.sync_plane(0, DmabufSyncFlags::WRITE);
+                                drop(mapping);
+                            }
+                        }
+
+                        out.buf_surf.queue_buffer(None, None, ())?;
+                        out.pending_flip = true;
+                    }
+                    Err(e) => { if state.frame == 0 { error!("❌ {e:?}"); } }
+                }
+            }
+            state.dirty = false;
+            state.frame += 1;
+            if state.frame == 1 { info!("✅ 第一帧渲染！"); }
+            if state.frame % 600 == 0 { info!("📊 {} 帧", state.frame); }
+        }
+
         eloop.dispatch(Some(Duration::from_millis(16)), &mut state)?;
-        if state.vblank { state.vblank = false; buf_surf.frame_submitted()?; pending_flip = false; }
         if state.frame % 60 == 0 && state.cfg.bar.enabled { state.dirty = true; }
 
         if let Ok(Some(stream)) = listener.accept() {
