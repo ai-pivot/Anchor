@@ -62,7 +62,7 @@ struct App {
     output: Output,
     osize: Size<i32, Logical>, tops: Vec<ToplevelSurface>, run: bool, frame: u32,
     dh: DisplayHandle, active: bool, vblank: bool,
-    /// libinput keyboard state — xkb context + keymap for keysym translation
+    dirty: bool,
     kbd: smithay::input::keyboard::KeyboardHandle<Self>,
 }
 
@@ -92,7 +92,7 @@ impl ServerDndGrabHandler for App { fn send(&mut self, _: String, _: OwnedFd, _:
 impl CompositorHandler for App {
     fn compositor_state(&mut self) -> &mut CompositorState { &mut self.comp }
     fn client_compositor_state<'a>(&self, c: &'a Client) -> &'a CompositorClientState { &c.get_data::<ClientState>().unwrap().comp }
-    fn commit(&mut self, s: &WlSurface) { on_commit_buffer_handler::<Self>(s); }
+    fn commit(&mut self, s: &WlSurface) { self.dirty = true; on_commit_buffer_handler::<Self>(s); }
 }
 impl ShmHandler for App { fn shm_state(&self) -> &ShmState { &self.shm } }
 impl SeatHandler for App {
@@ -268,7 +268,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         dd: DataDeviceState::new::<App>(&dh),
         output,
         osize: Size::new(mw as i32, mh as i32), tops: vec![], run: true, frame: 0,
-        dh: dh.clone(), active: false, vblank: false,
+        dh: dh.clone(), active: false, vblank: false, dirty: true,
         kbd,
     };
     let listener = ListeningSocket::bind("wayland-titan")?;
@@ -373,8 +373,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        // 仅在没有翻页在途时渲染并提交新的一帧
-        if !pending_flip {
+        // 渲染并提交新的一帧（仅在 VBlank 之后 pending_flip=false 且有 dirty 时）
+        if !pending_flip && state.dirty {
             match buf_surf.next_buffer() {
                 Ok((mut dmabuf, _)) => {
                     let elems: Vec<WaylandSurfaceRenderElement<PixmanRenderer>> = state.tops.iter()
@@ -408,6 +408,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     drop(target);
                     buf_surf.queue_buffer(None, None, ())?;
                     pending_flip = true;
+                    state.dirty = false;
                     state.frame += 1;
                     if state.frame == 1 { info!("✅ 第一帧渲染！"); }
                     if state.frame % 600 == 0 { info!("📊 {} 帧", state.frame); }
@@ -418,7 +419,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         eloop.dispatch(Some(Duration::from_millis(16)), &mut state)?;
 
-        // VBlank 到达：上一帧已成功扫描输出，标记完成并允许提交下一帧
+        // VBlank 到达：上一帧已成功扫描输出，允许提交下一帧
         if state.vblank {
             state.vblank = false;
             buf_surf.frame_submitted()?;
