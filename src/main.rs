@@ -14,6 +14,8 @@ use smithay::{
         allocator::{Format, Fourcc, Modifier,
             gbm::{GbmAllocator, GbmBufferFlags, GbmDevice}},
         drm::{DrmDevice, DrmDeviceFd, DrmEvent, GbmBufferedSurface},
+        input::{InputEvent, KeyState},
+        libinput::LibinputInputBackend,
         renderer::{Bind, Frame, Renderer,
             pixman::PixmanRenderer,
             element::{surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement}, Kind},
@@ -21,14 +23,18 @@ use smithay::{
         session::{Session, Event as SessionEvent, libseat::{LibSeatSession, LibSeatSessionNotifier}},
     },
     delegate_compositor, delegate_data_device, delegate_seat, delegate_shm, delegate_xdg_shell,
-    input::{pointer::CursorImageStatus, Seat, SeatHandler, SeatState},
+    input::{
+        keyboard::{FilterResult, Keysym, ModifiersState, XkbConfig},
+        pointer::CursorImageStatus, Seat, SeatHandler, SeatState,
+    },
     reexports::{
         calloop::EventLoop,
-        drm::control::{connector, Device as _, Mode},
+        drm::control::{connector, Device as _},
         wayland_server::{Display, DisplayHandle,
             protocol::{wl_seat, wl_surface::WlSurface}},
     },
-    utils::{DeviceFd, Logical, Physical, Point, Rectangle, Size, Transform},
+    utils::{DeviceFd, Logical, Physical, Point, Rectangle, SERIAL_COUNTER,
+        Size, Transform},
     wayland::{
         buffer::BufferHandler,
         compositor::{with_surface_tree_downward, CompositorClientState, CompositorHandler,
@@ -53,6 +59,8 @@ struct App {
     dd: DataDeviceState, seat: Seat<Self>,
     osize: Size<i32, Logical>, tops: Vec<ToplevelSurface>, run: bool, frame: u32,
     dh: DisplayHandle, active: bool, vblank: bool,
+    /// libinput keyboard state — xkb context + keymap for keysym translation
+    kbd: smithay::input::keyboard::KeyboardHandle<Self>,
 }
 
 impl BufferHandler for App { fn buffer_destroyed(&mut self, _: &wl_buffer::WlBuffer) {} }
@@ -61,6 +69,11 @@ impl XdgShellHandler for App {
     fn new_toplevel(&mut self, s: ToplevelSurface) {
         s.with_pending_state(|st| st.states.set(xdg_toplevel::State::Activated));
         s.send_configure();
+        // 自动聚焦新窗口
+        let kbd = self.kbd.clone();
+        let surface = s.wl_surface().clone();
+        let serial = SERIAL_COUNTER.next_serial();
+        kbd.set_focus(self, Some(surface), serial);
         info!("➕ 窗口");
         self.tops.push(s);
     }
@@ -83,6 +96,55 @@ impl SeatHandler for App {
     fn seat_state(&mut self) -> &mut SeatState<Self> { &mut self.seat_state }
     fn focus_changed(&mut self, _: &Seat<Self>, _: Option<&WlSurface>) {}
     fn cursor_image(&mut self, _: &Seat<Self>, _: CursorImageStatus) {}
+}
+
+impl App {
+    /// 终端模拟器命令
+    const TERMINAL: &'static str = "foot";
+
+    /// 处理 libinput 输入事件
+    fn handle_input_event(&mut self, event: InputEvent<LibinputInputBackend>) {
+        use smithay::backend::input::{KeyboardKeyEvent as _, Event as _};
+        match event {
+            InputEvent::Keyboard { event } => {
+                let keycode = event.key_code();
+                let state = event.state();
+                let time = (event.time() / 1000) as u32;
+                let serial = SERIAL_COUNTER.next_serial();
+
+                let kbd = self.kbd.clone();
+                let _result: Option<()> = smithay::input::keyboard::KeyboardHandle::<Self>::input(
+                    &kbd, self, keycode, state, serial, time,
+                    |data: &mut App, mods: &ModifiersState, keysym: smithay::input::keyboard::KeysymHandle<'_>| {
+                        // 仅在按下时处理快捷键
+                        if state == KeyState::Pressed {
+                            let super_pressed = mods.logo;
+                            match keysym.modified_sym() {
+                                Keysym::Return if super_pressed => {
+                                    info!("⌨️  启动终端: {}", Self::TERMINAL);
+                                    if let Err(e) = std::process::Command::new(Self::TERMINAL)
+                                        .env("WAYLAND_DISPLAY", "wayland-titan")
+                                        .spawn()
+                                    {
+                                        error!("❌ 启动终端失败: {}", e);
+                                    }
+                                    return FilterResult::Intercept(());
+                                }
+                                Keysym::Escape if super_pressed && mods.shift => {
+                                    info!("⌨️  退出 (Win+Shift+Esc)");
+                                    data.run = false;
+                                    return FilterResult::Intercept(());
+                                }
+                                _ => {}
+                            }
+                        }
+                        FilterResult::Forward
+                    },
+                );
+            }
+            _ => {}
+        }
+    }
 }
 
 #[derive(Default)] struct ClientState { comp: CompositorClientState }
@@ -170,12 +232,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Wayland
     let mut display: Display<App> = Display::new()?;
     let dh = display.handle();
+    // Seat + Keyboard
+    let mut seat_state = SeatState::new();
+    let mut seat = seat_state.new_wl_seat(&dh, "seat0");
+    let kbd = seat.add_keyboard(XkbConfig::default(), 200, 25)?;
+
     let mut state = App {
         comp: CompositorState::new::<App>(&dh), xdg: XdgShellState::new::<App>(&dh),
-        shm: ShmState::new::<App>(&dh, vec![]), seat_state: SeatState::new(),
-        seat: SeatState::new().new_wl_seat(&dh, "seat0"), dd: DataDeviceState::new::<App>(&dh),
+        shm: ShmState::new::<App>(&dh, vec![]), seat_state, seat,
+        dd: DataDeviceState::new::<App>(&dh),
         osize: Size::new(mw as i32, mh as i32), tops: vec![], run: true, frame: 0,
         dh: dh.clone(), active: false, vblank: false,
+        kbd,
     };
     let listener = ListeningSocket::bind("wayland-titan")?;
     std::env::set_var("WAYLAND_DISPLAY", "wayland-titan");
@@ -189,8 +257,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         DrmEvent::VBlank(_) => { state.vblank = true; }
         DrmEvent::Error(e) => error!("DRM:{e:?}"),
     })?;
-    // libseat 会话事件：激活/暂停（VT 切换、GDM 交接）。仅在此标记状态，
-    // 由主循环据此获取/释放 DRM master。
+    // libseat 会话事件：激活/暂停（VT 切换、GDM 交接）。
     if let Some(notifier) = notifier {
         eloop.handle().insert_source(notifier, |event, _, state: &mut App| match event {
             SessionEvent::ActivateSession => { info!("▶️  会话激活"); state.active = true; }
@@ -223,6 +290,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .flat_map(|&c| [Format{code:c,modifier:Modifier::Linear}, Format{code:c,modifier:Modifier::Invalid}]).collect();
     let mut buf_surf = GbmBufferedSurface::new(surface, alloc, &[Fourcc::Argb8888, Fourcc::Xrgb8888], fmts.into_iter())?;
     info!("✅ Surface");
+
+    // Libinput: 通过 udev 创建 libinput 上下文，注册到事件循环以接收键盘事件。
+    {
+        struct DirectInputInterface;
+        impl libinput_crate::LibinputInterface for DirectInputInterface {
+            fn open_restricted(&mut self, path: &std::path::Path, flags: i32) -> Result<std::os::unix::io::OwnedFd, i32> {
+                use std::os::unix::fs::OpenOptionsExt;
+                std::fs::OpenOptions::new()
+                    .read(true).write(true)
+                    .custom_flags(flags)
+                    .open(path)
+                    .map_err(|e| e.raw_os_error().unwrap_or(1))
+                    .map(|f| f.into())
+            }
+            fn close_restricted(&mut self, _fd: std::os::unix::io::OwnedFd) {}
+        }
+        let mut libinput_ctx = libinput_crate::Libinput::new_with_udev(DirectInputInterface);
+        if let Err(e) = libinput_ctx.udev_assign_seat("seat0") {
+            warn!("⚠️  libinput assign_seat 失败: {:?}", e);
+        } else {
+            info!("✅ libinput (seat0)");
+            let backend = LibinputInputBackend::new(libinput_ctx);
+            eloop.handle().insert_source(backend, |event, _, state: &mut App| {
+                state.handle_input_event(event);
+            })?;
+        }
+    }
 
     let mut dev_active = state.active;
     // 是否有一次翻页(page flip)正在等待 VBlank。GbmBufferedSurface 要求：queue_buffer

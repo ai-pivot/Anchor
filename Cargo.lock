@@ -647,6 +647,7 @@ dependencies = [
  "bitflags 2.11.1",
  "input-sys",
  "libc",
+ "log",
  "udev",
 ]
 
@@ -1773,6 +1774,7 @@ dependencies = [
 name = "titan"
 version = "0.5.0"
 dependencies = [
+ "input",
  "libc",
  "smithay",
  "tracing",
