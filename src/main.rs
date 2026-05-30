@@ -135,8 +135,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (mut session, notifier) = LibSeatSession::new()?;
         use smithay::reexports::rustix::fs::OFlags;
         let fd = session.open(&gpu_path, OFlags::RDWR)?;
-        let ret = unsafe { libc::ioctl(fd.as_raw_fd(), 0x4000641eu64 as _) };
-        if ret == 0 { info!("✅ drmSetMaster"); } else { warn!("⚠️  {}", std::io::Error::last_os_error()); }
+        info!("✅ DRM 设备已打开 (via libseat)");
         (DrmDeviceFd::new(DeviceFd::from(fd)), Some(session))
     };
 
