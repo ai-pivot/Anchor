@@ -18,7 +18,7 @@ use smithay::{
             pixman::PixmanRenderer,
             element::{surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement}, Kind},
             utils::{draw_render_elements, on_commit_buffer_handler}, Color32F},
-        session::{Session, libseat::{LibSeatSession}},
+        session::{Session, Event as SessionEvent, libseat::{LibSeatSession, LibSeatSessionNotifier}},
     },
     delegate_compositor, delegate_data_device, delegate_seat, delegate_shm, delegate_xdg_shell,
     input::{pointer::CursorImageStatus, Seat, SeatHandler, SeatState},
@@ -52,7 +52,7 @@ struct App {
     comp: CompositorState, xdg: XdgShellState, shm: ShmState, seat_state: SeatState<Self>,
     dd: DataDeviceState, seat: Seat<Self>,
     osize: Size<i32, Logical>, tops: Vec<ToplevelSurface>, run: bool, frame: u32,
-    dh: DisplayHandle,
+    dh: DisplayHandle, active: bool, vblank: bool,
 }
 
 impl BufferHandler for App { fn buffer_destroyed(&mut self, _: &wl_buffer::WlBuffer) {} }
@@ -124,22 +124,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("🎮 {}", gpu_path.display());
 
     // Session
-    let (dev_fd, _session): (DrmDeviceFd, Option<LibSeatSession>) = if direct {
+    let (dev_fd, session, notifier): (DrmDeviceFd, Option<LibSeatSession>, Option<LibSeatSessionNotifier>) = if direct {
         let fd = Arc::new(std::fs::OpenOptions::new().read(true).write(true).open(&gpu_path)?);
         let ret = unsafe { libc::ioctl(fd.as_raw_fd(), 0x4000641eu64 as _) };
         if ret == 0 { info!("✅ DRM master"); } else { warn!("⚠️  {}", std::io::Error::last_os_error()); }
         let dup = unsafe { libc::dup(fd.as_raw_fd()) };
         use std::os::unix::io::FromRawFd;
-        (DrmDeviceFd::new(DeviceFd::from(OwnedFd::from(unsafe { std::fs::File::from_raw_fd(dup) }))), None)
+        (DrmDeviceFd::new(DeviceFd::from(OwnedFd::from(unsafe { std::fs::File::from_raw_fd(dup) }))), None, None)
     } else {
         let (mut session, notifier) = LibSeatSession::new()?;
         use smithay::reexports::rustix::fs::OFlags;
         let fd = session.open(&gpu_path, OFlags::RDWR)?;
         info!("✅ DRM 设备已打开 (via libseat)");
         // 不手动调 drmSetMaster！logind TakeDevice 给的 fd 已隐含 DRM master 权限。
-        // 额外调用 drmSetMaster 在 NVIDIA 上会触发 "Failed to grab modeset ownership"
-        // 并可能破坏 fd 的 master 状态。DrmDeviceFd::new 内部也会调，让它自己处理。
-        (DrmDeviceFd::new(DeviceFd::from(fd)), Some(session))
+        // 关键：notifier 必须一直存活并插入事件循环。它持有 libseat 会话内部状态的唯一
+        // 强引用 (Rc)，一旦丢弃就会关闭 libseat 连接、释放 DRM 设备并丢失 master，导致
+        // 后续 mode-setting 全部 EPERM —— 这正是 GDM 启动失败的根因。
+        (DrmDeviceFd::new(DeviceFd::from(fd)), Some(session), Some(notifier))
     };
 
     // DrmDevice + GBM + Pixman
@@ -174,11 +175,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         shm: ShmState::new::<App>(&dh, vec![]), seat_state: SeatState::new(),
         seat: SeatState::new().new_wl_seat(&dh, "seat0"), dd: DataDeviceState::new::<App>(&dh),
         osize: Size::new(mw as i32, mh as i32), tops: vec![], run: true, frame: 0,
-        dh: dh.clone(),
+        dh: dh.clone(), active: false, vblank: false,
     };
     let listener = ListeningSocket::bind("wayland-titan")?;
     std::env::set_var("WAYLAND_DISPLAY", "wayland-titan");
     info!("✅ wayland-titan");
+
+    // Event loop（必须在创建 surface 之前建好：mode-setting 需要先通过 libseat
+    // 激活会话拿到 DRM master，否则会 EPERM）
+    let mut eloop: EventLoop<App> = EventLoop::try_new()?;
+    let mut clients: Vec<Client> = vec![];
+    eloop.handle().insert_source(dn, |e,_,state: &mut App| match e {
+        DrmEvent::VBlank(_) => { state.vblank = true; }
+        DrmEvent::Error(e) => error!("DRM:{e:?}"),
+    })?;
+    // libseat 会话事件：激活/暂停（VT 切换、GDM 交接）。仅在此标记状态，
+    // 由主循环据此获取/释放 DRM master。
+    if let Some(notifier) = notifier {
+        eloop.handle().insert_source(notifier, |event, _, state: &mut App| match event {
+            SessionEvent::ActivateSession => { info!("▶️  会话激活"); state.active = true; }
+            SessionEvent::PauseSession => { info!("⏸️  会话暂停"); state.active = false; }
+        })?;
+    }
+
+    // 等待会话激活并取得 DRM master。GDM 交接时上一个合成器(greeter)可能还没
+    // 完全释放 master，需要泵事件循环等待 libseat 的激活事件。
+    if let Some(session) = session.as_ref() {
+        state.active = session.is_active();
+        let t0 = Instant::now();
+        while !state.active && t0.elapsed() < Duration::from_secs(10) {
+            eloop.dispatch(Some(Duration::from_millis(100)), &mut state)?;
+            state.active = session.is_active();
+        }
+        if !state.active {
+            return Err("libseat 会话 10s 内未激活，无法获取 DRM master".into());
+        }
+        device.activate(true)?;
+        info!("✅ DRM master (libseat 会话已激活)");
+    } else {
+        state.active = true;
+    }
 
     // DRM surface
     let crtc = *res.crtcs().first().ok_or("无 CRTC")?;
@@ -188,57 +224,80 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut buf_surf = GbmBufferedSurface::new(surface, alloc, &[Fourcc::Argb8888, Fourcc::Xrgb8888], fmts.into_iter())?;
     info!("✅ Surface");
 
-    // Event loop
-    let mut eloop: EventLoop<App> = EventLoop::try_new()?;
-    let mut clients: Vec<Client> = vec![];
-    eloop.handle().insert_source(dn, |e,_,_| match e {
-        DrmEvent::VBlank(_) => {}, DrmEvent::Error(e) => error!("DRM:{e:?}")
-    })?;
-
+    let mut dev_active = state.active;
+    // 是否有一次翻页(page flip)正在等待 VBlank。GbmBufferedSurface 要求：queue_buffer
+    // 之后必须等到 DRM VBlank 事件、调用 frame_submitted() 后才能再提交下一帧，
+    // 否则内核会以 EBUSY 拒绝提交。
+    let mut pending_flip = false;
     let start = Instant::now();
     info!("🔄 渲染中...");
 
     while state.run {
-        match buf_surf.next_buffer() {
-            Ok((mut dmabuf, _)) => {
-                let elems: Vec<WaylandSurfaceRenderElement<PixmanRenderer>> = state.tops.iter()
-                    .flat_map(|tl| render_elements_from_surface_tree(
-                        &mut renderer, tl.wl_surface(), (0,0), 1.0, 1.0, Kind::Unspecified)).collect();
+        // 处理会话激活/暂停（VT 切换、GDM 交接）
+        if state.active != dev_active {
+            if state.active { device.activate(true)?; buf_surf.reset_buffers(); pending_flip = false; info!("▶️  恢复渲染"); }
+            else { device.pause(); pending_flip = false; info!("⏸️  暂停渲染"); }
+            dev_active = state.active;
+        }
+        if !dev_active {
+            eloop.dispatch(Some(Duration::from_millis(100)), &mut state)?;
+            display.dispatch_clients(&mut state)?;
+            display.flush_clients()?;
+            continue;
+        }
 
-                let mut target = renderer.bind(&mut dmabuf)?;
-                let sp = Size::<i32, Physical>::new(state.osize.w, state.osize.h);
-                let mut f = renderer.render(&mut target, sp, Transform::Normal)?;
-                let dmg = Rectangle::from_size(sp);
+        // 仅在没有翻页在途时渲染并提交新的一帧
+        if !pending_flip {
+            match buf_surf.next_buffer() {
+                Ok((mut dmabuf, _)) => {
+                    let elems: Vec<WaylandSurfaceRenderElement<PixmanRenderer>> = state.tops.iter()
+                        .flat_map(|tl| render_elements_from_surface_tree(
+                            &mut renderer, tl.wl_surface(), (0,0), 1.0, 1.0, Kind::Unspecified)).collect();
 
-                // 亮蓝色背景 (#2a1a4e)
-                f.clear(Color32F::new(0.16, 0.10, 0.31, 1.0), &[dmg])?;
+                    let mut target = renderer.bind(&mut dmabuf)?;
+                    let sp = Size::<i32, Physical>::new(state.osize.w, state.osize.h);
+                    let mut f = renderer.render(&mut target, sp, Transform::Normal)?;
+                    let dmg = Rectangle::from_size(sp);
 
-                // 屏幕中央画一个亮色 "TITAN" 标记 — 两个矩形
-                let cx = state.osize.w / 2; let cy = state.osize.h / 2;
-                // 白色横条
-                let bar = Rectangle::<i32, Physical>::new(Point::new(cx - 120, cy - 30), Size::new(240, 20));
-                f.clear(Color32F::new(1.0, 1.0, 1.0, 1.0), &[bar])?;
-                // 白色竖条
-                let bar2 = Rectangle::<i32, Physical>::new(Point::new(cx - 8, cy - 30), Size::new(16, 80));
-                f.clear(Color32F::new(1.0, 1.0, 1.0, 1.0), &[bar2])?;
+                    // 亮蓝色背景 (#2a1a4e)
+                    f.clear(Color32F::new(0.16, 0.10, 0.31, 1.0), &[dmg])?;
 
-                // 帧计数器 — 在角落画一个随帧数变化的小方块
-                let fc = state.frame % 60;
-                let ind = Rectangle::<i32, Physical>::new(Point::new(10 + (fc as i32) * 4, 10), Size::new(3, 3));
-                f.clear(Color32F::new(0.0, 1.0, 0.0, 1.0), &[ind])?;
+                    // 屏幕中央画一个亮色 "TITAN" 标记 — 两个矩形
+                    let cx = state.osize.w / 2; let cy = state.osize.h / 2;
+                    // 白色横条
+                    let bar = Rectangle::<i32, Physical>::new(Point::new(cx - 120, cy - 30), Size::new(240, 20));
+                    f.clear(Color32F::new(1.0, 1.0, 1.0, 1.0), &[bar])?;
+                    // 白色竖条
+                    let bar2 = Rectangle::<i32, Physical>::new(Point::new(cx - 8, cy - 30), Size::new(16, 80));
+                    f.clear(Color32F::new(1.0, 1.0, 1.0, 1.0), &[bar2])?;
 
-                draw_render_elements(&mut f, 1.0, &elems, &[dmg])?;
-                f.finish()?;
-                buf_surf.queue_buffer(None, None, ())?;
-                buf_surf.frame_submitted()?;
-                state.frame += 1;
-                if state.frame == 1 { info!("✅ 第一帧渲染！"); }
-                if state.frame % 600 == 0 { info!("📊 {} 帧", state.frame); }
+                    // 帧计数器 — 在角落画一个随帧数变化的小方块
+                    let fc = state.frame % 60;
+                    let ind = Rectangle::<i32, Physical>::new(Point::new(10 + (fc as i32) * 4, 10), Size::new(3, 3));
+                    f.clear(Color32F::new(0.0, 1.0, 0.0, 1.0), &[ind])?;
+
+                    draw_render_elements(&mut f, 1.0, &elems, &[dmg])?;
+                    let _ = f.finish()?;
+                    drop(target);
+                    buf_surf.queue_buffer(None, None, ())?;
+                    pending_flip = true;
+                    state.frame += 1;
+                    if state.frame == 1 { info!("✅ 第一帧渲染！"); }
+                    if state.frame % 600 == 0 { info!("📊 {} 帧", state.frame); }
+                }
+                Err(e) => { if state.frame == 0 { error!("❌ {e:?}"); } }
             }
-            Err(e) => { if state.frame == 0 { error!("❌ {e:?}"); } }
         }
 
         eloop.dispatch(Some(Duration::from_millis(16)), &mut state)?;
+
+        // VBlank 到达：上一帧已成功扫描输出，标记完成并允许提交下一帧
+        if state.vblank {
+            state.vblank = false;
+            buf_surf.frame_submitted()?;
+            pending_flip = false;
+        }
+
         if let Ok(Some(stream)) = listener.accept() {
             clients.push(display.handle().insert_client(stream, Arc::new(ClientState::default()))?);
         }
