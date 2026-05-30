@@ -76,6 +76,7 @@ struct App {
     pointer_pos: (f64, f64),
     fullscreen: Option<usize>,
     cfg: Config,
+    window_titles: std::collections::HashMap<usize, String>,
 }
 
 impl BufferHandler for App { fn buffer_destroyed(&mut self, _: &wl_buffer::WlBuffer) {} }
@@ -390,6 +391,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         osize: Size::new(mw as i32, mh as i32), tops: vec![], run: true, frame: 0,
         dh: dh.clone(), active: false, vblank: false, dirty: true,
         kbd, focus: None, pointer_pos: (0.0, 0.0), fullscreen: None, cfg,
+        window_titles: std::collections::HashMap::new(),
     };
     let listener = ListeningSocket::bind("wayland-titan")?;
     std::env::set_var("WAYLAND_DISPLAY", "wayland-titan");
@@ -520,8 +522,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     // ★ Headbar 渲染在窗口之后 — 确保永远在最顶层 ★
                     let time_secs = start.elapsed().as_secs();
-                    // TODO: 获取窗口标题（需要 XDG shell 标题 API）
-                    let window_title = "";
+                    // 窗口标题（从 App state 获取）
+                    let window_title = &state.window_titles.get(&focus_idx.unwrap_or(0))
+                        .cloned().unwrap_or_default();
                     layout::render_headbar(&mut f, &state.cfg, state.osize.w, state.osize.h, state.tops.len(), focus_idx, time_secs, window_title);
 
                     // 光标
