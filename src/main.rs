@@ -186,7 +186,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("🎮 {}", gpu_path.display());
 
     // Session
-    let (dev_fd, session, notifier): (DrmDeviceFd, Option<LibSeatSession>, Option<LibSeatSessionNotifier>) = if direct {
+    // session 需要 Arc<Mutex> 共享给 libinput 的 open_restricted 回调，
+    // 因为 /dev/input/* 只能通过 libseat/logind TakeDevice 获取权限。
+    let (dev_fd, session, notifier): (DrmDeviceFd, Option<Arc<std::sync::Mutex<LibSeatSession>>>, Option<LibSeatSessionNotifier>) = if direct {
         let fd = Arc::new(std::fs::OpenOptions::new().read(true).write(true).open(&gpu_path)?);
         let ret = unsafe { libc::ioctl(fd.as_raw_fd(), 0x4000641eu64 as _) };
         if ret == 0 { info!("✅ DRM master"); } else { warn!("⚠️  {}", std::io::Error::last_os_error()); }
@@ -198,11 +200,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         use smithay::reexports::rustix::fs::OFlags;
         let fd = session.open(&gpu_path, OFlags::RDWR)?;
         info!("✅ DRM 设备已打开 (via libseat)");
-        // 不手动调 drmSetMaster！logind TakeDevice 给的 fd 已隐含 DRM master 权限。
-        // 关键：notifier 必须一直存活并插入事件循环。它持有 libseat 会话内部状态的唯一
-        // 强引用 (Rc)，一旦丢弃就会关闭 libseat 连接、释放 DRM 设备并丢失 master，导致
-        // 后续 mode-setting 全部 EPERM —— 这正是 GDM 启动失败的根因。
-        (DrmDeviceFd::new(DeviceFd::from(fd)), Some(session), Some(notifier))
+        (DrmDeviceFd::new(DeviceFd::from(fd)), Some(Arc::new(std::sync::Mutex::new(session))), Some(notifier))
     };
 
     // DrmDevice + GBM + Pixman
@@ -268,11 +266,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 等待会话激活并取得 DRM master。GDM 交接时上一个合成器(greeter)可能还没
     // 完全释放 master，需要泵事件循环等待 libseat 的激活事件。
     if let Some(session) = session.as_ref() {
-        state.active = session.is_active();
+        state.active = session.lock().unwrap().is_active();
         let t0 = Instant::now();
         while !state.active && t0.elapsed() < Duration::from_secs(10) {
             eloop.dispatch(Some(Duration::from_millis(100)), &mut state)?;
-            state.active = session.is_active();
+            state.active = session.lock().unwrap().is_active();
         }
         if !state.active {
             return Err("libseat 会话 10s 内未激活，无法获取 DRM master".into());
@@ -292,29 +290,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("✅ Surface");
 
     // Libinput: 通过 udev 创建 libinput 上下文，注册到事件循环以接收键盘事件。
+    // 用 libseat session 打开 /dev/input/*（通过 logind TakeDevice 获取 fd 权限），
+    // 因为当前用户不在 input 组，直接 open 会被 EACCES 拒绝。
     {
-        struct DirectInputInterface;
-        impl libinput_crate::LibinputInterface for DirectInputInterface {
-            fn open_restricted(&mut self, path: &std::path::Path, flags: i32) -> Result<std::os::unix::io::OwnedFd, i32> {
-                use std::os::unix::fs::OpenOptionsExt;
-                std::fs::OpenOptions::new()
-                    .read(true).write(true)
-                    .custom_flags(flags)
-                    .open(path)
-                    .map_err(|e| e.raw_os_error().unwrap_or(1))
-                    .map(|f| f.into())
-            }
-            fn close_restricted(&mut self, _fd: std::os::unix::io::OwnedFd) {}
+        struct SessionInputInterface {
+            session: Arc<std::sync::Mutex<LibSeatSession>>,
         }
-        let mut libinput_ctx = libinput_crate::Libinput::new_with_udev(DirectInputInterface);
-        if let Err(e) = libinput_ctx.udev_assign_seat("seat0") {
-            warn!("⚠️  libinput assign_seat 失败: {:?}", e);
-        } else {
-            info!("✅ libinput (seat0)");
-            let backend = LibinputInputBackend::new(libinput_ctx);
-            eloop.handle().insert_source(backend, |event, _, state: &mut App| {
-                state.handle_input_event(event);
-            })?;
+        impl libinput_crate::LibinputInterface for SessionInputInterface {
+    fn open_restricted(&mut self, path: &std::path::Path, flags: i32) -> Result<std::os::unix::io::OwnedFd, i32> {
+                use smithay::reexports::rustix::fs::OFlags;
+                use smithay::backend::session::AsErrno;
+                self.session.lock().unwrap()
+                    .open(path, OFlags::from_bits_truncate(flags as u32))
+                    .map_err(|e| e.as_errno().unwrap_or(libc::EACCES))
+            }
+            fn close_restricted(&mut self, fd: std::os::unix::io::OwnedFd) {
+                let _ = self.session.lock().unwrap().close(fd);
+            }
+        }
+        if let Some(session) = session.clone() {
+            let iface = SessionInputInterface { session };
+            let mut libinput_ctx = libinput_crate::Libinput::new_with_udev(iface);
+            if let Err(e) = libinput_ctx.udev_assign_seat("seat0") {
+                warn!("⚠️  libinput assign_seat 失败: {:?}", e);
+            } else {
+                info!("✅ libinput (seat0)");
+                let backend = LibinputInputBackend::new(libinput_ctx);
+                eloop.handle().insert_source(backend, |event, _, state: &mut App| {
+                    state.handle_input_event(event);
+                })?;
+            }
         }
     }
 
