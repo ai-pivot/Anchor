@@ -1,0 +1,55 @@
+#!/bin/bash
+# Titan 应用启动器 — 读取 .desktop 文件，用 wmenu 选择并启动
+# 被 Titan (Win+D) 调用
+set -e
+
+# 生成应用列表
+python3 -c "
+import os, configparser
+apps = []
+for d in ['/usr/share/applications', os.path.expanduser('~/.local/share/applications')]:
+    if not os.path.isdir(d): continue
+    for f in os.listdir(d):
+        if not f.endswith('.desktop'): continue
+        cp = configparser.ConfigParser(interpolation=None)
+        cp.read(os.path.join(d, f))
+        for sec in cp.sections():
+            if 'Desktop Entry' in sec:
+                if cp.get(sec, 'Type', fallback='') == 'Application' and cp.get(sec, 'NoDisplay', fallback='') != 'true':
+                    name = cp.get(sec, 'Name', fallback='')
+                    exec_cmd = cp.get(sec, 'Exec', fallback='')
+                    if name and exec_cmd:
+                        exec_clean = exec_cmd.split('%')[0].strip()
+                        print(f'{name}\t{exec_clean}')
+" | sort -u | awk -F'\t' '{print $1}' | wmenu -i -p "Launch" -l 10 | while read -r choice; do
+    if [ -z "$choice" ]; then exit 0; fi
+    # 找到对应的 Exec 命令
+    cmd=$(python3 -c "
+import os, configparser
+target = '$choice'
+for d in ['/usr/share/applications', os.path.expanduser('~/.local/share/applications')]:
+    if not os.path.isdir(d): continue
+    for f in os.listdir(d):
+        if not f.endswith('.desktop'): continue
+        cp = configparser.ConfigParser(interpolation=None)
+        cp.read(os.path.join(d, f))
+        for sec in cp.sections():
+            if 'Desktop Entry' in sec:
+                name = cp.get(sec, 'Name', fallback='')
+                if name == target:
+                    exec_cmd = cp.get(sec, 'Exec', fallback='')
+                    print(exec_cmd.split('%')[0].strip())
+                    exit()
+")
+    if [ -n "$cmd" ]; then
+        echo "Launching: $cmd" >> /tmp/titan-launcher.log
+        # Chromium/Electron 需要 Wayland 平台标志
+        case "$cmd" in
+            *microsoft-edge*|*chrome*|*chromium*)
+                cmd="$cmd --ozone-platform=wayland --enable-features=UseOzonePlatform"
+                ;;
+        esac
+        XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}" \
+        nohup $cmd >/dev/null 2>&1 &
+    fi
+done

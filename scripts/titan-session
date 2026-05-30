@@ -15,6 +15,10 @@ export GBM_BACKEND=nvidia-drm
 export __GLX_VENDOR_LIBRARY_NAME=nvidia
 export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json
 
+# Electron/Chromium Wayland 支持
+export ELECTRON_OZONE_PLATFORM_HINT=wayland
+export CHROME_FLAGS="--ozone-platform=wayland --enable-features=UseOzonePlatform"
+
 # 确保 XDG_RUNTIME_DIR
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 mkdir -p "$XDG_RUNTIME_DIR"
