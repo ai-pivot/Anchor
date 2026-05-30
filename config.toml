@@ -2,53 +2,50 @@
 # ~/.config/titan/config.toml
 
 [colors]
-# 背景
-background = "#1a1a2e"
-# 焦点窗口边框
+background = "#0f0f1a"
 focus_border = "#7aa2f7"
-# 非焦点窗口边框
 unfocus_border = "#3b3d57"
-# Headbar 背景
-bar_background = "#16161e"
-# Headbar 文字
+bar_background = "#0d0d16"
 bar_foreground = "#c0caf5"
-# Headbar 活跃工作区
 bar_workspace_active = "#7aa2f7"
-# Headbar 非活跃工作区
 bar_workspace_inactive = "#3b3d57"
-# 状态指示器（时钟等）
 bar_status = "#9ece6a"
-# 警告/紧急
 bar_urgent = "#f7768e"
+bar_separator = "#414868"
 
 [bar]
-# 是否显示顶部栏
 enabled = true
-# 栏高度（像素）
-height = 32
-# 字体大小（像素）
+height = 36
 font_size = 14
-# 工作区按钮圆角
 workspace_radius = 4
-# 工作区间距
-workspace_spacing = 8
-# 左侧内边距
+workspace_spacing = 6
 padding_left = 16
-# 右侧内边距
 padding_right = 16
+opacity = 0.92
+separator_width = 1
+gradient_top = "#16161e"
+gradient_bottom = "#0d0d16"
+show_date = true
+show_cpu = true
+show_memory = true
+
+[wallpaper]
+# 壁纸模式: "color" | "image" | "random" | "gradient"
+mode = "gradient"
+color = "#0f0f1a"
+path = ""
+directory = ""
+gradient_top = "#1a1a3e"
+gradient_bottom = "#0f0f1a"
+change_interval = 0
+scaling = "fill"
 
 [layout]
-# 平铺边框宽度（像素）
 border_width = 2
-# 窗口间距（像素）
-gap = 4
-# 每侧内边距（像素）
+gap = 6
 margin = 0
 
 [keybindings]
-# 格式: "modifier+key" = "action"
-# modifier: super, ctrl, alt, shift（可组合，用 + 连接）
-# key: a-z, 0-9, return, space, escape, tab, f1-f12 等
 "super+return" = "terminal"
 "super+q" = "close"
 "super+d" = "launcher"
@@ -58,6 +55,7 @@ margin = 0
 "super+2" = "workspace_2"
 "super+3" = "workspace_3"
 "super+4" = "workspace_4"
+"super+w" = "wallpaper_next"
 
 [terminal]
 command = "foot"

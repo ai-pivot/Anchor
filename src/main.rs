@@ -502,26 +502,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let mut f = renderer.render(&mut target, sp, Transform::Normal)?;
                     let dmg = Rectangle::from_size(sp);
 
-                    // 背景
-                    let bg = config::parse_color(&state.cfg.colors.background);
-                    f.clear(Color32F::new(bg.0, bg.1, bg.2, 1.0), &[dmg])?;
+                    // 壁纸/背景
+                    layout::render_wallpaper(&mut f, &state.cfg, state.osize.w, state.osize.h, state.frame);
 
                     let focus_idx = state.focus_idx();
 
-                    // 窗口边框（在窗口渲染之前，这样窗口内容会盖住内侧边框线）
+                    // 窗口边框 + 阴影
                     if state.fullscreen.is_none() {
-                        let focus_color = config::parse_color(&state.cfg.colors.focus_border);
-                        let unfocus_color = config::parse_color(&state.cfg.colors.unfocus_border);
-                        let bw = state.cfg.layout.border_width;
                         for (i, _) in state.tops.iter().enumerate() {
-                            let (x, y, w, h) = layout::slot(i, state.tops.len(), state.osize.w, state.osize.h, bar_h, &state.cfg);
-                            let is_focused = focus_idx == Some(i);
-                            let (cr, cg, cb) = if is_focused { focus_color } else { unfocus_color };
-                            let color = Color32F::new(cr, cg, cb, 1.0);
-                            f.clear(color, &[Rectangle::new(Point::new(x, y), Size::new(w, bw))])?;
-                            f.clear(color, &[Rectangle::new(Point::new(x, y + h - bw), Size::new(w, bw))])?;
-                            f.clear(color, &[Rectangle::new(Point::new(x, y), Size::new(bw, h))])?;
-                            f.clear(color, &[Rectangle::new(Point::new(x + w - bw, y), Size::new(bw, h))])?;
+                            layout::render_window_decorations(&mut f, &state.cfg, i, state.tops.len(), focus_idx, state.osize.w, state.osize.h, bar_h);
                         }
                     }
 

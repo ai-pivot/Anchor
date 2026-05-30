@@ -11,6 +11,8 @@ pub struct Config {
     #[serde(default)]
     pub bar: Bar,
     #[serde(default)]
+    pub wallpaper: Wallpaper,
+    #[serde(default)]
     pub layout: Layout,
     #[serde(default)]
     pub keybindings: Keybindings,
@@ -40,6 +42,8 @@ pub struct Colors {
     pub bar_status: String,
     #[serde(default = "Colors::default_bar_urgent")]
     pub bar_urgent: String,
+    #[serde(default = "Colors::default_bar_sep")]
+    pub bar_separator: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,16 +52,49 @@ pub struct Bar {
     pub enabled: bool,
     #[serde(default = "Bar::default_height")]
     pub height: i32,
-    #[serde(default = "Bar::default_font_size")]
-    pub font_size: i32,
-    #[serde(default = "Bar::default_ws_radius")]
-    pub workspace_radius: i32,
+    #[serde(default = "Bar::default_opacity")]
+    pub opacity: f32,
+    #[serde(default = "Bar::default_sep_width")]
+    pub separator_width: i32,
     #[serde(default = "Bar::default_ws_spacing")]
     pub workspace_spacing: i32,
     #[serde(default = "Bar::default_padding_left")]
     pub padding_left: i32,
     #[serde(default = "Bar::default_padding_right")]
     pub padding_right: i32,
+    #[serde(default = "Bar::default_gradient_top")]
+    pub gradient_top: String,
+    #[serde(default = "Bar::default_gradient_bottom")]
+    pub gradient_bottom: String,
+    #[serde(default = "Bar::default_show_date")]
+    pub show_date: bool,
+    #[serde(default = "Bar::default_show_cpu")]
+    pub show_cpu: bool,
+    #[serde(default = "Bar::default_show_memory")]
+    pub show_memory: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Wallpaper {
+    /// "color" | "image" | "random" | "gradient"
+    #[serde(default = "Wallpaper::default_mode")]
+    pub mode: String,
+    #[serde(default = "Wallpaper::default_color")]
+    pub color: String,
+    #[serde(default)]
+    pub path: String,
+    #[serde(default)]
+    pub directory: String,
+    #[serde(default = "Wallpaper::default_gradient_top")]
+    pub gradient_top: String,
+    #[serde(default = "Wallpaper::default_gradient_bottom")]
+    pub gradient_bottom: String,
+    /// 切换间隔秒数，0=不切换
+    #[serde(default)]
+    pub change_interval: u64,
+    /// "fill" | "fit" | "stretch" | "center"
+    #[serde(default = "Wallpaper::default_scaling")]
+    pub scaling: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -80,7 +117,7 @@ pub struct Keybindings {
 pub struct Terminal {
     #[serde(default = "Terminal::default_command")]
     pub command: String,
-    #[serde(default = "Terminal::default_font")]
+    #[serde(default)]
     pub font: String,
     #[serde(default = "Terminal::default_font_size")]
     pub font_size: i32,
@@ -96,13 +133,18 @@ pub struct Launcher {
     pub lines: i32,
 }
 
-// ── Parse hex color to (f32, f32, f32) ──────────────────────
 pub fn parse_color(hex: &str) -> (f32, f32, f32) {
     let hex = hex.trim_start_matches('#');
+    if hex.len() < 6 { return (0.0, 0.0, 0.0); }
     let r = u8::from_str_radix(&hex[0..2], 16).unwrap_or(0) as f32 / 255.0;
     let g = u8::from_str_radix(&hex[2..4], 16).unwrap_or(0) as f32 / 255.0;
     let b = u8::from_str_radix(&hex[4..6], 16).unwrap_or(0) as f32 / 255.0;
     (r, g, b)
+}
+
+pub fn parse_color_alpha(hex: &str, alpha: f32) -> (f32, f32, f32, f32) {
+    let (r, g, b) = parse_color(hex);
+    (r, g, b, alpha)
 }
 
 impl Config {
@@ -115,10 +157,7 @@ impl Config {
             if p.exists() {
                 match std::fs::read_to_string(p) {
                     Ok(s) => match toml::from_str(&s) {
-                        Ok(c) => {
-                            tracing::info!("📋 配置: {}", p.display());
-                            return c;
-                        }
+                        Ok(c) => { tracing::info!("📋 配置: {}", p.display()); return c; }
                         Err(e) => tracing::warn!("⚠️  配置解析错误 {}: {}", p.display(), e),
                     },
                     Err(e) => tracing::warn!("⚠️  配置读取错误 {}: {}", p.display(), e),
@@ -127,6 +166,25 @@ impl Config {
         }
         tracing::info!("📋 使用默认配置");
         Self::default()
+    }
+
+    /// 获取壁纸目录中的所有图片文件
+    pub fn wallpaper_files(&self) -> Vec<std::path::PathBuf> {
+        if self.wallpaper.directory.is_empty() { return vec![]; }
+        let exts = ["png", "jpg", "jpeg", "bmp", "webp"];
+        let mut files = vec![];
+        if let Ok(entries) = std::fs::read_dir(&self.wallpaper.directory) {
+            for e in entries.flatten() {
+                let p = e.path();
+                if let Some(ext) = p.extension().and_then(|e| e.to_str()) {
+                    if exts.contains(&ext.to_lowercase().as_str()) {
+                        files.push(p);
+                    }
+                }
+            }
+        }
+        files.sort();
+        files
     }
 }
 
@@ -138,40 +196,54 @@ fn dirs() -> std::path::PathBuf {
     Path::new(&base).join("titan").to_path_buf()
 }
 
-// ── Defaults ────────────────────────────────────────────────
+// ── Defaults ────────────────────────────────────────
 
-impl Default for Config { fn default() -> Self { Self { colors: Colors::default(), bar: Bar::default(), layout: Layout::default(), keybindings: Keybindings::default(), terminal: Terminal::default(), launcher: Launcher::default() } } }
-impl Default for Colors { fn default() -> Self { Self { background: Colors::default_bg(), focus_border: Colors::default_focus_border(), unfocus_border: Colors::default_unfocus_border(), bar_background: Colors::default_bar_bg(), bar_foreground: Colors::default_bar_fg(), bar_workspace_active: Colors::default_bar_ws_active(), bar_workspace_inactive: Colors::default_bar_ws_inactive(), bar_status: Colors::default_bar_status(), bar_urgent: Colors::default_bar_urgent() } } }
-impl Default for Bar { fn default() -> Self { Self { enabled: Bar::default_enabled(), height: Bar::default_height(), font_size: Bar::default_font_size(), workspace_radius: Bar::default_ws_radius(), workspace_spacing: Bar::default_ws_spacing(), padding_left: Bar::default_padding_left(), padding_right: Bar::default_padding_right() } } }
-impl Default for Layout { fn default() -> Self { Self { border_width: Layout::default_border_width(), gap: Layout::default_gap(), margin: Layout::default_margin() } } }
+impl Default for Config { fn default() -> Self { Self { colors: Colors::default(), bar: Bar::default(), wallpaper: Wallpaper::default(), layout: Layout::default(), keybindings: Keybindings::default(), terminal: Terminal::default(), launcher: Launcher::default() } } }
+impl Default for Colors { fn default() -> Self { Self {
+    background: Colors::default_bg(), focus_border: Colors::default_focus_border(), unfocus_border: Colors::default_unfocus_border(),
+    bar_background: Colors::default_bar_bg(), bar_foreground: Colors::default_bar_fg(),
+    bar_workspace_active: Colors::default_bar_ws_active(), bar_workspace_inactive: Colors::default_bar_ws_inactive(),
+    bar_status: Colors::default_bar_status(), bar_urgent: Colors::default_bar_urgent(), bar_separator: Colors::default_bar_sep(),
+} } }
+impl Default for Bar { fn default() -> Self { Self {
+    enabled: true, height: 36, opacity: 0.92, separator_width: 1,
+    workspace_spacing: 6, padding_left: 16, padding_right: 16,
+    gradient_top: Bar::default_gradient_top(), gradient_bottom: Bar::default_gradient_bottom(),
+    show_date: true, show_cpu: true, show_memory: true,
+} } }
+impl Default for Wallpaper { fn default() -> Self { Self {
+    mode: Wallpaper::default_mode(), color: Wallpaper::default_color(),
+    path: String::new(), directory: String::new(),
+    gradient_top: Wallpaper::default_gradient_top(), gradient_bottom: Wallpaper::default_gradient_bottom(),
+    change_interval: 0, scaling: Wallpaper::default_scaling(),
+} } }
+impl Default for Layout { fn default() -> Self { Self { border_width: 2, gap: 6, margin: 0 } } }
 impl Default for Keybindings { fn default() -> Self { Self { bindings: Keybindings::default_bindings() } } }
-impl Default for Terminal { fn default() -> Self { Self { command: Terminal::default_command(), font: Terminal::default_font(), font_size: Terminal::default_font_size() } } }
-impl Default for Launcher { fn default() -> Self { Self { command: Launcher::default_command(), prompt: Launcher::default_prompt(), lines: Launcher::default_lines() } } }
+impl Default for Terminal { fn default() -> Self { Self { command: "foot".into(), font: "monospace".into(), font_size: 12 } } }
+impl Default for Launcher { fn default() -> Self { Self { command: "wmenu".into(), prompt: "Launch".into(), lines: 10 } } }
 
 impl Colors {
-    fn default_bg() -> String { "#1a1a2e".into() }
+    fn default_bg() -> String { "#0f0f1a".into() }
     fn default_focus_border() -> String { "#7aa2f7".into() }
     fn default_unfocus_border() -> String { "#3b3d57".into() }
-    fn default_bar_bg() -> String { "#16161e".into() }
+    fn default_bar_bg() -> String { "#0d0d16".into() }
     fn default_bar_fg() -> String { "#c0caf5".into() }
     fn default_bar_ws_active() -> String { "#7aa2f7".into() }
     fn default_bar_ws_inactive() -> String { "#3b3d57".into() }
     fn default_bar_status() -> String { "#9ece6a".into() }
     fn default_bar_urgent() -> String { "#f7768e".into() }
+    fn default_bar_sep() -> String { "#414868".into() }
 }
 impl Bar {
-    fn default_enabled() -> bool { true }
-    fn default_height() -> i32 { 32 }
-    fn default_font_size() -> i32 { 14 }
-    fn default_ws_radius() -> i32 { 4 }
-    fn default_ws_spacing() -> i32 { 8 }
-    fn default_padding_left() -> i32 { 16 }
-    fn default_padding_right() -> i32 { 16 }
+    fn default_gradient_top() -> String { "#16161e".into() }
+    fn default_gradient_bottom() -> String { "#0d0d16".into() }
 }
-impl Layout {
-    fn default_border_width() -> i32 { 2 }
-    fn default_gap() -> i32 { 4 }
-    fn default_margin() -> i32 { 0 }
+impl Wallpaper {
+    fn default_mode() -> String { "gradient".into() }
+    fn default_color() -> String { "#0f0f1a".into() }
+    fn default_gradient_top() -> String { "#1a1a3e".into() }
+    fn default_gradient_bottom() -> String { "#0f0f1a".into() }
+    fn default_scaling() -> String { "fill".into() }
 }
 impl Keybindings {
     fn default_bindings() -> std::collections::HashMap<String, String> {
@@ -181,12 +253,31 @@ impl Keybindings {
         m.insert("super+d".into(), "launcher".into());
         m.insert("super+f".into(), "fullscreen".into());
         m.insert("super+shift+escape".into(), "quit".into());
+        m.insert("super+w".into(), "wallpaper_next".into());
         m
     }
 }
+
+// ── Serde default functions (required by #[serde(default = "...")]) ──
+impl Bar {
+    fn default_enabled() -> bool { true }
+    fn default_height() -> i32 { 36 }
+    fn default_opacity() -> f32 { 0.92 }
+    fn default_sep_width() -> i32 { 1 }
+    fn default_ws_spacing() -> i32 { 6 }
+    fn default_padding_left() -> i32 { 16 }
+    fn default_padding_right() -> i32 { 16 }
+    fn default_show_date() -> bool { true }
+    fn default_show_cpu() -> bool { true }
+    fn default_show_memory() -> bool { true }
+}
+impl Layout {
+    fn default_border_width() -> i32 { 2 }
+    fn default_gap() -> i32 { 6 }
+    fn default_margin() -> i32 { 0 }
+}
 impl Terminal {
     fn default_command() -> String { "foot".into() }
-    fn default_font() -> String { "monospace".into() }
     fn default_font_size() -> i32 { 12 }
 }
 impl Launcher {
