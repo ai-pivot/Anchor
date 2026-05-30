@@ -22,11 +22,12 @@ use smithay::{
             utils::{draw_render_elements, on_commit_buffer_handler}, Color32F},
         session::{Session, Event as SessionEvent, libseat::{LibSeatSession, LibSeatSessionNotifier}},
     },
-    delegate_compositor, delegate_data_device, delegate_seat, delegate_shm, delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm, delegate_xdg_shell,
     input::{
         keyboard::{FilterResult, Keysym, ModifiersState, XkbConfig},
         pointer::CursorImageStatus, Seat, SeatHandler, SeatState,
     },
+    output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
         calloop::EventLoop,
         drm::control::{connector, Device as _},
@@ -39,6 +40,7 @@ use smithay::{
         buffer::BufferHandler,
         compositor::{with_surface_tree_downward, CompositorClientState, CompositorHandler,
             CompositorState, SurfaceAttributes, TraversalAction},
+        output::OutputManagerState,
         selection::{
             SelectionHandler,
             data_device::{ClientDndGrabHandler, DataDeviceHandler, DataDeviceState,
@@ -57,6 +59,7 @@ use tracing::{error, info, warn};
 struct App {
     comp: CompositorState, xdg: XdgShellState, shm: ShmState, seat_state: SeatState<Self>,
     dd: DataDeviceState, seat: Seat<Self>,
+    output: Output,
     osize: Size<i32, Logical>, tops: Vec<ToplevelSurface>, run: bool, frame: u32,
     dh: DisplayHandle, active: bool, vblank: bool,
     /// libinput keyboard state — xkb context + keymap for keysym translation
@@ -83,6 +86,7 @@ impl XdgShellHandler for App {
 }
 impl SelectionHandler for App { type SelectionUserData = (); }
 impl DataDeviceHandler for App { fn data_device_state(&self) -> &DataDeviceState { &self.dd } }
+impl smithay::wayland::output::OutputHandler for App {}
 impl ClientDndGrabHandler for App {}
 impl ServerDndGrabHandler for App { fn send(&mut self, _: String, _: OwnedFd, _: Seat<Self>) {} }
 impl CompositorHandler for App {
@@ -235,10 +239,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut seat = seat_state.new_wl_seat(&dh, "seat0");
     let kbd = seat.add_keyboard(XkbConfig::default(), 200, 25)?;
 
+    // Output (wl_output global)
+    let output = Output::new(
+        "DP-4".to_string(),
+        PhysicalProperties {
+            size: (600, 340).into(),
+            subpixel: Subpixel::Unknown,
+            make: "NVIDIA".into(),
+            model: "5080D".into(),
+        },
+    );
+    let output_mode = Mode { size: (mw as i32, mh as i32).into(), refresh: 59000 };
+    output.add_mode(output_mode);
+    output.set_preferred(output_mode);
+    output.change_current_state(
+        Some(output_mode),
+        Some(Transform::Normal),
+        Some(Scale::Integer(1)),
+        Some(Point::from((0, 0))),
+    );
+    let _output_manager = OutputManagerState::new();
+    output.create_global::<App>(&dh);
+    info!("✅ wl_output");
+
     let mut state = App {
         comp: CompositorState::new::<App>(&dh), xdg: XdgShellState::new::<App>(&dh),
         shm: ShmState::new::<App>(&dh, vec![]), seat_state, seat,
         dd: DataDeviceState::new::<App>(&dh),
+        output,
         osize: Size::new(mw as i32, mh as i32), tops: vec![], run: true, frame: 0,
         dh: dh.clone(), active: false, vblank: false,
         kbd,
@@ -414,3 +442,4 @@ delegate_compositor!(App);
 delegate_shm!(App);
 delegate_seat!(App);
 delegate_data_device!(App);
+delegate_output!(App);
