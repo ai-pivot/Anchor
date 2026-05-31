@@ -633,7 +633,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mode = if let Some(m) = info.modes().first().copied() {
                     m
                 } else {
-                    // NVIDIA DRM 通过 ioctl 报告 0 modes，从 EDID DTD 构造 fallback
+                    // NVIDIA DRM 通过 ioctl 报告 0 modes，从 sysfs EDID 构造 fallback
                     let conn_name = format!("{:?}", c).to_lowercase().replace(' ', "-");
                     let raw = if let Some((clock, hd, hss, hse, ht, vd, vss, vse, vt, _hskew, vref)) = parse_edid_dtd(&conn_name) {
                         info!("⚠️  Connector {:?} 0 modes, EDID DTD: {}x{}@{}Hz", c, hd, vd, vref);
@@ -642,8 +642,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             hdisplay: hd, hsync_start: hss, hsync_end: hse, htotal: ht, hskew: 0,
                             vdisplay: vd, vsync_start: vss, vsync_end: vse, vtotal: vt, vscan: 0,
                             vrefresh: vref,
-                            flags: 0x5, // NHSYNC | PVSYNC
-                            type_: 0x40, // DRIVER
+                            flags: 0x5,
+                            type_: 0x40,
                             name: {
                                 let mut n = [0i8; 32];
                                 let s = format!("{}x{}", hd, vd);
@@ -655,21 +655,64 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             },
                         }
                     } else {
-                        // 最终 fallback：2560x1440 的标准 timing
-                        info!("⚠️  Connector {:?} 0 modes, 无 EDID, fallback 2560x1440", c);
-                        drm_sys::drm_mode_modeinfo {
-                            clock: 24150,
-                            hdisplay: 2560, hsync_start: 2608, hsync_end: 2640, htotal: 2720, hskew: 0,
-                            vdisplay: 1440, vsync_start: 1443, vsync_end: 1448, vtotal: 1481, vscan: 0,
-                            vrefresh: 59,
-                            flags: 0x5,
-                            type_: 0x40,
-                            name: {
-                                let mut n = [0i8; 32];
-                                let s = "2560x1440";
-                                for (i, b) in s.bytes().enumerate() { n[i] = b as i8; }
-                                n
-                            },
+                        // 遍历 sysfs 尝试所有 connector 的 EDID
+                        let mut found = None;
+                        for card in 0..4u8 {
+                            if let Ok(entries) = std::fs::read_dir(format!("/sys/class/drm/")) {
+                                for entry in entries.flatten() {
+                                    let name = entry.file_name().to_string_lossy().to_string();
+                                    if !name.starts_with(&format!("card{}", card)) { continue; }
+                                    let suffix = &name[format!("card{}-", card).len()..];
+                                    if suffix.contains("DP-") || suffix.contains("HDMI-") || suffix.contains("DVI-") {
+                                        let status_path = format!("/sys/class/drm/{}/status", name);
+                                        if let Ok(status) = std::fs::read_to_string(&status_path) {
+                                            if status.trim() == "connected" {
+                                                if let Some(dtd) = parse_edid_dtd(suffix) {
+                                                    found = Some((suffix.to_string(), dtd));
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            if found.is_some() { break; }
+                        }
+                        if let Some((sysfs_name, (clock, hd, hss, hse, ht, vd, vss, vse, vt, _hskew, vref))) = found {
+                            info!("⚠️  Connector {:?} 0 modes, sysfs EDID ({}) {}x{}@{}Hz", c, sysfs_name, hd, vd, vref);
+                            drm_sys::drm_mode_modeinfo {
+                                clock,
+                                hdisplay: hd, hsync_start: hss, hsync_end: hse, htotal: ht, hskew: 0,
+                                vdisplay: vd, vsync_start: vss, vsync_end: vse, vtotal: vt, vscan: 0,
+                                vrefresh: vref,
+                                flags: 0x5,
+                                type_: 0x40,
+                                name: {
+                                    let mut n = [0i8; 32];
+                                    let s = format!("{}x{}", hd, vd);
+                                    for (i, b) in s.bytes().enumerate() {
+                                        if i >= 32 { break; }
+                                        n[i] = b as i8;
+                                    }
+                                    n
+                                },
+                            }
+                        } else {
+                            info!("⚠️  Connector {:?} 0 modes, 无 EDID, fallback 2560x1440", c);
+                            drm_sys::drm_mode_modeinfo {
+                                clock: 24150,
+                                hdisplay: 2560, hsync_start: 2608, hsync_end: 2640, htotal: 2720, hskew: 0,
+                                vdisplay: 1440, vsync_start: 1443, vsync_end: 1448, vtotal: 1481, vscan: 0,
+                                vrefresh: 59,
+                                flags: 0x5,
+                                type_: 0x40,
+                                name: {
+                                    let mut n = [0i8; 32];
+                                    let s = "2560x1440";
+                                    for (i, b) in s.bytes().enumerate() { n[i] = b as i8; }
+                                    n
+                                },
+                            }
                         }
                     };
                     use smithay::reexports::drm::control::Mode;
@@ -730,7 +773,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let gbm_dup = GbmDevice::new(fd_clones[idx].clone())?;
         let alloc = GbmAllocator::new(gbm_dup, GbmBufferFlags::SCANOUT);
         let buf_surf = match GbmBufferedSurface::new(surface, alloc,
-            &[Fourcc::Argb8888, Fourcc::Xrgb8888], fmts.clone().into_iter()) {
+            &[Fourcc::Argb8888, Fourcc::Xrgb8888],
+            // NVIDIA 只用 Invalid modifier（Linear 会导致 test_state 失败）
+            fmts.clone().into_iter().filter(|f| f.modifier == Modifier::Invalid)) {
             Ok(bs) => bs,
             Err(e) => { warn!("⚠️  BufferSurface 创建失败 {}: {:?}", ci.name, e); continue; }
         };
