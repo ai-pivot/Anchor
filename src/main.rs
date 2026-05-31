@@ -533,29 +533,32 @@ fn send_frames(s: &WlSurface, t: u32) {
         |_,_,&()| true);
 }
 
-/// 从 sysfs EDID 解析首选分辨率（用于 NVIDIA DRM 不报告 modes 的情况）
-fn parse_edid_resolution(conn_name: &str) -> Option<(u32, u32)> {
+/// 从 sysfs EDID 解析 DTD timing（用于 NVIDIA DRM 不报告 modes 的情况）
+fn parse_edid_dtd(conn_name: &str) -> Option<(u32, u16, u16, u16, u16, u16, u16, u16, u16, u16, u32)> {
     for card in 0..4u8 {
         let path = format!("/sys/class/drm/card{}-{}/edid", card, conn_name);
         if let Ok(data) = std::fs::read(&path) {
-            if data.len() < 54 { continue; }
-            // EDID DTD (Detailed Timing Descriptor): bytes 54..72
-            for offset in (54..min(data.len(), 126)).step_by(18) {
-                let dtd = &data[offset..offset + 18];
-                // 跳过 monitor descriptor (pixel clock == 0)
-                if dtd[0] == 0 && dtd[1] == 0 { continue; }
-                let w = dtd[2] as u32 + ((dtd[4] as u32 >> 4) << 8);
-                let h = dtd[5] as u32 + ((dtd[7] as u32 >> 4) << 8);
-                if w >= 640 && h >= 480 {
-                    return Some((w, h));
-                }
-            }
+            if data.len() < 72 { continue; }
+            let dtd = &data[54..72];
+            let clock = ((dtd[1] as u32) << 8) | dtd[0] as u32; // 10kHz units
+            if clock == 0 { continue; }
+            let hdisplay = (((dtd[4] as u16) >> 4) << 8) | dtd[2] as u16;
+            let hblank = (((dtd[4] as u16) & 0xf) << 8) | dtd[3] as u16;
+            let vdisplay = (((dtd[7] as u16) >> 4) << 8) | dtd[5] as u16;
+            let vblank = (((dtd[7] as u16) & 0xf) << 8) | dtd[6] as u16;
+            let hsync_offset = (((dtd[11] as u16) >> 4) << 8) | dtd[8] as u16;
+            let hsync_pulse = (((dtd[11] as u16) & 0xf) << 8) | dtd[9] as u16;
+            let vsync_offset = (((dtd[10] as u16) >> 4) & 0xf) | (((dtd[11] as u16) >> 6) << 4);
+            let vsync_pulse = (dtd[10] as u16 & 0xf) | ((((dtd[11] as u16) >> 4) & 0x3) << 4);
+            let htotal = hdisplay + hblank;
+            let vtotal = vdisplay + vblank;
+            if hdisplay < 640 || vdisplay < 480 { continue; }
+            let vrefresh = if (htotal as u32 * vtotal as u32) > 0 { clock * 10000 / (htotal as u32 * vtotal as u32) } else { 60 };
+            return Some((clock, hdisplay, hdisplay + hsync_offset, hdisplay + hsync_offset + hsync_pulse, htotal, vdisplay, vdisplay + vsync_offset, vdisplay + vsync_offset + vsync_pulse, vtotal, 0, vrefresh));
         }
     }
     None
 }
-
-use std::cmp::min;
 
 // ── main ─────────────────────────────────────────────────
 
@@ -630,26 +633,44 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mode = if let Some(m) = info.modes().first().copied() {
                     m
                 } else {
-                    // NVIDIA DRM 通过 ioctl 报告 0 modes，从 EDID 构造 fallback
+                    // NVIDIA DRM 通过 ioctl 报告 0 modes，从 EDID DTD 构造 fallback
                     let conn_name = format!("{:?}", c).to_lowercase().replace(' ', "-");
-                    let (fw, fh) = parse_edid_resolution(&conn_name).unwrap_or((2560, 1440));
-                    info!("⚠️  Connector {:?} 0 modes, EDID fallback: {}x{}", c, fw, fh);
-                    let raw = drm_sys::drm_mode_modeinfo {
-                        clock: ((fw as u32 * fh as u32 * 60 + 4999) / 10000),
-                        hdisplay: fw as u16, hsync_start: fw as u16 + 48, hsync_end: fw as u16 + 80, htotal: fw as u16 + 112, hskew: 0,
-                        vdisplay: fh as u16, vsync_start: fh as u16 + 3, vsync_end: fh as u16 + 5, vtotal: fh as u16 + 10, vscan: 0,
-                        vrefresh: 60,
-                        flags: 0x5, // DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_PVSYNC
-                        type_: 0x40, // DRM_MODE_TYPE_DRIVER
-                        name: {
-                            let mut n = [0i8; 32];
-                            let s = format!("{}x{}", fw, fh);
-                            for (i, b) in s.bytes().enumerate() {
-                                if i >= 32 { break; }
-                                n[i] = b as i8;
-                            }
-                            n
-                        },
+                    let raw = if let Some((clock, hd, hss, hse, ht, vd, vss, vse, vt, _hskew, vref)) = parse_edid_dtd(&conn_name) {
+                        info!("⚠️  Connector {:?} 0 modes, EDID DTD: {}x{}@{}Hz", c, hd, vd, vref);
+                        drm_sys::drm_mode_modeinfo {
+                            clock,
+                            hdisplay: hd, hsync_start: hss, hsync_end: hse, htotal: ht, hskew: 0,
+                            vdisplay: vd, vsync_start: vss, vsync_end: vse, vtotal: vt, vscan: 0,
+                            vrefresh: vref,
+                            flags: 0x5, // NHSYNC | PVSYNC
+                            type_: 0x40, // DRIVER
+                            name: {
+                                let mut n = [0i8; 32];
+                                let s = format!("{}x{}", hd, vd);
+                                for (i, b) in s.bytes().enumerate() {
+                                    if i >= 32 { break; }
+                                    n[i] = b as i8;
+                                }
+                                n
+                            },
+                        }
+                    } else {
+                        // 最终 fallback：2560x1440 的标准 timing
+                        info!("⚠️  Connector {:?} 0 modes, 无 EDID, fallback 2560x1440", c);
+                        drm_sys::drm_mode_modeinfo {
+                            clock: 24150,
+                            hdisplay: 2560, hsync_start: 2608, hsync_end: 2640, htotal: 2720, hskew: 0,
+                            vdisplay: 1440, vsync_start: 1443, vsync_end: 1448, vtotal: 1481, vscan: 0,
+                            vrefresh: 59,
+                            flags: 0x5,
+                            type_: 0x40,
+                            name: {
+                                let mut n = [0i8; 32];
+                                let s = "2560x1440";
+                                for (i, b) in s.bytes().enumerate() { n[i] = b as i8; }
+                                n
+                            },
+                        }
                     };
                     use smithay::reexports::drm::control::Mode;
                     Mode::from(raw)
@@ -740,6 +761,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
         output_x_offset += mw as i32;
     }
+    if titan_outputs.is_empty() { return Err("所有输出创建失败".into()); }
     let primary_size = titan_outputs[0].size;
     info!("✅ {} 个输出已就绪", titan_outputs.len());
 
