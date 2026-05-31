@@ -313,6 +313,23 @@ impl App {
                     WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()),
                 };
                 if let Some(s) = surf {
+                    let local_pos = Point::from((px - x as f64, py - y as f64));
+                    // Find the deepest subsurface at this point (handles Chrome dropdown menus etc.)
+                    if let Some((sub, sub_loc)) = smithay::desktop::utils::under_from_surface_tree(
+                        &s,
+                        local_pos,
+                        (0, 0),
+                        smithay::desktop::WindowSurfaceType::ALL,
+                    ) {
+                        // sub_loc is the subsurface position relative to toplevel.
+                        // Smithay ptr.motion computes: event.location - offset = local coords.
+                        // So offset = topleft_slot_pos + subsurface_pos = global surface position.
+                        let offset = Point::from((
+                            x as f64 + sub_loc.x as f64,
+                            y as f64 + sub_loc.y as f64,
+                        ));
+                        return Some((sub, offset));
+                    }
                     return Some((s, Point::from((x as f64, y as f64))));
                 }
             }
@@ -381,6 +398,7 @@ impl App {
 
     fn do_layout(&mut self) {
         let ws_idx = self.active_ws;
+        self.workspaces[ws_idx].rebuild_order();
         let order = self.workspaces[ws_idx].effective_order();
         let n = order.len();
         if n == 0 { return; }
@@ -1913,6 +1931,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let mut popup_elems: Vec<Vec<WaylandSurfaceRenderElement<GlesRenderer>>> = Vec::new();
                         let mut sp_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
                         let mut im_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
+                        let mut or_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
                         let mut im_popup_pos: (i32, i32) = (0, 0);
                         let mut ws_offset: i32 = 0;
                         let mut scratchpad_data: Option<(i32, i32, i32, i32)> = None; // (x, y, w, h)
@@ -2024,6 +2043,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
 
+                        // Collect X11 override-redirect window elements (input method popups, tooltips)
+                        for xs in &state.xw.or_surfaces {
+                            if let Some(wl) = xs.wl_surface() {
+                                let geo = xs.geometry();
+                                let render_pos = Point::<i32, Physical>::from((geo.loc.x, geo.loc.y));
+                                or_elems.extend(
+                                    render_elements_from_surface_tree(&mut renderer, &wl, render_pos, 1.0, 1.0, Kind::Unspecified)
+                                );
+                            }
+                        }
+
                         // ═══════════════════════════════════════════════
                         // Phase 2: bind + render everything (full control)
                         // ═══════════════════════════════════════════════
@@ -2096,6 +2126,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     ow, oh, bar_h, state.workspaces[state.active_ws].layout, state.workspaces[state.active_ws].split, ws_offset
                                 );
                             }
+                        }
+
+                        // Step 3.5: X11 override-redirect windows (input method popups, tooltips)
+                        if !or_elems.is_empty() {
+                            draw_render_elements(&mut f, 1.0, &or_elems, &[dmg])?;
                         }
 
                         // Step 4: Scratchpad — background FIRST, then surface ON TOP
@@ -2173,6 +2208,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             // X11 surfaces — need frame callbacks to update
             for xs in &state.workspaces[state.active_ws].x11_surfaces {
+                if let Some(wl) = xs.wl_surface() {
+                    send_frames(&wl, now);
+                }
+            }
+            // X11 OR surfaces (input method popups, tooltips)
+            for xs in &state.xw.or_surfaces {
                 if let Some(wl) = xs.wl_surface() {
                     send_frames(&wl, now);
                 }
@@ -2302,16 +2343,23 @@ impl smithay::xwayland::XwmHandler for App {
         let wid = window.window_id();
         for ws in &mut self.workspaces {
             ws.x11_surfaces.retain(|s| s.window_id() != wid);
+            ws.rebuild_order();
         }
         self.xw.or_surfaces.retain(|s| s.window_id() != wid);
         self.do_layout();
-        // Refocus
-        let ws = &self.workspaces[self.active_ws];
-        if let Some(last) = ws.tops.last() {
-            let s = last.wl_surface().clone();
-            let kbd = self.kbd.clone();
-            let serial = SERIAL_COUNTER.next_serial();
-            kbd.set_focus(self, Some(s), serial);
+        // Refocus — find the last window in effective_order
+        let order = self.workspaces[self.active_ws].effective_order();
+        if let Some((_, slot)) = order.iter().enumerate().last() {
+            let surf = match slot {
+                WindowSlot::Wl(idx) => self.workspaces[self.active_ws].tops.get(*idx).map(|tl| tl.wl_surface().clone()),
+                WindowSlot::X11(idx) => self.workspaces[self.active_ws].x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()),
+            };
+            if let Some(surf) = surf {
+                self.workspaces[self.active_ws].focus = Some(surf.clone());
+                let kbd = self.kbd.clone();
+                let serial = SERIAL_COUNTER.next_serial();
+                kbd.set_focus(self, Some(surf), serial);
+            }
         }
         self.dirty = true;
     }
@@ -2321,9 +2369,24 @@ impl smithay::xwayland::XwmHandler for App {
         let wid = window.window_id();
         for ws in &mut self.workspaces {
             ws.x11_surfaces.retain(|s| s.window_id() != wid);
+            ws.rebuild_order();
         }
         self.xw.or_surfaces.retain(|s| s.window_id() != wid);
         self.do_layout();
+        // Refocus
+        let order = self.workspaces[self.active_ws].effective_order();
+        if let Some((_, slot)) = order.iter().enumerate().last() {
+            let surf = match slot {
+                WindowSlot::Wl(idx) => self.workspaces[self.active_ws].tops.get(*idx).map(|tl| tl.wl_surface().clone()),
+                WindowSlot::X11(idx) => self.workspaces[self.active_ws].x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()),
+            };
+            if let Some(surf) = surf {
+                self.workspaces[self.active_ws].focus = Some(surf.clone());
+                let kbd = self.kbd.clone();
+                let serial = SERIAL_COUNTER.next_serial();
+                kbd.set_focus(self, Some(surf), serial);
+            }
+        }
         self.dirty = true;
     }
 
@@ -2387,10 +2450,45 @@ impl smithay::xwayland::XwmHandler for App {
 
     fn fullscreen_request(&mut self, _xwm: smithay::xwayland::xwm::XwmId, window: smithay::xwayland::X11Surface) {
         let _ = window.set_fullscreen(true);
+        let wid = window.window_id();
+        for ws_idx in 0..self.workspaces.len() {
+            let ws = &self.workspaces[ws_idx];
+            let order = ws.effective_order();
+            for (i, slot) in order.iter().enumerate() {
+                let matches = match slot {
+                    WindowSlot::Wl(_) => false,
+                    WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).map(|s| s.window_id() == wid).unwrap_or(false),
+                };
+                if matches {
+                    self.workspaces[ws_idx].fullscreen = Some(i);
+                    if ws_idx != self.active_ws { self.active_ws = ws_idx; }
+                    self.do_layout();
+                    self.dirty = true;
+                    return;
+                }
+            }
+        }
     }
 
     fn unfullscreen_request(&mut self, _xwm: smithay::xwayland::xwm::XwmId, window: smithay::xwayland::X11Surface) {
         let _ = window.set_fullscreen(false);
+        let wid = window.window_id();
+        for ws_idx in 0..self.workspaces.len() {
+            let ws = &self.workspaces[ws_idx];
+            if let Some(fi) = ws.fullscreen {
+                let order = ws.effective_order();
+                let matches = match order.get(fi) {
+                    Some(WindowSlot::X11(idx)) => ws.x11_surfaces.get(*idx).map(|s| s.window_id() == wid).unwrap_or(false),
+                    _ => false,
+                };
+                if matches {
+                    self.workspaces[ws_idx].fullscreen = None;
+                    self.do_layout();
+                    self.dirty = true;
+                    return;
+                }
+            }
+        }
     }
 
     fn minimize_request(&mut self, _xwm: smithay::xwayland::xwm::XwmId, _window: smithay::xwayland::X11Surface) {}
