@@ -91,6 +91,38 @@ Pixman renders pixels in **linear** layout. NVIDIA scanout expects **block-linea
 2. CPU-side block-linear tiling before submit.
 3. Force GBM to create Linear buffers (NVIDIA GBM rejects explicit Linear modifier).
 
+## Critical: Deployment & Testing (READ THIS FIRST)
+
+### 正确的部署方法
+
+`titan-session` 脚本直接运行 `./target/release/titan`。所以：
+
+```bash
+# 1. 编译 — cargo build 完就自动是新版本，不需要 cp 任何东西
+cargo build --release --bin titan
+
+# 2. 杀 Titan 进程让 GDM 重启 session（同一个 logind session，DRM modes 不丢失）
+kill $(pgrep -f "target/release/titan")
+
+# 3. 等待 GDM 重新启动 Titan（约 5-8 秒）
+sleep 8 && pgrep -a titan
+
+# 4. 截图验证
+sudo scripts/drm-dump-fb /dev/dri/card1 /tmp/titan-current.raw
+```
+
+### 🚫 绝对禁止的操作
+
+1. **禁止 `sudo systemctl restart gdm3`** — 这会销毁当前 logind session，NVIDIA DRM modes 丢失，新 session 里 `drmModeGetConnector` 返回 0 modes，Titan 永远启动失败。
+2. **禁止 `sudo reboot`** — 同上，而且还会断开 xbot 连接。
+3. **禁止 `sudo cp target/release/titan /usr/local/bin/titan`** — 没有用。`titan-session` 直接运行 `target/release/titan`，不需要复制到其他路径。
+4. **禁止尝试从 EDID/sysfs 构造 DRM Mode** — NVIDIA modes 问题只能在已有 session 内解决。如果 session 丢失了 modes，只能通过完整的系统启动流程恢复。
+5. **禁止修改 `titan-session` 添加 `--direct`** — `--direct` 模式在 GDM logind session 中无法工作。
+
+### 如果 Titan 确实无法启动（session 彻底坏了）
+
+只有在这种情况下才能 `systemctl restart gdm3`，但要知道重启后 Titan 可能因 NVIDIA 0-modes 问题无法自动登录。此时只能等完整的系统 reboot（从 GRUB 开始），GDM greeter 在首次启动时会正确设置 modes。
+
 ## Build & Run
 
 ```bash
@@ -120,3 +152,5 @@ loginctl list-sessions   # Should only show GDM greeter session
 3. **Don't fight NVIDIA on `drmSetMaster`.** Logind manages master; manual calls break things.
 4. **`test_state` failure is a real error.** Don't patch it to be non-fatal — it indicates actual problems (like a dead session).
 5. **Symptoms ≠ root cause.** "Permission denied" on atomic commit means the fd lost master, not that you need to call `drmSetMaster` harder.
+6. **部署 = `cargo build` + `kill titan`。** 不需要 cp、不需要 restart gdm、不需要 reboot。`titan-session` 直接运行 `target/release/titan`，build 完就是新版本。
+7. **绝对不要 `systemctl restart gdm3`。** 会销毁 logind session → NVIDIA modes 丢失 → Titan 无法启动 → 只能完整 reboot 恢复。正确的做法是 `kill` Titan 进程让 GDM 在同一个 session 里重启它。
