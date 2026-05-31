@@ -602,7 +602,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for &c in res.connectors() {
         for f in [false, true] {
             if let Ok(info) = device.get_connector(c, f) {
-                if info.state() != connector::State::Connected || info.modes().is_empty() { continue; }
+                if info.state() != connector::State::Connected { continue; }
+                if info.modes().is_empty() {
+                    info!("⚠️  Connector {:?} Connected 但 0 modes (NVIDIA)", c);
+                    continue;
+                }
                 let mode = info.modes().first().copied().unwrap();
                 let (mw, mh) = mode.size();
 
@@ -629,6 +633,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 });
                 break;
             }
+        }
+    }
+    // NVIDIA DRM 在 GDM restart 后可能暂时报告 0 modes，重试
+    if connector_infos.is_empty() {
+        info!("⏳ 等待 connector modes 就绪...");
+        for retry in 0..5 {
+            std::thread::sleep(Duration::from_secs(2));
+            info!("⏳ 重试 #{}...", retry + 1);
+            for &c in res.connectors() {
+                for f in [false, true] {
+                    if let Ok(info) = device.get_connector(c, f) {
+                        if info.state() != connector::State::Connected { continue; }
+                        if info.modes().is_empty() { continue; }
+                        let mode = info.modes().first().copied().unwrap();
+                        let (mw, mh) = mode.size();
+                        let mut found_crtc = None;
+                        for &enc in info.encoders() {
+                            if let Ok(enc_info) = device.get_encoder(enc) {
+                                for possible_crtc in res.filter_crtcs(enc_info.possible_crtcs()) {
+                                    if !used_crtcs.contains(&possible_crtc) {
+                                        found_crtc = Some(possible_crtc);
+                                        break;
+                                    }
+                                }
+                            }
+                            if found_crtc.is_some() { break; }
+                        }
+                        let Some(crtc_h) = found_crtc else { continue };
+                        used_crtcs.insert(crtc_h);
+                        let conn_name = format!("{:?}", c);
+                        info!("🖥️  Connector {} (CRTC {:?}): {}x{}", conn_name, crtc_h, mw, mh);
+                        connector_infos.push(ConnectorInfo {
+                            connector: c, crtc: crtc_h, mode, name: conn_name,
+                        });
+                        break;
+                    }
+                }
+            }
+            if !connector_infos.is_empty() { break; }
         }
     }
     if connector_infos.is_empty() { return Err("无可用显示器".into()); }
