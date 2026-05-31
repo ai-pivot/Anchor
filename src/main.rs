@@ -1222,26 +1222,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
 
-                        let mut elems: Vec<WaylandSurfaceRenderElement<PixmanRenderer>> = Vec::new();
+                        // ═══════════════════════════════════════════════
+                        // Phase 1: 收集渲染元素（bind 之前，需要 &mut renderer）
+                        // ═══════════════════════════════════════════════
+                        let mut all_elems: Vec<WaylandSurfaceRenderElement<PixmanRenderer>> = Vec::new();
                         let mut ws_offset: i32 = 0;
-                        // ─── Offscreen Double-Buffer Pipeline ───
-                        // 每个窗口独立收集元素 + 记录 slot 几何
-                        struct WindowLayer {
-                            idx: usize,
-                            elements: Vec<WaylandSurfaceRenderElement<PixmanRenderer>>,
-                            slot: (i32, i32, i32, i32), // x, y, w, h
-                        }
-                        let mut window_layers: Vec<WindowLayer> = Vec::new();
                         
                         if Some(out.crtc) == primary_crtc {
                             if let Some(fi) = fullscreen {
+                                // 全屏：只渲染聚焦窗口
                                 if let Some(tl) = ws.tops.get(fi) {
-                                    for elem in render_elements_from_surface_tree(&mut renderer, tl.wl_surface(), (0, bar_h), 1.0, 1.0, Kind::Unspecified) {
-                                        elems.push(elem);
+                                    for e in render_elements_from_surface_tree(&mut renderer, tl.wl_surface(), (0, bar_h), 1.0, 1.0, Kind::Unspecified) {
+                                        all_elems.push(e);
                                     }
                                 }
                             } else {
-                                // 动画偏移
+                                // 工作区切换动画偏移
                                 ws_offset = if ws_anim_active {
                                     if let Some(elapsed) = ws_anim_elapsed {
                                         if elapsed < ws_anim_duration {
@@ -1252,19 +1248,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     } else { 0 }
                                 } else { 0 };
                                 
-                                // Phase 1: 收集每个窗口的渲染元素
+                                // 正序收集所有窗口元素到同一个 vec
+                                // 后收集的窗口渲染时覆盖先收集的溢出
                                 for (i, tl) in ws.tops.iter().enumerate() {
-                                    let (sx, sy, sw, sh) = layout::slot(i, n_windows, ow, oh, bar_h, &state.cfg, state.workspaces[state.active_ws].layout);
-                                    let mut layer_elems: Vec<WaylandSurfaceRenderElement<PixmanRenderer>> = Vec::new();
-                                    for elem in render_elements_from_surface_tree(&mut renderer, tl.wl_surface(), (sx + ws_offset, sy), 1.0, 1.0, Kind::Unspecified) {
-                                        layer_elems.push(elem);
+                                    let (x, y, _w, _h) = layout::slot(i, n_windows, ow, oh, bar_h, &state.cfg, state.workspaces[state.active_ws].layout);
+                                    for e in render_elements_from_surface_tree(&mut renderer, tl.wl_surface(), (x + ws_offset, y), 1.0, 1.0, Kind::Unspecified) {
+                                        all_elems.push(e);
                                     }
-                                    window_layers.push(WindowLayer { idx: i, elements: layer_elems, slot: (sx + ws_offset, sy, sw, sh) });
                                 }
                             }
                         }
 
-                        // 收集 Scratchpad 元素（在 bind 之前）
+                        // Scratchpad 元素收集（bind 之前）
                         let sp_data = if Some(out.crtc) == primary_crtc {
                             if let Some(ref sp_surf) = state.scratchpad_surface {
                                 if sp_surf.alive() && state.scratchpad_visible {
@@ -1280,80 +1275,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             } else { None }
                         } else { None };
 
+                        // ═══════════════════════════════════════════════
+                        // Phase 2: bind + render（一次性绘制）
+                        // ═══════════════════════════════════════════════
                         let mut target = renderer.bind(&mut dmabuf)?;
-                        let sp = Size::<i32, Physical>::new(ow, oh);
-                        let mut f = renderer.render(&mut target, sp, Transform::Normal)?;
-                        let dmg = Rectangle::from_size(sp);
+                        let sp_size = Size::<i32, Physical>::new(ow, oh);
+                        let mut f = renderer.render(&mut target, sp_size, Transform::Normal)?;
+                        let dmg = Rectangle::from_size(sp_size);
 
+                        // Step 1: 壁纸（最底层）
                         if state.wallpaper_cache.pixels.is_none() {
                             layout::render_wallpaper(&mut f, &state.cfg, ow, oh, state.frame);
                         }
-                        
-                        // Fullscreen 模式：直接一次性渲染
-                        draw_render_elements(&mut f, 1.0, &elems, &[dmg])?;
-                        
-                        // ─── Offscreen Double-Buffer Pipeline: Layered Render ───
-                        // 核心思路：每个窗口独立渲染，渲染前先画所有后续窗口的 slot 背景
-                        // 这样窗口 i 的溢出会被窗口 i+1, i+2, ... 的 slot 背景完全覆盖
-                        // 最终只有每个窗口 slot 区域内的内容可见
-                        if Some(out.crtc) == primary_crtc && fullscreen.is_none() && !window_layers.is_empty() {
-                            let bg = layout::color_hex(&state.cfg.colors.background);
-                            
-                            for (layer_i, layer) in window_layers.iter().enumerate() {
-                                let (_, _, slot_w, slot_h) = layer.slot;
-                                
-                                // Step A: 为所有后续窗口画 slot 背景（覆盖前一个窗口的溢出）
-                                for later_layer in &window_layers[(layer_i + 1)..] {
-                                    let (lx, ly, lw, lh) = later_layer.slot;
-                                    f.clear(bg, &[layout::rect(lx, ly, lw, lh)]).ok();
-                                }
-                                
-                                // Step B: 渲染当前窗口内容
-                                if !layer.elements.is_empty() {
-                                    draw_render_elements(&mut f, 1.0, &layer.elements, &[dmg])?;
-                                } else {
-                                    // 无 buffer：画占位符（暗色 + 窗口编号）
-                                    let (sx, sy, sw, sh) = layer.slot;
-                                    let placeholder_bg = layout::opaque(0.08, 0.08, 0.12);
-                                    f.clear(placeholder_bg, &[layout::rect(sx, sy, sw, sh)]).ok();
-                                    let accent = crate::config::parse_color(&state.cfg.colors.focus_border);
-                                    crate::text_render::draw_text(&mut f, &format!("#{}", layer.idx + 1), sx + 12, sy + 12, 16.0, (accent.0, accent.1, accent.2));
-                                    // 占位进度指示
-                                    let dot = layout::opaque(accent.0 * 0.3, accent.1 * 0.3, accent.2 * 0.3);
-                                    let t = state.frame as f32 * 0.1;
-                                    for di in 0..3 {
-                                        let phase = (t + di as f32 * 2.0).sin() * 0.5 + 0.5;
-                                        let dx = sx + sw / 2 - 20 + di * 16;
-                                        let dy = sy + sh / 2;
-                                        let ds = (4.0 + phase * 4.0) as i32;
-                                        f.clear(dot, &[layout::rect(dx, dy - ds/2, ds, ds)]).ok();
-                                    }
-                                }
-                            }
-                            
-                            // Step C: 最终 pass — 画第一个窗口之前的区域背景（清理最左侧溢出）
-                            if let Some(first) = window_layers.first() {
-                                let (fx, fy, _, fh) = first.slot;
-                                if fx > 0 {
-                                    f.clear(bg, &[layout::rect(0, fy, fx, fh)]).ok();
-                                }
-                            }
-                        }
 
-                        // 装饰边框（在 scratchpad 之前，这样 scratchpad 能覆盖它们）
+                        // Step 2: 所有窗口内容（一次性绘制）
+                        // draw_render_elements 按元素在 vec 中的顺序绘制
+                        // 因为正序收集，后面的窗口元素自然覆盖前面的溢出
+                        draw_render_elements(&mut f, 1.0, &all_elems, &[dmg])?;
+
+                        // Step 3: 装饰边框（在窗口内容之上）
                         if Some(out.crtc) == primary_crtc && fullscreen.is_none() {
                             for (i, _) in ws.tops.iter().enumerate() {
-                                layout::render_window_decorations_anim(&mut f, &state.cfg, i, n_windows, focus_idx, ow, oh, bar_h, state.workspaces[state.active_ws].layout, ws_offset);
+                                layout::render_window_decorations_anim(
+                                    &mut f, &state.cfg, i, n_windows, focus_idx,
+                                    ow, oh, bar_h, state.workspaces[state.active_ws].layout, ws_offset
+                                );
                             }
                         }
 
-                        // Scratchpad 浮动渲染（在装饰边框之上，完全覆盖下方内容）
+                        // Step 4: Scratchpad（在装饰之上，不透明背景完全覆盖）
                         if let Some((ref sp_elems, sp_x, sp_y, sp_w, sp_h)) = sp_data {
                             let accent = crate::config::parse_color(&state.cfg.colors.focus_border);
                             let bw = 4;
-                            // 不透明深色背景（完全遮住下方内容）
-                            let bg = layout::opaque(0.06, 0.06, 0.10);
-                            f.clear(bg, &[layout::rect(sp_x - bw, sp_y - bw, sp_w + 2 * bw, sp_h + 2 * bw)]).ok();
+                            // 不透明背景
+                            let sp_bg = layout::opaque(0.06, 0.06, 0.10);
+                            f.clear(sp_bg, &[layout::rect(sp_x - bw, sp_y - bw, sp_w + 2 * bw, sp_h + 2 * bw)]).ok();
                             // 边框
                             let border = layout::opaque(accent.0, accent.1, accent.2);
                             f.clear(border, &[layout::rect(sp_x - bw, sp_y - bw, sp_w + 2 * bw, bw)]).ok();
@@ -1362,14 +1318,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             f.clear(border, &[layout::rect(sp_x + sp_w, sp_y, bw, sp_h)]).ok();
                             // 终端内容
                             draw_render_elements(&mut f, 1.0, sp_elems, &[dmg])?;
-                            // 标签
                             crate::text_render::draw_text(&mut f, "SCRATCHPAD", sp_x + 6, sp_y - 22, 14.0, (accent.0, accent.1, accent.2));
                         }
 
+                        // Step 5: Headbar
                         let ws_counts: Vec<usize> = state.workspaces.iter().map(|w| w.tops.len()).collect();
                         layout::render_headbar(&mut f, &state.cfg, ow, oh, n_windows, focus_idx, time_secs, &window_title, state.active_ws, NUM_WORKSPACES, &ws_counts);
 
-                        // 通知弹窗
+                        // Step 6: 通知弹窗
                         if Some(out.crtc) == primary_crtc && !state.notifications.is_empty() {
                             let accent = crate::config::parse_color(&state.cfg.colors.focus_border);
                             let notif_data: Vec<(String, std::time::Instant, std::time::Duration)> = state.notifications.iter()
@@ -1377,27 +1333,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             layout::render_notifications(&mut f, &notif_data, ow, state.cfg.bar.height, accent);
                         }
 
-                        // 内置启动器
+                        // Step 7: 内置启动器
                         if Some(out.crtc) == primary_crtc && state.launcher_visible {
                             let filtered = state.launcher_filter();
                             layout::render_launcher(&mut f, &state.cfg, ow, oh, &state.launcher_query, &filtered, state.launcher_selected);
                         }
 
-                        // 光标（粗实心三角形，不受 block-linear 影响）
+                        // Step 8: 光标
                         if Some(out.crtc) == primary_crtc {
                             let cx = state.pointer_pos.0 as i32;
                             let cy = state.pointer_pos.1 as i32;
                             let cc = Color32F::new(1.0, 1.0, 1.0, 1.0);
-                            // 主三角形：宽 16px，高 22px
-                            // 竖线（左边）
                             let _ = f.clear(cc, &[Rectangle::new(Point::new(cx, cy), Size::new(4, 22))]);
-                            // 横线段（逐行向右扩展形成三角形）
                             let _ = f.clear(cc, &[Rectangle::new(Point::new(cx + 4, cy + 4), Size::new(4, 4))]);
                             let _ = f.clear(cc, &[Rectangle::new(Point::new(cx + 8, cy + 8), Size::new(4, 4))]);
                             let _ = f.clear(cc, &[Rectangle::new(Point::new(cx + 10, cy + 12), Size::new(4, 4))]);
                             let _ = f.clear(cc, &[Rectangle::new(Point::new(cx + 8, cy + 14), Size::new(4, 4))]);
                             let _ = f.clear(cc, &[Rectangle::new(Point::new(cx + 4, cy + 16), Size::new(4, 4))]);
-                            // 黑色边框（对比度）
                             let bc = Color32F::new(0.0, 0.0, 0.0, 1.0);
                             let _ = f.clear(bc, &[Rectangle::new(Point::new(cx - 1, cy), Size::new(1, 23))]);
                             let _ = f.clear(bc, &[Rectangle::new(Point::new(cx, cy - 1), Size::new(5, 1))]);
