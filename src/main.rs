@@ -533,33 +533,6 @@ fn send_frames(s: &WlSurface, t: u32) {
         |_,_,&()| true);
 }
 
-/// 从 sysfs EDID 解析 DTD timing（用于 NVIDIA DRM 不报告 modes 的情况）
-fn parse_edid_dtd(conn_name: &str) -> Option<(u32, u16, u16, u16, u16, u16, u16, u16, u16, u16, u32)> {
-    for card in 0..4u8 {
-        let path = format!("/sys/class/drm/card{}-{}/edid", card, conn_name);
-        if let Ok(data) = std::fs::read(&path) {
-            if data.len() < 72 { continue; }
-            let dtd = &data[54..72];
-            let clock = ((dtd[1] as u32) << 8) | dtd[0] as u32; // 10kHz units
-            if clock == 0 { continue; }
-            let hdisplay = (((dtd[4] as u16) >> 4) << 8) | dtd[2] as u16;
-            let hblank = (((dtd[4] as u16) & 0xf) << 8) | dtd[3] as u16;
-            let vdisplay = (((dtd[7] as u16) >> 4) << 8) | dtd[5] as u16;
-            let vblank = (((dtd[7] as u16) & 0xf) << 8) | dtd[6] as u16;
-            let hsync_offset = (((dtd[11] as u16) >> 4) << 8) | dtd[8] as u16;
-            let hsync_pulse = (((dtd[11] as u16) & 0xf) << 8) | dtd[9] as u16;
-            let vsync_offset = (((dtd[10] as u16) >> 4) & 0xf) | (((dtd[11] as u16) >> 6) << 4);
-            let vsync_pulse = (dtd[10] as u16 & 0xf) | ((((dtd[11] as u16) >> 4) & 0x3) << 4);
-            let htotal = hdisplay + hblank;
-            let vtotal = vdisplay + vblank;
-            if hdisplay < 640 || vdisplay < 480 { continue; }
-            let vrefresh = if (htotal as u32 * vtotal as u32) > 0 { clock * 10000 / (htotal as u32 * vtotal as u32) } else { 60 };
-            return Some((clock, hdisplay, hdisplay + hsync_offset, hdisplay + hsync_offset + hsync_pulse, htotal, vdisplay, vdisplay + vsync_offset, vdisplay + vsync_offset + vsync_pulse, vtotal, 0, vrefresh));
-        }
-    }
-    None
-}
-
 // ── main ─────────────────────────────────────────────────
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -629,95 +602,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for &c in res.connectors() {
         for f in [false, true] {
             if let Ok(info) = device.get_connector(c, f) {
-                if info.state() != connector::State::Connected { continue; }
-                let mode = if let Some(m) = info.modes().first().copied() {
-                    m
-                } else {
-                    // NVIDIA DRM 通过 ioctl 报告 0 modes，从 sysfs EDID 构造 fallback
-                    let conn_name = format!("{:?}", c).to_lowercase().replace(' ', "-");
-                    let raw = if let Some((clock, hd, hss, hse, ht, vd, vss, vse, vt, _hskew, vref)) = parse_edid_dtd(&conn_name) {
-                        info!("⚠️  Connector {:?} 0 modes, EDID DTD: {}x{}@{}Hz", c, hd, vd, vref);
-                        drm_sys::drm_mode_modeinfo {
-                            clock,
-                            hdisplay: hd, hsync_start: hss, hsync_end: hse, htotal: ht, hskew: 0,
-                            vdisplay: vd, vsync_start: vss, vsync_end: vse, vtotal: vt, vscan: 0,
-                            vrefresh: vref,
-                            flags: 0x5,
-                            type_: 0x40,
-                            name: {
-                                let mut n = [0i8; 32];
-                                let s = format!("{}x{}", hd, vd);
-                                for (i, b) in s.bytes().enumerate() {
-                                    if i >= 32 { break; }
-                                    n[i] = b as i8;
-                                }
-                                n
-                            },
-                        }
-                    } else {
-                        // 遍历 sysfs 尝试所有 connector 的 EDID
-                        let mut found = None;
-                        for card in 0..4u8 {
-                            if let Ok(entries) = std::fs::read_dir(format!("/sys/class/drm/")) {
-                                for entry in entries.flatten() {
-                                    let name = entry.file_name().to_string_lossy().to_string();
-                                    if !name.starts_with(&format!("card{}", card)) { continue; }
-                                    let suffix = &name[format!("card{}-", card).len()..];
-                                    if suffix.contains("DP-") || suffix.contains("HDMI-") || suffix.contains("DVI-") {
-                                        let status_path = format!("/sys/class/drm/{}/status", name);
-                                        if let Ok(status) = std::fs::read_to_string(&status_path) {
-                                            if status.trim() == "connected" {
-                                                if let Some(dtd) = parse_edid_dtd(suffix) {
-                                                    found = Some((suffix.to_string(), dtd));
-                                                    break;
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            if found.is_some() { break; }
-                        }
-                        if let Some((sysfs_name, (clock, hd, hss, hse, ht, vd, vss, vse, vt, _hskew, vref))) = found {
-                            info!("⚠️  Connector {:?} 0 modes, sysfs EDID ({}) {}x{}@{}Hz", c, sysfs_name, hd, vd, vref);
-                            drm_sys::drm_mode_modeinfo {
-                                clock,
-                                hdisplay: hd, hsync_start: hss, hsync_end: hse, htotal: ht, hskew: 0,
-                                vdisplay: vd, vsync_start: vss, vsync_end: vse, vtotal: vt, vscan: 0,
-                                vrefresh: vref,
-                                flags: 0x5,
-                                type_: 0x40,
-                                name: {
-                                    let mut n = [0i8; 32];
-                                    let s = format!("{}x{}", hd, vd);
-                                    for (i, b) in s.bytes().enumerate() {
-                                        if i >= 32 { break; }
-                                        n[i] = b as i8;
-                                    }
-                                    n
-                                },
-                            }
-                        } else {
-                            info!("⚠️  Connector {:?} 0 modes, 无 EDID, fallback 2560x1440", c);
-                            drm_sys::drm_mode_modeinfo {
-                                clock: 24150,
-                                hdisplay: 2560, hsync_start: 2608, hsync_end: 2640, htotal: 2720, hskew: 0,
-                                vdisplay: 1440, vsync_start: 1443, vsync_end: 1448, vtotal: 1481, vscan: 0,
-                                vrefresh: 59,
-                                flags: 0x5,
-                                type_: 0x40,
-                                name: {
-                                    let mut n = [0i8; 32];
-                                    let s = "2560x1440";
-                                    for (i, b) in s.bytes().enumerate() { n[i] = b as i8; }
-                                    n
-                                },
-                            }
-                        }
-                    };
-                    use smithay::reexports::drm::control::Mode;
-                    Mode::from(raw)
-                };
+                if info.state() != connector::State::Connected || info.modes().is_empty() { continue; }
+                let mode = info.modes().first().copied().unwrap();
                 let (mw, mh) = mode.size();
 
                 let mut found_crtc = None;
@@ -773,9 +659,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let gbm_dup = GbmDevice::new(fd_clones[idx].clone())?;
         let alloc = GbmAllocator::new(gbm_dup, GbmBufferFlags::SCANOUT);
         let buf_surf = match GbmBufferedSurface::new(surface, alloc,
-            &[Fourcc::Argb8888, Fourcc::Xrgb8888],
-            // NVIDIA 只用 Invalid modifier（Linear 会导致 test_state 失败）
-            fmts.clone().into_iter().filter(|f| f.modifier == Modifier::Invalid)) {
+            &[Fourcc::Argb8888, Fourcc::Xrgb8888], fmts.clone().into_iter()) {
             Ok(bs) => bs,
             Err(e) => { warn!("⚠️  BufferSurface 创建失败 {}: {:?}", ci.name, e); continue; }
         };
