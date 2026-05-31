@@ -1,11 +1,11 @@
-# Titan Compositor Configuration v17
+# Titan Compositor Configuration v20
 # ~/.config/titan/config.toml
 
 [colors]
-background = "#0a0a14"
+background = "#0d0d1a"
 focus_border = "#7aa2f7"
-unfocus_border = "#2a2c3e"
-bar_background = "#08080f"
+unfocus_border = "#24253a"
+bar_background = "#06060e"
 bar_foreground = "#c0caf5"
 bar_workspace_active = "#7aa2f7"
 bar_workspace_inactive = "#3b3d57"
@@ -42,8 +42,8 @@ block_height_gobs = 0
 
 [layout]
 border_width = 4
-gap = 10
-margin = 3
+gap = 14
+margin = 6
 
 [keybindings]
 "super+return" = "terminal"

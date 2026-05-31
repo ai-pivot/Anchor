@@ -891,6 +891,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if state.wallpaper_cache.pixels.is_none() {
                             layout::render_wallpaper(&mut f, &state.cfg, ow, oh, state.frame);
                         }
+                        // 窗口暗色背景（在壁纸之上、窗口内容之下）
+                        if Some(out.crtc) == primary_crtc && fullscreen.is_none() {
+                            layout::render_window_bg(&mut f, &state.cfg, n_windows, ow, oh, bar_h);
+                        }
                         draw_render_elements(&mut f, 1.0, &elems, &[dmg])?;
 
                         if Some(out.crtc) == primary_crtc && fullscreen.is_none() {
@@ -899,7 +903,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
 
-                        layout::render_headbar(&mut f, &state.cfg, ow, oh, n_windows, focus_idx, time_secs, &window_title, state.active_ws, NUM_WORKSPACES);
+                        let ws_counts: Vec<usize> = state.workspaces.iter().map(|w| w.tops.len()).collect();
+                        layout::render_headbar(&mut f, &state.cfg, ow, oh, n_windows, focus_idx, time_secs, &window_title, state.active_ws, NUM_WORKSPACES, &ws_counts);
 
                         // 光标
                         if Some(out.crtc) == primary_crtc {
