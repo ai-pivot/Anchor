@@ -2,6 +2,9 @@
 # Titan Wayland 会话 — 由 GDM 调用
 # 不传 --direct，让 Titan 通过 libseat 获取 DRM master
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
 export TERMINAL="${TERMINAL:-foot}"
 export XDG_SESSION_TYPE=wayland
 export XDG_CURRENT_DESKTOP=titan
@@ -19,8 +22,16 @@ export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.js
 export ELECTRON_OZONE_PLATFORM_HINT=wayland
 export CHROME_FLAGS="--ozone-platform=wayland --enable-features=UseOzonePlatform"
 
+# 输入法
+export GTK_IM_MODULE=fcitx
+export QT_IM_MODULE=fcitx
+export XMODIFIERS=@im=fcitx
+export SDL_IM_MODULE=fcitx
+export GLFW_IM_MODULE=ibus
+export INPUT_METHOD=fcitx
+
 # 确保 XDG_RUNTIME_DIR
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 mkdir -p "$XDG_RUNTIME_DIR"
 
-exec ./target/release/titan 2>&1 | tee /tmp/titan-session.log
+exec "$PROJECT_DIR/target/release/titan" 2>&1 | tee /tmp/titan-session.log

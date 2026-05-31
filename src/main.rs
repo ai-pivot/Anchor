@@ -227,8 +227,8 @@ impl App {
     fn load_apps() -> Vec<(String, String)> {
         let mut apps = Vec::new();
         let dirs = [
-            format!("/usr/share/applications"),
-            format!("$HOME/.local/share/applications"),
+            "/usr/share/applications".to_string(),
+            format!("{}/.local/share/applications", std::env::var("HOME").unwrap_or_default()),
         ];
         for dir in &dirs {
             if let Ok(entries) = std::fs::read_dir(dir) {
@@ -572,10 +572,16 @@ impl App {
                                     // 内置截图
                                     let ts = std::time::SystemTime::now()
                                         .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-                                    let dir = std::path::PathBuf::from("$HOME/Pictures/Screenshots");
+                                    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
+                                    let dir = std::path::PathBuf::from(format!("{}/Pictures/Screenshots", home));
                                     let _ = std::fs::create_dir_all(&dir);
                                     let path = dir.join(format!("titan-{}.raw", ts));
-                                    let args = format!("timeout 3 ./scripts/drm-dump-fb /dev/dri/card1 {}", path.display());
+                                    let exe = std::env::current_exe().unwrap_or_default();
+                                    let project_dir = exe.parent().and_then(|p| p.parent())
+                                        .map(|p| p.display().to_string())
+                                        .unwrap_or_else(|| ".".into());
+                                    let dump_tool = format!("{}/scripts/drm-dump-fb", project_dir);
+                                    let args = format!("timeout 3 {} /dev/dri/card1 {}", dump_tool, path.display());
                                     std::process::Command::new("sh").arg("-c").arg(&args).spawn().ok();
                                     data.notify("Screenshot saved");
                                     return FilterResult::Intercept(());
