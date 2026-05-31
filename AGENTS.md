@@ -1,7 +1,7 @@
 # Titan — AGENTS.md
 
 > Wayland tiling compositor in Rust, using Smithay 0.7.
-> Targets NVIDIA proprietary driver (tested on 5080D).
+> Targets NVIDIA proprietary driver.
 
 ## Architecture
 
@@ -10,7 +10,6 @@
 - **GPU**: NVIDIA proprietary (`nvidia-drm.modeset=1`)
 - **Renderer**: Pixman (CPU-only; NVIDIA proprietary doesn't support GBM/EGL GLES)
 - **Session**: libseat (logind backend) via GDM
-- **Monitor**: DP-4, 2560×1440@59Hz (configurable)
 
 ## Project Structure
 
@@ -20,7 +19,6 @@ src/
   layout.rs      — Layout engine (slot calculation, headbar, decorations, wallpaper)
   text_render.rs — fontdue-based TTF text rendering
   config.rs      — TOML config parsing
-  font.rs        — Old bitmap font (superseded by text_render)
 scripts/
   titan-session   — GDM session wrapper (auto-detects project dir)
   drm-dump-fb.c   — DRM framebuffer dump tool (compiled separately)
@@ -85,8 +83,8 @@ margin = 6
 [terminal]
 command = "foot"
 
-[launcher]
-command = "wmenu"  # fallback: built-in launcher
+[input_method]
+method = "fcitx"  # "fcitx", "ibus", or "none"
 
 [[window_rule]]
 app_id = "firefox"
@@ -94,23 +92,7 @@ workspace = 1
 layout = "master-stack"
 ```
 
-## Smithay Source Patches (NOT in git)
-
-The following files in the cargo registry are patched. They survive `cargo build`
-but NOT `cargo clean` — must re-apply after clean.
-
-### 1. `smithay-0.7.0/src/backend/allocator/gbm.rs`
-- Line ~227: `implicit=true` fallback when GBM `create_buffer_object_with_modifiers2` fails
-  and modifiers contain `Invalid` or `Linear`. NVIDIA GBM returns block-linear modifier
-  that causes `addfb2` to fail; `implicit=true` forces `Modifier::Invalid`.
-
-### 2. `smithay-0.7.0/src/backend/renderer/pixman/mod.rs`
-- `import_dmabuf`: Relaxed to accept any modifier (not just Linear).
-- `dmabuf_formats`: Returns both `Linear` and `Invalid` modifiers.
-
 ## Session Lifecycle
-
-### The LibSeatSession + Notifier Pattern
 
 `LibSeatSession::new()` returns `(LibSeatSession, LibSeatSessionNotifier)`:
 - **Notifier** holds the ONLY strong reference to the libseat connection state.
@@ -123,11 +105,8 @@ but NOT `cargo clean` — must re-apply after clean.
 ## NVIDIA DRM Quirks
 
 - Only `drmModeAddFB2WithModifiers` works (legacy `drmModeAddFB` unsupported)
-- GBM buffer modifier: `0x300000000606014` (block-linear tiling)
-- Plane formats report `{Invalid, 0x3fffff}` modifiers, not Linear
-- `drmSetMaster`: Returns EACCES on logind sessions (expected)
 - Dumb buffers: Not supported for scanout
-- **Black screen**: Pixman renders in linear layout, NVIDIA scanout expects block-linear.
+- Pixman renders in linear layout, NVIDIA scanout expects block-linear.
   Renders correctly at macro scale (window-sized regions) but small pixels may distort.
 
 ## Deployment
@@ -152,12 +131,6 @@ sleep 8 && pgrep -a titan
 
 1. **NEVER `systemctl restart gdm3`** — destroys logind session → NVIDIA modes lost → Titan broken
 2. **NEVER `sudo reboot`** — same + disconnects remote access
-3. **NEVER modify `titan-session` to add `--direct`** — doesn't work in GDM logind session
-
-### If Session is Completely Broken
-
-Only then `systemctl restart gdm3`, but know that Titan may fail to start
-due to NVIDIA 0-modes issue. Requires full system boot from GRUB to recover.
 
 ## Key Lessons
 
@@ -165,12 +138,9 @@ due to NVIDIA 0-modes issue. Requires full system boot from GRUB to recover.
    windows don't receive `send_configure` → clients release old buffers → new
    buffers haven't arrived → `render_elements_from_surface_tree` returns empty → black screen.
 2. **Keep notifier alive.** Dropping it kills the entire session silently.
-3. **Don't fight NVIDIA on `drmSetMaster`.** Logind manages master.
-4. **`test_state` failure is a real error.** Don't patch it to be non-fatal.
-5. **No slot-based clipping.** Drawing slot backgrounds between windows creates
+3. **No slot-based clipping.** Drawing slot backgrounds between windows creates
    visible seams. Let natural draw order handle overlap.
-6. **Rendering order matters.** Windows → Decorations → Scratchpad → Headbar → Notifications → Launcher → Cursor.
-7. **Scratchpad must intercept `new_toplevel`.** Use a `scratchpad_pending` flag to
+4. **Rendering order matters.** Windows → Decorations → Scratchpad → Headbar → Notifications → Launcher → Cursor.
+5. **Scratchpad must intercept `new_toplevel`.** Use a `scratchpad_pending` flag to
    divert the next toplevel into `scratchpad_surface` instead of workspace tops.
-8. **Disable foot CSD.** Set `csd.preferred=none` in `~/.config/foot/foot.ini` to
-   prevent terminal header from causing size misalignment.
+6. **Disable foot CSD.** Set `csd.preferred=none` in `~/.config/foot/foot.ini`.

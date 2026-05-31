@@ -107,19 +107,9 @@ layout = "columns"
 
 ## Smithay Patches
 
-Two files in the cargo registry must be patched for NVIDIA support:
-
-### `backend/allocator/gbm.rs` (line ~227)
-
-Set `implicit=true` fallback when GBM buffer creation fails with `Invalid` or `Linear`
-modifiers. NVIDIA GBM returns a block-linear modifier that causes `addfb2` to fail.
-
-### `backend/renderer/pixman/mod.rs`
-
-- `import_dmabuf`: Accept any modifier (not just Linear)
-- `dmabuf_formats`: Return `[Linear, Invalid]` for each format
-
-These patches survive `cargo build` but NOT `cargo clean`.
+**No patches required.** Smithay 0.7.0 works out of the box with NVIDIA proprietary
+driver and Pixman renderer. Earlier versions required patches for GBM modifier handling,
+but these are no longer needed with current NVIDIA driver versions.
 
 ## Architecture
 
