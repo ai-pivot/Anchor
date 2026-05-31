@@ -97,6 +97,12 @@ struct TitanOutput {
 
 // ── App ──────────────────────────────────────────────────
 
+struct Notification {
+    text: String,
+    created: std::time::Instant,
+    duration: std::time::Duration,
+}
+
 struct App {
     comp: CompositorState, xdg: XdgShellState, shm: ShmState, seat_state: SeatState<Self>,
     dd: DataDeviceState, seat: Seat<Self>,
@@ -112,6 +118,7 @@ struct App {
     window_titles: std::collections::HashMap<usize, String>,
     vblank_crtcs: std::collections::HashSet<crtc::Handle>,
     wallpaper_cache: wallpaper::WallpaperCache,
+    notifications: Vec<Notification>,
     // 多显示器尺寸信息（用于鼠标穿越）
     output_sizes: Vec<(i32, i32, i32, i32)>, // (x, y, w, h) per output
 }
@@ -182,6 +189,19 @@ impl App {
         }
     }
 
+    fn notify(&mut self, text: impl Into<String>) {
+        self.notifications.push(Notification {
+            text: text.into(),
+            created: std::time::Instant::now(),
+            duration: std::time::Duration::from_secs(3),
+        });
+    }
+
+    fn drain_notifications(&mut self) {
+        let now = std::time::Instant::now();
+        self.notifications.retain(|n| now.duration_since(n.created) < n.duration);
+    }
+
     fn toggle_fullscreen(&mut self) {
         let fi = self.focus_idx();
         let fs = self.workspaces[self.active_ws].fullscreen;
@@ -217,6 +237,7 @@ impl App {
         }
 
         self.active_ws = target;
+        self.notify(format!("Workspace {}", target + 1));
 
         // 布局新工作区的窗口
         self.do_layout();
@@ -248,6 +269,7 @@ impl App {
         let surf = tl.wl_surface().clone();
 
         info!("📦 移动窗口 #{} → 工作区 {}", fi + 1, target + 1);
+        self.notify(format!("Moved → WS {}", target + 1));
 
         // 从当前工作区移除
         self.workspaces[self.active_ws].tops.remove(fi);
@@ -356,7 +378,9 @@ impl App {
                                 Keysym::space => {
                                     let ws = &mut data.workspaces[data.active_ws];
                                     ws.layout = ws.layout.next();
-                                    info!("🔄 布局切换 → {}", ws.layout.name());
+                                    let name = ws.layout.name();
+                                    info!("🔄 布局切换 → {}", name);
+                                    data.notify(format!("Layout: {}", name));
                                     return FilterResult::Intercept(());
                                 }
                                 // Super+1-9：切换工作区
@@ -720,6 +744,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         window_titles: std::collections::HashMap::new(),
         vblank_crtcs: std::collections::HashSet::new(),
         wallpaper_cache: wallpaper::WallpaperCache::new(),
+        notifications: Vec::new(),
         output_sizes,
     };
     let listener = ListeningSocket::bind("wayland-titan")?;
@@ -915,6 +940,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let ws_counts: Vec<usize> = state.workspaces.iter().map(|w| w.tops.len()).collect();
                         layout::render_headbar(&mut f, &state.cfg, ow, oh, n_windows, focus_idx, time_secs, &window_title, state.active_ws, NUM_WORKSPACES, &ws_counts);
 
+                        // 通知弹窗
+                        if Some(out.crtc) == primary_crtc && !state.notifications.is_empty() {
+                            let accent = crate::config::parse_color(&state.cfg.colors.focus_border);
+                            let notif_data: Vec<(String, std::time::Instant, std::time::Duration)> = state.notifications.iter()
+                                .map(|n| (n.text.clone(), n.created, n.duration)).collect();
+                            layout::render_notifications(&mut f, &notif_data, ow, state.cfg.bar.height, accent);
+                        }
+
                         // 光标（粗实心三角形，不受 block-linear 影响）
                         if Some(out.crtc) == primary_crtc {
                             let cx = state.pointer_pos.0 as i32;
@@ -946,6 +979,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             state.dirty = false;
             state.frame += 1;
+            state.drain_notifications();
             if state.frame == 1 { info!("✅ 第一帧渲染！"); }
             if state.frame % 600 == 0 { info!("📊 {} 帧", state.frame); }
         }
