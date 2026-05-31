@@ -122,6 +122,13 @@ struct App {
     notifications: Vec<Notification>,
     scratchpad: Option<std::process::Child>,
     scratchpad_visible: bool,
+    scratchpad_surface: Option<ToplevelSurface>,
+    scratchpad_pending: bool,
+    // 内置启动器
+    launcher_visible: bool,
+    launcher_query: String,
+    launcher_apps: Vec<(String, String)>, // (name, exec)
+    launcher_selected: usize,
     // 工作区切换动画
     ws_anim: WsAnimation,
     // 多显示器尺寸信息（用于鼠标穿越）
@@ -216,18 +223,104 @@ impl App {
         });
     }
 
+    fn load_apps() -> Vec<(String, String)> {
+        let mut apps = Vec::new();
+        let dirs = [
+            format!("/usr/share/applications"),
+            format!("$HOME/.local/share/applications"),
+        ];
+        for dir in &dirs {
+            if let Ok(entries) = std::fs::read_dir(dir) {
+                for entry in entries.flatten() {
+                    if let Some(name) = entry.path().to_str() {
+                        if name.ends_with(".desktop") {
+                            if let Ok(content) = std::fs::read_to_string(name) {
+                                let mut app_name = String::new();
+                                let mut app_exec = String::new();
+                                let mut is_terminal = false;
+                                let mut no_display = false;
+                                for line in content.lines() {
+                                    if line.starts_with("Name=") && app_name.is_empty() {
+                                        app_name = line[5..].to_string();
+                                    }
+                                    if line.starts_with("Exec=") && app_exec.is_empty() {
+                                        let exec = &line[5..];
+                                        // 移除 %参数占位符
+                                        app_exec = exec.split_whitespace().next().unwrap_or(exec).to_string();
+                                    }
+                                    if line.starts_with("Terminal=true") { is_terminal = true; }
+                                    if line.starts_with("NoDisplay=true") { no_display = true; }
+                                }
+                                if !app_name.is_empty() && !app_exec.is_empty() && !no_display {
+                                    if is_terminal {
+                                        app_exec = format!("foot {}", app_exec);
+                                    }
+                                    apps.push((app_name, app_exec));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        apps.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
+        apps.dedup_by(|a, b| a.0 == b.0);
+        apps
+    }
+
+    fn toggle_launcher(&mut self) {
+        if self.launcher_visible {
+            self.launcher_visible = false;
+            self.launcher_query.clear();
+            self.launcher_apps.clear();
+        } else {
+            let all_apps = Self::load_apps();
+            self.launcher_apps = all_apps;
+            self.launcher_query.clear();
+            self.launcher_selected = 0;
+            self.launcher_visible = true;
+        }
+        self.dirty = true;
+    }
+
+    fn launcher_filter(&self) -> Vec<(usize, &(String, String))> {
+        let q = self.launcher_query.to_lowercase();
+        self.launcher_apps.iter().enumerate()
+            .filter(|(_, (name, _))| name.to_lowercase().contains(&q))
+            .collect()
+    }
+
+    fn launcher_select(&mut self) {
+        let filtered = self.launcher_filter();
+        if let Some((_, (_, exec))) = filtered.get(self.launcher_selected) {
+            let exec_cmd = exec.clone();
+            info!("🚀 启动器: {}", exec_cmd);
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg(&exec_cmd)
+                .env("WAYLAND_DISPLAY", "wayland-titan")
+                .env("XDG_RUNTIME_DIR", format!("/run/user/{}", unsafe { libc::getuid() }))
+                .spawn().ok();
+        }
+        self.launcher_visible = false;
+        self.launcher_query.clear();
+        self.dirty = true;
+    }
+
     fn toggle_scratchpad(&mut self) {
         if self.scratchpad_visible {
-            // 隐藏：杀掉 scratchpad 进程
+            // 隐藏：杀掉 scratchpad 进程 + 清除 surface
             if let Some(ref mut child) = self.scratchpad {
                 let _ = child.kill();
                 let _ = child.wait();
             }
             self.scratchpad = None;
+            self.scratchpad_surface = None;
             self.scratchpad_visible = false;
             self.notify("Scratchpad hidden");
         } else {
             // 显示：启动终端
+            self.scratchpad_pending = true;
             match std::process::Command::new("weston-terminal")
                 .env("WAYLAND_DISPLAY", "wayland-titan")
                 .env("XDG_RUNTIME_DIR", format!("/run/user/{}", unsafe { libc::getuid() }))
@@ -239,7 +332,6 @@ impl App {
                     self.notify("Scratchpad");
                 }
                 Err(_) => {
-                    // fallback: 用 foot 或 alacritty
                     match std::process::Command::new("foot")
                         .env("WAYLAND_DISPLAY", "wayland-titan")
                         .env("XDG_RUNTIME_DIR", format!("/run/user/{}", unsafe { libc::getuid() }))
@@ -250,7 +342,7 @@ impl App {
                             self.scratchpad_visible = true;
                             self.notify("Scratchpad (foot)");
                         }
-                        Err(_) => { self.notify("No terminal found"); }
+                        Err(_) => { self.scratchpad_pending = false; self.notify("No terminal found"); }
                     }
                 }
             }
@@ -418,6 +510,37 @@ impl App {
                 let _ = smithay::input::keyboard::KeyboardHandle::<Self>::input(
                     &kbd, self, keycode, state, serial, time,
                     |data: &mut App, mods: &ModifiersState, keysym: smithay::input::keyboard::KeysymHandle<'_>| {
+                        // ── 启动器模式键盘处理 ──
+                        if data.launcher_visible && state == KeyState::Pressed {
+                            let sym = keysym.modified_sym();
+                            match sym {
+                                Keysym::Escape => { data.launcher_visible = false; data.launcher_query.clear(); data.dirty = true; return FilterResult::Intercept(()); }
+                                Keysym::Return => { data.launcher_select(); return FilterResult::Intercept(()); }
+                                Keysym::Up => { if data.launcher_selected > 0 { data.launcher_selected -= 1; } data.dirty = true; return FilterResult::Intercept(()); }
+                                Keysym::Down => { let max = data.launcher_filter().len().saturating_sub(1); if data.launcher_selected < max { data.launcher_selected += 1; } data.dirty = true; return FilterResult::Intercept(()); }
+                                Keysym::BackSpace => { data.launcher_query.pop(); data.launcher_selected = 0; data.dirty = true; return FilterResult::Intercept(()); }
+                                _ => {
+                                    // 处理可打印字符
+                                    let sym = keysym.modified_sym();
+                                    let ch = match sym {
+                                        k if k.raw() >= 32 && k.raw() < 127 => {
+                                            // ASCII 可打印字符
+                                            Some(k.raw() as u8 as char)
+                                        }
+                                        _ => None,
+                                    };
+                                    if let Some(c) = ch {
+                                        if !mods.logo && !mods.ctrl && !mods.alt {
+                                            data.launcher_query.push(c);
+                                            data.launcher_selected = 0;
+                                            data.dirty = true;
+                                            return FilterResult::Intercept(());
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
                         if state == KeyState::Pressed && mods.logo {
                             let uid = unsafe { libc::getuid() };
                             match keysym.modified_sym() {
@@ -440,10 +563,7 @@ impl App {
                                     return FilterResult::Intercept(());
                                 }
                                 Keysym::d => {
-                                    std::process::Command::new("./scripts/titan-launcher")
-                                        .env("WAYLAND_DISPLAY", "wayland-titan")
-                                        .env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"))
-                                        .spawn().ok();
+                                    data.toggle_launcher();
                                     return FilterResult::Intercept(());
                                 }
                                 Keysym::f => { data.toggle_fullscreen(); return FilterResult::Intercept(()); }
@@ -564,6 +684,33 @@ impl App {
 impl XdgShellHandler for App {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState { &mut self.xdg }
     fn new_toplevel(&mut self, s: ToplevelSurface) {
+        // 拦截 scratchpad 窗口
+        if self.scratchpad_pending {
+            self.scratchpad_pending = false;
+            self.scratchpad_surface = Some(s.clone());
+            // 配置为浮动覆盖层：居中、上方 1/3 高度
+            let ow = self.osize.w;
+            let oh = self.osize.h;
+            let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
+            let sp_w = ow * 3 / 4; // 75% 宽度
+            let sp_h = oh / 3;     // 1/3 高度
+            let sp_x = (ow - sp_w) / 2;
+            let sp_y = bar_h + 8;
+            s.with_pending_state(|st| {
+                st.size = Some((sp_w, sp_h).into());
+                st.states.set(xdg_toplevel::State::Activated);
+            });
+            s.send_configure();
+            info!("🚀 Scratchpad 浮动窗口: {}x{} at ({},{})", sp_w, sp_h, sp_x, sp_y);
+            // 聚焦
+            let surf = s.wl_surface().clone();
+            let kbd = self.kbd.clone();
+            let serial = SERIAL_COUNTER.next_serial();
+            kbd.set_focus(self, Some(surf), serial);
+            self.dirty = true;
+            return;
+        }
+        
         self.workspaces[self.active_ws].tops.push(s);
         let ws = &self.workspaces[self.active_ws];
         let idx = ws.tops.len() - 1;
@@ -907,6 +1054,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         notifications: Vec::new(),
         scratchpad: None,
         scratchpad_visible: false,
+        scratchpad_surface: None,
+        scratchpad_pending: false,
+        launcher_visible: false,
+        launcher_query: String::new(),
+        launcher_apps: Vec::new(),
+        launcher_selected: 0,
         ws_anim: WsAnimation { start: None, from_ws: 0, to_ws: 0, duration_ms: 200, direction: 0 },
         output_sizes,
     };
@@ -1099,6 +1252,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
 
+                        // 收集 Scratchpad 元素（在 bind 之前）
+                        let sp_data = if Some(out.crtc) == primary_crtc {
+                            if let Some(ref sp_surf) = state.scratchpad_surface {
+                                if sp_surf.alive() && state.scratchpad_visible {
+                                    let sp_w = ow * 3 / 4;
+                                    let sp_h = oh / 3;
+                                    let sp_x = (ow - sp_w) / 2;
+                                    let sp_y = bar_h + 8;
+                                    let sp_elems: Vec<WaylandSurfaceRenderElement<PixmanRenderer>> = render_elements_from_surface_tree(
+                                        &mut renderer, sp_surf.wl_surface(), (sp_x, sp_y), 1.0, 1.0, Kind::Unspecified
+                                    );
+                                    Some((sp_elems, sp_x, sp_y, sp_w, sp_h))
+                                } else { None }
+                            } else { None }
+                        } else { None };
+
                         let mut target = renderer.bind(&mut dmabuf)?;
                         let sp = Size::<i32, Physical>::new(ow, oh);
                         let mut f = renderer.render(&mut target, sp, Transform::Normal)?;
@@ -1121,6 +1290,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             layout::render_window_bg_anim(&mut f, &state.cfg, n_windows, ow, oh, bar_h, state.workspaces[state.active_ws].layout, ws_offset2);
                         }
                         draw_render_elements(&mut f, 1.0, &elems, &[dmg])?;
+
+                        // Scratchpad 浮动渲染（在所有窗口之上）
+                        if let Some((ref sp_elems, sp_x, sp_y, sp_w, sp_h)) = sp_data {
+                            let accent = crate::config::parse_color(&state.cfg.colors.focus_border);
+                            let bg_color = Color32F::new(0.05, 0.05, 0.1, 1.0);
+                            f.clear(bg_color, &[layout::rect(sp_x - 4, sp_y - 4, sp_w + 8, sp_h + 8)]).ok();
+                            let border = layout::opaque(accent.0, accent.1, accent.2);
+                            f.clear(border, &[layout::rect(sp_x - 4, sp_y - 4, sp_w + 8, 4)]).ok();
+                            f.clear(border, &[layout::rect(sp_x - 4, sp_y + sp_h, sp_w + 8, 4)]).ok();
+                            f.clear(border, &[layout::rect(sp_x - 4, sp_y, 4, sp_h)]).ok();
+                            f.clear(border, &[layout::rect(sp_x + sp_w, sp_y, 4, sp_h)]).ok();
+                            draw_render_elements(&mut f, 1.0, sp_elems, &[dmg])?;
+                            crate::text_render::draw_text(&mut f, "SCRATCHPAD", sp_x + 6, sp_y - 22, 14.0, (accent.0, accent.1, accent.2));
+                        }
 
                         if Some(out.crtc) == primary_crtc && fullscreen.is_none() {
                             let ws_offset3: i32 = if ws_anim_active {
@@ -1146,6 +1329,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let notif_data: Vec<(String, std::time::Instant, std::time::Duration)> = state.notifications.iter()
                                 .map(|n| (n.text.clone(), n.created, n.duration)).collect();
                             layout::render_notifications(&mut f, &notif_data, ow, state.cfg.bar.height, accent);
+                        }
+
+                        // 内置启动器
+                        if Some(out.crtc) == primary_crtc && state.launcher_visible {
+                            let filtered = state.launcher_filter();
+                            layout::render_launcher(&mut f, &state.cfg, ow, oh, &state.launcher_query, &filtered, state.launcher_selected);
                         }
 
                         // 光标（粗实心三角形，不受 block-linear 影响）
