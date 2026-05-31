@@ -17,6 +17,13 @@ pub enum LayoutPreset {
     Grid,
 }
 
+/// 平铺方向 — 控制新窗口如何分割空间
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SplitDir {
+    Horizontal, // 横向分割（新窗口在右边/下边）
+    Vertical,   // 纵向分割（新窗口在上边/下边）
+}
+
 impl LayoutPreset {
     pub const ALL: [LayoutPreset; 4] = [
         LayoutPreset::MasterStack, LayoutPreset::Columns,
@@ -146,7 +153,7 @@ const DATE_SIZE: f32 = 14.0;
 // 布局计算
 // ═══════════════════════════════════════════════════════════
 
-pub fn slot(i: usize, n: usize, ow: i32, oh: i32, bar_h: i32, cfg: &Config, layout: LayoutPreset) -> (i32, i32, i32, i32) {
+pub fn slot(i: usize, n: usize, ow: i32, oh: i32, bar_h: i32, cfg: &Config, layout: LayoutPreset, split: SplitDir) -> (i32, i32, i32, i32) {
     if n == 0 { return (0, bar_h, 0, 0); }
     let gap = cfg.layout.gap;
     let margin = cfg.layout.margin;
@@ -158,39 +165,92 @@ pub fn slot(i: usize, n: usize, ow: i32, oh: i32, bar_h: i32, cfg: &Config, layo
             match n {
                 1 => (margin, bar_h + margin, usable_w, usable_h),
                 _ => {
-                    let master_w = (usable_w - gap) * 2 / 3;
-                    if i == 0 {
-                        (margin, bar_h + margin, master_w, usable_h)
-                    } else {
-                        let stack_n = n - 1;
-                        let stack_w = usable_w - master_w - gap;
-                        let stack_h = (usable_h - gap * (stack_n - 1) as i32) / stack_n as i32;
-                        let extra = (usable_h - gap * (stack_n - 1) as i32) % stack_n as i32;
-                        let si = i - 1;
-                        let sy = bar_h + margin + si as i32 * (stack_h + gap) + extra.min(si as i32);
-                        let sh = stack_h + if si < extra as usize { 1 } else { 0 };
-                        (margin + master_w + gap, sy, stack_w, sh)
+                    // 根据平铺方向决定主窗口和 stack 的分割方式
+                    match split {
+                        SplitDir::Horizontal => {
+                            // 横向分割：主窗口在左，stack 在右纵向排列
+                            let master_w = (usable_w - gap) * 2 / 3;
+                            if i == 0 {
+                                (margin, bar_h + margin, master_w, usable_h)
+                            } else {
+                                let stack_n = n - 1;
+                                let stack_w = usable_w - master_w - gap;
+                                let stack_h = (usable_h - gap * (stack_n - 1) as i32) / stack_n as i32;
+                                let extra = (usable_h - gap * (stack_n - 1) as i32) % stack_n as i32;
+                                let si = i - 1;
+                                let sy = bar_h + margin + si as i32 * (stack_h + gap) + extra.min(si as i32);
+                                let sh = stack_h + if si < extra as usize { 1 } else { 0 };
+                                (margin + master_w + gap, sy, stack_w, sh)
+                            }
+                        }
+                        SplitDir::Vertical => {
+                            // 纵向分割：主窗口在上，stack 在下横向排列
+                            let master_h = (usable_h - gap) * 2 / 3;
+                            if i == 0 {
+                                (margin, bar_h + margin, usable_w, master_h)
+                            } else {
+                                let stack_n = n - 1;
+                                let stack_y = bar_h + margin + master_h + gap;
+                                let stack_h = usable_h - master_h - gap;
+                                let stack_w = (usable_w - gap * (stack_n - 1) as i32) / stack_n as i32;
+                                let extra = (usable_w - gap * (stack_n - 1) as i32) % stack_n as i32;
+                                let si = i - 1;
+                                let sx = margin + si as i32 * (stack_w + gap) + extra.min(si as i32);
+                                let sw = stack_w + if si < extra as usize { 1 } else { 0 };
+                                (sx, stack_y, sw, stack_h)
+                            }
+                        }
                     }
                 }
             }
         }
         LayoutPreset::Columns => {
-            let col_w = (usable_w - gap * (n as i32 - 1)) / n as i32;
-            let extra = (usable_w - gap * (n as i32 - 1)) % n as i32;
-            let x = margin + i as i32 * (col_w + gap) + extra.min(i as i32);
-            let w = col_w + if i < extra as usize { 1 } else { 0 };
-            (x, bar_h + margin, w, usable_h)
+            match split {
+                SplitDir::Horizontal => {
+                    // 横向：等宽纵向分栏（默认行为）
+                    let col_w = (usable_w - gap * (n as i32 - 1)) / n as i32;
+                    let extra = (usable_w - gap * (n as i32 - 1)) % n as i32;
+                    let x = margin + i as i32 * (col_w + gap) + extra.min(i as i32);
+                    let w = col_w + if i < extra as usize { 1 } else { 0 };
+                    (x, bar_h + margin, w, usable_h)
+                }
+                SplitDir::Vertical => {
+                    // 纵向：等高横排行
+                    let row_h = (usable_h - gap * (n as i32 - 1)) / n as i32;
+                    let extra = (usable_h - gap * (n as i32 - 1)) % n as i32;
+                    let y = bar_h + margin + i as i32 * (row_h + gap) + extra.min(i as i32);
+                    let h = row_h + if i < extra as usize { 1 } else { 0 };
+                    (margin, y, usable_w, h)
+                }
+            }
         }
         LayoutPreset::Center => {
-            // 居中：固定宽度 1200px（或屏幕 70%），等高竖排
-            let max_w = 1200.min(ow * 7 / 10);
-            let cw = (max_w - gap * (n as i32 - 1)) / n as i32;
-            let extra = (max_w - gap * (n as i32 - 1)) % n as i32;
-            let total_w = max_w;
-            let start_x = ow / 2 - total_w / 2;
-            let x = start_x + i as i32 * (cw + gap) + extra.min(i as i32);
-            let w = cw + if i < extra as usize { 1 } else { 0 };
-            (x, bar_h + margin, w, usable_h)
+            match split {
+                SplitDir::Horizontal => {
+                    // 横向居中：等宽纵向排列
+                    let max_w = 1200.min(ow * 7 / 10);
+                    let cw = (max_w - gap * (n as i32 - 1)) / n as i32;
+                    let extra = (max_w - gap * (n as i32 - 1)) % n as i32;
+                    let start_x = ow / 2 - max_w / 2;
+                    let x = start_x + i as i32 * (cw + gap) + extra.min(i as i32);
+                    let w = cw + if i < extra as usize { 1 } else { 0 };
+                    (x, bar_h + margin, w, usable_h)
+                }
+                SplitDir::Vertical => {
+                    // 纵向居中：等高横向排列
+                    let max_h = 800.min(oh * 7 / 10);
+                    let rh = (max_h - gap * (n as i32 - 1)) / n as i32;
+                    let extra = (max_h - gap * (n as i32 - 1)) % n as i32;
+                    let total_w = (usable_w).min(n as i32 * (800 / n as i32) + gap * (n as i32 - 1));
+                    let start_x = ow / 2 - total_w / 2;
+                    let start_y = (bar_h + oh) / 2 - max_h / 2;
+                    let cw = (total_w - gap * (n as i32 - 1)) / n as i32;
+                    let extra_w = (total_w - gap * (n as i32 - 1)) % n as i32;
+                    let x = start_x + i as i32 * (cw + gap) + extra_w.min(i as i32);
+                    let w = cw + if i < extra_w as usize { 1 } else { 0 };
+                    (x, start_y, w, rh + if i < extra as usize { 1 } else { 0 })
+                }
+            }
         }
         LayoutPreset::Grid => {
             let cols = (n as f32).sqrt().ceil() as i32;
@@ -200,7 +260,6 @@ pub fn slot(i: usize, n: usize, ow: i32, oh: i32, bar_h: i32, cfg: &Config, layo
             let items_in_row = if row < rows - 1 { cols } else { n as i32 - row * cols };
             let col_w = (usable_w - gap * (cols - 1)) / cols;
             let row_h = (usable_h - gap * (rows - 1)) / rows;
-            // 最后一行居中
             let row_start = if row == rows - 1 {
                 let used_w = items_in_row * col_w + (items_in_row - 1) * gap;
                 margin + (usable_w - used_w) / 2
@@ -218,16 +277,16 @@ pub fn slot(i: usize, n: usize, ow: i32, oh: i32, bar_h: i32, cfg: &Config, layo
 // 渲染
 // ═══════════════════════════════════════════════════════════
 
-pub fn render_window_bg(f: &mut impl Frame, cfg: &Config, n: usize, ow: i32, oh: i32, bar_h: i32, layout: LayoutPreset) {
-    render_window_bg_anim(f, cfg, n, ow, oh, bar_h, layout, 0);
+pub fn render_window_bg(f: &mut impl Frame, cfg: &Config, n: usize, ow: i32, oh: i32, bar_h: i32, layout: LayoutPreset, split: SplitDir) {
+    render_window_bg_anim(f, cfg, n, ow, oh, bar_h, layout, split, 0);
 }
 
-pub fn render_window_bg_anim(f: &mut impl Frame, cfg: &Config, n: usize, ow: i32, oh: i32, bar_h: i32, layout: LayoutPreset, offset_x: i32) {
+pub fn render_window_bg_anim(f: &mut impl Frame, cfg: &Config, n: usize, ow: i32, oh: i32, bar_h: i32, layout: LayoutPreset, split: SplitDir, offset_x: i32) {
     if n == 0 { return; }
     let bw = cfg.layout.border_width;
     let bg = color_hex(&cfg.colors.background);
     for i in 0..n {
-        let (x, y, w, h) = slot(i, n, ow, oh, bar_h, cfg, layout);
+        let (x, y, w, h) = slot(i, n, ow, oh, bar_h, cfg, layout, split);
         f.clear(bg, &[rect(x - bw + offset_x, y - bw, w + 2 * bw, h + 2 * bw)]).ok();
     }
 }
@@ -273,20 +332,20 @@ pub fn render_window_decorations(
     f: &mut impl Frame, cfg: &Config,
     i: usize, n: usize, focus_idx: Option<usize>,
     ow: i32, oh: i32, bar_h: i32,
-    layout: LayoutPreset,
+    layout: LayoutPreset, split: SplitDir,
 ) {
-    render_window_decorations_anim(f, cfg, i, n, focus_idx, ow, oh, bar_h, layout, 0);
+    render_window_decorations_anim(f, cfg, i, n, focus_idx, ow, oh, bar_h, layout, split, 0);
 }
 
 pub fn render_window_decorations_anim(
     f: &mut impl Frame, cfg: &Config,
     i: usize, n: usize, focus_idx: Option<usize>,
     ow: i32, oh: i32, bar_h: i32,
-    layout: LayoutPreset, offset_x: i32,
+    layout: LayoutPreset, split: SplitDir, offset_x: i32,
 ) {
     if n == 0 { return; }
     let bw = cfg.layout.border_width;
-    let (x, y, w, h) = slot(i, n, ow, oh, bar_h, cfg, layout);
+    let (x, y, w, h) = slot(i, n, ow, oh, bar_h, cfg, layout, split);
     let x = x + offset_x;
     let is_focused = focus_idx == Some(i);
 

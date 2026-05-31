@@ -1,4 +1,4 @@
-// sendkey.c — 通过 /dev/uinput 发送组合键给 Titan
+// sendkey.c — 通过 /dev/uinput 发送组合键给 Anchor
 // gcc -o sendkey sendkey.c && sudo ./sendkey <key>
 // key: super_d, super_grave, super_p
 #include <fcntl.h>

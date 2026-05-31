@@ -1,6 +1,6 @@
-// Titan — Wayland tiling compositor v9
+// Anchor — Wayland tiling compositor v9
 // Features: multi-workspace, multi-monitor, wallpaper, config
-// Config: ~/.config/titan/config.toml
+// Config: ~/.config/anchor/config.toml
 
 mod config;
 mod layout;
@@ -75,17 +75,20 @@ struct Workspace {
     focus: Option<WlSurface>,
     fullscreen: Option<usize>,
     layout: LayoutPreset,
+    split: layout::SplitDir,
+    /// 下一个新窗口使用的分割方向（设一次消费一次）
+    pending_split: Option<layout::SplitDir>,
 }
 
 impl Workspace {
     fn new() -> Self {
-        Self { tops: Vec::new(), focus: None, fullscreen: None, layout: LayoutPreset::default() }
+        Self { tops: Vec::new(), focus: None, fullscreen: None, layout: LayoutPreset::default(), split: layout::SplitDir::Horizontal, pending_split: None }
     }
 }
 
-// ── TitanOutput ────────────────────────────────────────────
+// ── AnchorOutput ────────────────────────────────────────────
 
-struct TitanOutput {
+struct AnchorOutput {
     output: Output,
     size: Size<i32, Logical>,
     crtc: crtc::Handle,
@@ -200,7 +203,7 @@ impl App {
             }
         } else {
             for (i, tl) in self.workspaces[ws_idx].tops.iter().enumerate() {
-                let (_x, _y, w, h) = layout::slot(i, n, osize_w, osize_h, bar_h, &self.cfg, self.workspaces[self.active_ws].layout);
+                let (_x, _y, w, h) = layout::slot(i, n, osize_w, osize_h, bar_h, &self.cfg, self.workspaces[self.active_ws].layout, self.workspaces[self.active_ws].split);
                 tl.with_pending_state(|st| {
                     st.states.set(xdg_toplevel::State::Activated);
                     st.states.unset(xdg_toplevel::State::Fullscreen);
@@ -299,7 +302,7 @@ impl App {
             std::process::Command::new("sh")
                 .arg("-c")
                 .arg(&exec_cmd)
-                .env("WAYLAND_DISPLAY", "wayland-titan")
+                .env("WAYLAND_DISPLAY", "wayland-anchor")
                 .env("XDG_RUNTIME_DIR", format!("/run/user/{}", unsafe { libc::getuid() }))
                 .spawn().ok();
         }
@@ -323,7 +326,7 @@ impl App {
             // 显示：启动终端
             self.scratchpad_pending = true;
             match std::process::Command::new("weston-terminal")
-                .env("WAYLAND_DISPLAY", "wayland-titan")
+                .env("WAYLAND_DISPLAY", "wayland-anchor")
                 .env("XDG_RUNTIME_DIR", format!("/run/user/{}", unsafe { libc::getuid() }))
                 .spawn()
             {
@@ -334,7 +337,7 @@ impl App {
                 }
                 Err(_) => {
                     match std::process::Command::new("foot")
-                        .env("WAYLAND_DISPLAY", "wayland-titan")
+                        .env("WAYLAND_DISPLAY", "wayland-anchor")
                         .env("XDG_RUNTIME_DIR", format!("/run/user/{}", unsafe { libc::getuid() }))
                         .spawn()
                     {
@@ -548,7 +551,7 @@ impl App {
                                 Keysym::Return => {
                                     info!("⌨️  启动终端");
                                     std::process::Command::new(&data.cfg.terminal.command)
-                                        .env("WAYLAND_DISPLAY", "wayland-titan")
+                                        .env("WAYLAND_DISPLAY", "wayland-anchor")
                                         .env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"))
                                         .env("XMODIFIERS", "@im=fcitx").env("QT_IM_MODULE", "fcitx").env("GTK_IM_MODULE", "fcitx")
                                         .env("ELECTRON_OZONE_PLATFORM_HINT", "wayland")
@@ -575,13 +578,16 @@ impl App {
                                     let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
                                     let dir = std::path::PathBuf::from(format!("{}/Pictures/Screenshots", home));
                                     let _ = std::fs::create_dir_all(&dir);
-                                    let path = dir.join(format!("titan-{}.raw", ts));
+                                    let path = dir.join(format!("anchor-{}.raw", ts));
                                     let exe = std::env::current_exe().unwrap_or_default();
                                     let project_dir = exe.parent().and_then(|p| p.parent())
                                         .map(|p| p.display().to_string())
                                         .unwrap_or_else(|| ".".into());
                                     let dump_tool = format!("{}/scripts/drm-dump-fb", project_dir);
-                                    let args = format!("timeout 3 {} /dev/dri/card1 {}", dump_tool, path.display());
+                                    // 截图使用的 DRM 设备
+                                    let drm_dev = std::env::var("TITAN_DRM_DEV")
+                                        .unwrap_or_else(|_| "/dev/dri/card0".into());
+                                    let args = format!("timeout 3 {} {} {}", dump_tool, drm_dev, path.display());
                                     std::process::Command::new("sh").arg("-c").arg(&args).spawn().ok();
                                     data.notify("Screenshot saved");
                                     return FilterResult::Intercept(());
@@ -613,6 +619,20 @@ impl App {
                                 // Super+方向键：交换窗口
                                 Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down => {
                                     data.swap_window(keysym.modified_sym());
+                                    return FilterResult::Intercept(());
+                                }
+                                // Super+V: 下一个新窗口纵向分割（类似 sway split v）
+                                Keysym::v => {
+                                    data.workspaces[data.active_ws].pending_split = Some(layout::SplitDir::Vertical);
+                                    info!("📐 下一个窗口 → 纵向 (Vertical)");
+                                    data.notify("Next split: Vertical ↕");
+                                    return FilterResult::Intercept(());
+                                }
+                                // Super+B: 下一个新窗口横向分割（类似 sway split h）
+                                Keysym::b => {
+                                    data.workspaces[data.active_ws].pending_split = Some(layout::SplitDir::Horizontal);
+                                    info!("📐 下一个窗口 → 横向 (Horizontal)");
+                                    data.notify("Next split: Horizontal ↔");
                                     return FilterResult::Intercept(());
                                 }
                                 _ => {}
@@ -672,7 +692,7 @@ impl App {
                     if py < bar_h { return; }
                     let ws = &self.workspaces[self.active_ws];
                     for (i, tl) in ws.tops.iter().enumerate() {
-                        let (x, y, w, h) = layout::slot(i, ws.tops.len(), self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout);
+                        let (x, y, w, h) = layout::slot(i, ws.tops.len(), self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
                         if px >= x && px < x + w && py >= y && py < y + h {
                             let surf = tl.wl_surface().clone();
                             self.workspaces[self.active_ws].focus = Some(surf.clone());
@@ -720,6 +740,11 @@ impl XdgShellHandler for App {
         }
         
         self.workspaces[self.active_ws].tops.push(s);
+        // 消费 pending_split：如果用户按了 Super+Shift+V/B，下一个窗口用新方向
+        if let Some(new_split) = self.workspaces[self.active_ws].pending_split.take() {
+            self.workspaces[self.active_ws].split = new_split;
+            info!("📐 应用 pending split: {:?}", new_split);
+        }
         let ws = &self.workspaces[self.active_ws];
         let idx = ws.tops.len() - 1;
         info!("➕ 窗口 #{} (工作区 {})", idx, self.active_ws + 1);
@@ -890,21 +915,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let direct = args.iter().any(|a| a == "--direct");
     let cfg = Config::load();
-    info!("🚀 Titan v9 ({})", if direct { "direct" } else { "session" });
+    info!("🚀 Anchor v9 ({})", if direct { "direct" } else { "session" });
 
-    let gpu_path = std::env::var("TITAN_GPU").map(std::path::PathBuf::from).unwrap_or_else(|_| {
-        let mut nvidia = None;
-        for e in std::fs::read_dir("/dev/dri").unwrap() {
-            let e = e.unwrap(); let name = e.file_name().to_string_lossy().to_string();
-            if name.starts_with("card") {
-                if let Ok(v) = std::fs::read_to_string(format!("/sys/class/drm/{}/device/vendor", name)) {
-                    if v.trim() == "0x10de" { nvidia = Some(e.path()); }
+    // ─── GPU 设备选择 ───
+    // 优先级: TITAN_GPU 环境变量 > config.toml [gpu].device > 自动检测
+    let gpu_path = if let Ok(p) = std::env::var("TITAN_GPU") {
+        std::path::PathBuf::from(p)
+    } else if !cfg.gpu.device.is_empty() {
+        std::path::PathBuf::from(&cfg.gpu.device)
+    } else {
+        // 自动检测：优先按 config 中的 vendor 找，找不到就用第一个 card
+        let mut first_card: Option<std::path::PathBuf> = None;
+        let mut preferred: Option<std::path::PathBuf> = None;
+        let prefer_vendor = cfg.gpu.vendor.to_lowercase();
+        
+        if let Ok(entries) = std::fs::read_dir("/dev/dri") {
+            for e in entries.flatten() {
+                let name = e.file_name().to_string_lossy().to_string();
+                if name.starts_with("card") {
+                    if first_card.is_none() { first_card = Some(e.path().clone()); }
+                    if let Ok(v) = std::fs::read_to_string(format!("/sys/class/drm/{}/device/vendor", name)) {
+                        let vendor = v.trim();
+                        let matches = match prefer_vendor.as_str() {
+                            "nvidia" => vendor == "0x10de",
+                            "amd" => vendor == "0x1002",
+                            "intel" => vendor == "0x8086",
+                            _ => true, // auto: 第一个就是最好的
+                        };
+                        if matches && preferred.is_none() {
+                            preferred = Some(e.path());
+                            if prefer_vendor != "auto" { break; }
+                        }
+                    }
                 }
             }
         }
-        nvidia.unwrap()
-    });
+        let result = preferred.or(first_card).expect("No DRM device found in /dev/dri");
+        info!("🎮 GPU auto-detected (vendor preference: {})", prefer_vendor);
+        result
+    };
     info!("🎮 {}", gpu_path.display());
+    
+    // 检测 GPU vendor 名称
+    let gpu_vendor = {
+        let card_name = gpu_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
+        let vendor_str = std::fs::read_to_string(format!("/sys/class/drm/{}/device/vendor", card_name))
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        match vendor_str.as_str() {
+            "0x10de" => "NVIDIA",
+            "0x1002" => "AMD",
+            "0x8086" => "Intel",
+            _ => "Unknown",
+        }.to_string()
+    };
+    info!("🔍 GPU vendor: {}", gpu_vendor);
+    // 保存 DRM 设备路径到环境变量（截图等子进程使用）
+    if let Some(card_name) = gpu_path.file_name() {
+        std::env::set_var("TITAN_DRM_DEV", format!("/dev/dri/{}", card_name.to_string_lossy()));
+    }
 
     let (dev_fd, session, notifier) = if direct {
         let fd = Arc::new(std::fs::OpenOptions::new().read(true).write(true).open(&gpu_path)?);
@@ -932,7 +1002,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .flat_map(|&c| [Format{code:c,modifier:Modifier::Linear}, Format{code:c,modifier:Modifier::Invalid}]).collect();
 
     // ── 多显示器枚举 ──
-    let mut titan_outputs: Vec<TitanOutput> = Vec::new();
+    let mut anchor_outputs: Vec<AnchorOutput> = Vec::new();
     let mut used_crtcs: std::collections::HashSet<crtc::Handle> = std::collections::HashSet::new();
     let mut output_x_offset: i32 = 0;
 
@@ -1011,7 +1081,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let wl_output = Output::new(ci.name.clone(), PhysicalProperties {
             size: (mw as i32 / 10, mh as i32 / 10).into(),
-            subpixel: Subpixel::Unknown, make: "NVIDIA".into(), model: ci.name.clone(),
+            subpixel: Subpixel::Unknown, make: gpu_vendor.clone(), model: ci.name.clone(),
         });
         let output_mode = Mode { size: (mw as i32, mh as i32).into(), refresh: 59000 };
         wl_output.add_mode(output_mode);
@@ -1024,7 +1094,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         output_sizes.push((output_x_offset, 0, mw as i32, mh as i32));
 
-        titan_outputs.push(TitanOutput {
+        anchor_outputs.push(AnchorOutput {
             output: wl_output,
             size: Size::new(mw as i32, mh as i32),
             crtc: ci.crtc,
@@ -1035,9 +1105,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
         output_x_offset += mw as i32;
     }
-    if titan_outputs.is_empty() { return Err("所有输出创建失败".into()); }
-    let primary_size = titan_outputs[0].size;
-    info!("✅ {} 个输出已就绪", titan_outputs.len());
+    if anchor_outputs.is_empty() { return Err("所有输出创建失败".into()); }
+    let primary_size = anchor_outputs[0].size;
+    info!("✅ {} 个输出已就绪", anchor_outputs.len());
 
     InputMethodManagerState::new::<App, _>(&dh, |_client| true);
     TextInputManagerState::new::<App>(&dh);
@@ -1071,12 +1141,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ws_anim: WsAnimation { start: None, from_ws: 0, to_ws: 0, duration_ms: 200, direction: 0 },
         output_sizes,
     };
-    let listener = ListeningSocket::bind("wayland-titan")?;
-    std::env::set_var("WAYLAND_DISPLAY", "wayland-titan");
+    let listener = ListeningSocket::bind("wayland-anchor")?;
+    std::env::set_var("WAYLAND_DISPLAY", "wayland-anchor");
     if std::env::var("XDG_RUNTIME_DIR").is_err() {
         std::env::set_var("XDG_RUNTIME_DIR", format!("/run/user/{}", unsafe { libc::getuid() }));
     }
-    info!("✅ wayland-titan");
+    info!("✅ wayland-anchor");
 
     let mut eloop: EventLoop<App> = EventLoop::try_new()?;
     let mut clients: Vec<Client> = vec![];
@@ -1143,7 +1213,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     std::process::Command::new("fcitx5")
-        .env("WAYLAND_DISPLAY", "wayland-titan")
+        .env("WAYLAND_DISPLAY", "wayland-anchor")
         .env("XDG_RUNTIME_DIR", format!("/run/user/{}", unsafe { libc::getuid() }))
         .env("XMODIFIERS", "@im=fcitx").env("QT_IM_MODULE", "fcitx").env("GTK_IM_MODULE", "fcitx")
         .spawn().ok();
@@ -1154,10 +1224,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if state.active != dev_active {
             if state.active {
                 device.activate(true)?;
-                for out in &mut titan_outputs { out.buf_surf.reset_buffers(); out.pending_flip = false; }
+                for out in &mut anchor_outputs { out.buf_surf.reset_buffers(); out.pending_flip = false; }
             } else {
                 device.pause();
-                for out in &mut titan_outputs { out.pending_flip = false; }
+                for out in &mut anchor_outputs { out.pending_flip = false; }
             }
             dev_active = state.active;
         }
@@ -1168,7 +1238,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
-        for out in &mut titan_outputs {
+        for out in &mut anchor_outputs {
             if state.vblank_crtcs.remove(&out.crtc) {
                 if let Err(e) = out.buf_surf.frame_submitted() { warn!("VBlank err: {:?}", e); }
                 out.pending_flip = false;
@@ -1184,7 +1254,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
             let window_title = state.window_titles.get(&focus_idx.unwrap_or(0))
                 .cloned().unwrap_or_default();
-            let primary_crtc = titan_outputs.first().map(|o| o.crtc);
+            let primary_crtc = anchor_outputs.first().map(|o| o.crtc);
             let ws = &state.workspaces[state.active_ws];
             let n_windows = ws.tops.len();
             let fullscreen = ws.fullscreen;
@@ -1195,8 +1265,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ws_anim_duration = state.ws_anim.duration_ms;
             let ws_anim_elapsed = state.ws_anim.start.map(|s| s.elapsed().as_millis() as u64);
 
-            for oi in 0..titan_outputs.len() {
-                let out = &mut titan_outputs[oi];
+            for oi in 0..anchor_outputs.len() {
+                let out = &mut anchor_outputs[oi];
                 if out.pending_flip { continue; }
 
                 match out.buf_surf.next_buffer() {
@@ -1257,7 +1327,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 // 正序收集所有窗口元素到同一个 vec
                                 // 后收集的窗口渲染时覆盖先收集的溢出
                                 for (i, tl) in ws.tops.iter().enumerate() {
-                                    let (x, y, _w, _h) = layout::slot(i, n_windows, ow, oh, bar_h, &state.cfg, state.workspaces[state.active_ws].layout);
+                                    let (x, y, _w, _h) = layout::slot(i, n_windows, ow, oh, bar_h, &state.cfg, state.workspaces[state.active_ws].layout, state.workspaces[state.active_ws].split);
                                     for e in render_elements_from_surface_tree(&mut renderer, tl.wl_surface(), (x + ws_offset, y), 1.0, 1.0, Kind::Unspecified) {
                                         all_elems.push(e);
                                     }
@@ -1304,7 +1374,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             for (i, _) in ws.tops.iter().enumerate() {
                                 layout::render_window_decorations_anim(
                                     &mut f, &state.cfg, i, n_windows, focus_idx,
-                                    ow, oh, bar_h, state.workspaces[state.active_ws].layout, ws_offset
+                                    ow, oh, bar_h, state.workspaces[state.active_ws].layout, state.workspaces[state.active_ws].split, ws_offset
                                 );
                             }
                         }

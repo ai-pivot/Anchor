@@ -1,14 +1,14 @@
-// titan-input.c — 虚拟键盘/鼠标输入注入工具
+// anchor-input.c — 虚拟键盘/鼠标输入注入工具
 // 用法:
-//   sudo ./titan-input key <keycode>          — 按下并释放按键
-//   sudo ./titan-input keypress <keycode>     — 仅按下
-//   sudo ./titan-input keyrelease <keycode>   — 仅释放
-//   sudo ./titan-input keycombo <kc1> <kc2> .. — 组合键 (依次按下, 反序释放)
-//   sudo ./titan-input mousemove <dx> <dy>    — 移动鼠标
-//   sudo ./titan-input mouseclick <button>    — 鼠标点击 (1=左,2=中,3=右)
-//   sudo ./titan-input sleep <ms>             — 等待
-//   sudo ./titan-input script <file>          — 从文件执行命令序列
-// 编译: gcc -o titan-input titan-input.c
+//   sudo ./anchor-input key <keycode>          — 按下并释放按键
+//   sudo ./anchor-input keypress <keycode>     — 仅按下
+//   sudo ./anchor-input keyrelease <keycode>   — 仅释放
+//   sudo ./anchor-input keycombo <kc1> <kc2> .. — 组合键 (依次按下, 反序释放)
+//   sudo ./anchor-input mousemove <dx> <dy>    — 移动鼠标
+//   sudo ./anchor-input mouseclick <button>    — 鼠标点击 (1=左,2=中,3=右)
+//   sudo ./anchor-input sleep <ms>             — 等待
+//   sudo ./anchor-input script <file>          — 从文件执行命令序列
+// 编译: gcc -o anchor-input anchor-input.c
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -36,7 +36,7 @@ static void setup() {
     usetup.id.bustype = BUS_USB;
     usetup.id.vendor = 0x1234;
     usetup.id.product = 0x5678;
-    strcpy(usetup.name, "Titan Test Input");
+    strcpy(usetup.name, "Anchor Test Input");
     ioctl(fd, UI_DEV_SETUP, &usetup);
     ioctl(fd, UI_DEV_CREATE);
     // 等设备就绪
@@ -171,7 +171,7 @@ static int execute_cmd(int argc, char **argv) {
 int main(int argc, char **argv) {
     if (argc < 2) {
         fprintf(stderr,
-            "Titan Input Injector\n"
+            "Anchor Input Injector\n"
             "Usage: %s <command> [args...]\n"
             "Commands:\n"
             "  key <key>           — 按键\n"

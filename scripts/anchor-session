@@ -1,0 +1,126 @@
+#!/bin/bash
+# Anchor Wayland 会话 — 由显示管理器 (GDM/SDDM/LightDM) 调用
+# 通过 libseat (logind) 获取 DRM master，不使用 --direct
+
+# 通过符号链接跟踪到真实路径
+SELF="$(readlink -f "$0")"
+SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
+
+# ─── 通用环境变量 ───
+export TERMINAL="${TERMINAL:-foot}"
+export XDG_SESSION_TYPE=wayland
+export XDG_CURRENT_DESKTOP=anchor
+export MOZ_ENABLE_WAYLAND=1
+export GDK_BACKEND=wayland
+export QT_QPA_PLATFORM=wayland
+export SDL_VIDEODRIVER=wayland
+
+# Electron/Chromium Wayland 支持
+export ELECTRON_OZONE_PLATFORM_HINT=wayland
+export CHROME_FLAGS="--ozone-platform=wayland --enable-features=UseOzonePlatform"
+
+# ─── GPU 自动检测 ───
+detect_gpu() {
+    # 读取所有 DRM 设备的 vendor
+    for card in /sys/class/drm/card[0-9]*; do
+        [ -d "$card" ] || continue
+        device_link="$card/device"
+        [ -L "$device_link" ] || continue
+        
+        vendor_path="$device_link/vendor"
+        [ -f "$vendor_path" ] || continue
+        vendor=$(cat "$vendor_path" 2>/dev/null)
+        
+        case "$vendor" in
+            0x10de) echo "nvidia"; return ;;
+            0x1002) echo "amd"; return ;;
+            0x8086) echo "intel"; return ;;
+        esac
+    done
+    
+    # fallback: 检查内核模块
+    if lsmod 2>/dev/null | grep -q nvidia; then
+        echo "nvidia"
+    elif lsmod 2>/dev/null | grep -q amdgpu; then
+        echo "amd"
+    elif lsmod 2>/dev/null | grep -q i915; then
+        echo "intel"
+    else
+        echo "unknown"
+    fi
+}
+
+GPU_TYPE=$(detect_gpu)
+echo "[anchor-session] 检测到 GPU: $GPU_TYPE" >> /tmp/anchor-session.log 2>/dev/null
+
+case "$GPU_TYPE" in
+    nvidia)
+        # NVIDIA proprietary driver 环境变量
+        export GBM_BACKEND=nvidia-drm
+        export __GLX_VENDOR_LIBRARY_NAME=nvidia
+        export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json
+        # 需要启用 DRM KMS modeset
+        if [ ! -f /sys/module/nvidia_drm/parameters/modeset ]; then
+            echo "[anchor-session] 警告: nvidia-drm.modeset 未启用，请添加 nvidia-drm.modeset=1 到内核参数" >&2
+        fi
+        ;;
+    amd)
+        # AMD — 使用 Mesa GBM/AMDGPU，通常无需特殊配置
+        export GBM_BACKEND=amdgpu
+        unset __GLX_VENDOR_LIBRARY_NAME
+        unset __EGL_VENDOR_LIBRARY_FILENAMES
+        ;;
+    intel)
+        # Intel — 使用 Mesa i915/iris
+        unset GBM_BACKEND
+        unset __GLX_VENDOR_LIBRARY_NAME
+        unset __EGL_VENDOR_LIBRARY_FILENAMES
+        ;;
+    *)
+        # 未知 GPU — 尝试默认配置
+        echo "[anchor-session] 警告: 未检测到 GPU 类型，使用默认配置" >&2
+        ;;
+esac
+
+# ─── 输入法配置 ───
+IM_METHOD="none"
+CONFIG_FILE=""
+for f in "$PROJECT_DIR/config.toml" "$HOME/.config/anchor/config.toml"; do
+    if [ -f "$f" ]; then CONFIG_FILE="$f"; break; fi
+done
+if [ -n "$CONFIG_FILE" ]; then
+    IM_METHOD=$(grep -A1 '\[input_method\]' "$CONFIG_FILE" 2>/dev/null | grep 'method' | sed 's/.*=.*"\(.*\)".*/\1/' | head -1)
+    IM_METHOD="${IM_METHOD:-none}"
+fi
+
+case "$IM_METHOD" in
+    fcitx)
+        export GTK_IM_MODULE=fcitx
+        export QT_IM_MODULE=fcitx
+        export XMODIFIERS=@im=fcitx
+        export SDL_IM_MODULE=fcitx
+        export INPUT_METHOD=fcitx
+        if command -v fcitx5 &>/dev/null; then
+            fcitx5 -d --replace 2>/dev/null &
+        elif command -v fcitx &>/dev/null; then
+            fcitx -d --replace 2>/dev/null &
+        fi
+        ;;
+    ibus)
+        export GTK_IM_MODULE=ibus
+        export QT_IM_MODULE=ibus
+        export XMODIFIERS=@im=ibus
+        export SDL_IM_MODULE=ibus
+        export INPUT_METHOD=ibus
+        if command -v ibus-daemon &>/dev/null; then
+            ibus-daemon -drx 2>/dev/null &
+        fi
+        ;;
+esac
+
+# ─── 确保 XDG_RUNTIME_DIR ───
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+mkdir -p "$XDG_RUNTIME_DIR"
+
+exec "$PROJECT_DIR/target/release/anchor" 2>&1 | tee /tmp/anchor-session.log

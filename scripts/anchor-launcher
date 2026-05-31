@@ -1,6 +1,6 @@
 #!/bin/bash
-# Titan 应用启动器 — 读取 .desktop 文件，用 wmenu 选择并启动
-# 被 Titan (Win+D) 调用
+# Anchor 应用启动器 — 读取 .desktop 文件，用 wmenu 选择并启动
+# 被 Anchor (Win+D) 调用
 set -e
 
 # 生成应用列表
@@ -42,7 +42,7 @@ for d in ['/usr/share/applications', os.path.expanduser('~/.local/share/applicat
                     exit()
 ")
     if [ -n "$cmd" ]; then
-        echo "Launching: $cmd" >> /tmp/titan-launcher.log
+        echo "Launching: $cmd" >> /tmp/anchor-launcher.log
         # Chromium/Electron 需要 Wayland 平台标志
         case "$cmd" in
             *microsoft-edge*|*chrome*|*chromium*)

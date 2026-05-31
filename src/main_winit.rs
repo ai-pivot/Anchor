@@ -1,8 +1,8 @@
-// Titan — 极简平铺 Wayland 合成器 (winit X11 窗口模式, v5)
+// Anchor — 极简平铺 Wayland 合成器 (winit X11 窗口模式, v5)
 //
 // 在 X11 窗口里运行，用于测试和截图
-// 编译: cargo build --release --bin titan-winit --no-default-features --features winit
-// 运行: DISPLAY=:0 ./target/release/titan-winit
+// 编译: cargo build --release --bin anchor-winit --no-default-features --features winit
+// 运行: DISPLAY=:0 ./target/release/anchor-winit
 
 use std::{
     os::unix::io::OwnedFd,
@@ -258,7 +258,7 @@ fn send_frames(s: &WlSurface, t: u32) {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().with_env_filter("info,smithay=warn").init();
-    info!("🚀 Titan winit (X11 窗口模式)");
+    info!("🚀 Anchor winit (X11 窗口模式)");
 
     // Display
     let mut display: Display<App> = Display::new()?;
@@ -266,9 +266,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut state = App::new(&dh);
 
     // Socket
-    let listener = ListeningSocket::bind("wayland-titan")?;
-    std::env::set_var("WAYLAND_DISPLAY", "wayland-titan");
-    info!("✅ Wayland socket: wayland-titan");
+    let listener = ListeningSocket::bind("wayland-anchor")?;
+    std::env::set_var("WAYLAND_DISPLAY", "wayland-anchor");
+    info!("✅ Wayland socket: wayland-anchor");
 
     // winit backend — GlesRenderer 可以从 EGL 获取
     let (mut backend, mut input) = winit::init::<GlesRenderer>()?;

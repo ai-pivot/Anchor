@@ -1,13 +1,13 @@
 #!/bin/bash
-# Titan 自动化测试脚本
-# 用法: ./scripts/test-titan.sh [description]
+# Anchor 自动化测试脚本
+# 用法: ./scripts/test-anchor.sh [description]
 set -e
 cd "$(dirname "$0")/.."
 
 export PATH="$HOME/.cargo/bin:$PATH"
 
 DESCRIPTION="${1:-test}"
-SCREENSHOT_DIR="/tmp/titan-screenshots"
+SCREENSHOT_DIR="/tmp/anchor-screenshots"
 mkdir -p "$SCREENSHOT_DIR"
 TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 RAW_FILE="$SCREENSHOT_DIR/dump-${TIMESTAMP}.raw"
@@ -46,21 +46,21 @@ with open(sys.argv[2], 'wb') as f: f.write(png)
 print(f'PNG: {sw}x{sh}, {len(png)} bytes')
 PYEOF
 
-echo "=== Titan 自动化测试: $DESCRIPTION ==="
-echo "[1/5] 编译 Titan..."
-cargo build --release --bin titan 2>&1 | tail -3
+echo "=== Anchor 自动化测试: $DESCRIPTION ==="
+echo "[1/5] 编译 Anchor..."
+cargo build --release --bin anchor 2>&1 | tail -3
 
 echo "[2/5] 重启 GDM..."
 sudo systemctl restart gdm 2>&1 || true
 
-echo "[3/5] 等待 Titan 启动..."
+echo "[3/5] 等待 Anchor 启动..."
 WAITED=0; MAX_WAIT=30; sleep 3
 while [ $WAITED -lt $MAX_WAIT ]; do
-    if pgrep -x titan > /dev/null 2>&1; then echo "  Titan 已启动 (${WAITED}s)"; break; fi
+    if pgrep -x anchor > /dev/null 2>&1; then echo "  Anchor 已启动 (${WAITED}s)"; break; fi
     sleep 1; WAITED=$((WAITED + 1))
 done
-if ! pgrep -x titan > /dev/null 2>&1; then
-    echo "❌ Titan 未启动"; exit 1
+if ! pgrep -x anchor > /dev/null 2>&1; then
+    echo "❌ Anchor 未启动"; exit 1
 fi
 sleep 5
 

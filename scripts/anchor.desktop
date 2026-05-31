@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Anchor
+Comment=Anchor Wayland Compositor
+Exec=anchor-session
+Type=Application
+DesktopNames=anchor

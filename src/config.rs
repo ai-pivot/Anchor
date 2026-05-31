@@ -1,5 +1,5 @@
 //! TOML 配置文件解析
-//! 路径: ~/.config/titan/config.toml 或 ./config.toml
+//! 路径: ~/.config/anchor/config.toml 或 ./config.toml
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -22,6 +22,8 @@ pub struct Config {
     pub launcher: Launcher,
     #[serde(default)]
     pub window_rules: Vec<WindowRule>,
+    #[serde(default)]
+    pub gpu: Gpu,
 }
 
 /// 窗口规则：根据 app-id 或 title 自动分配工作区/布局
@@ -155,6 +157,16 @@ pub struct Launcher {
     pub lines: i32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Gpu {
+    /// 优先使用的 GPU vendor: "auto" | "nvidia" | "amd" | "intel"
+    #[serde(default = "Gpu::default_vendor")]
+    pub vendor: String,
+    /// 手动指定 DRM 设备路径，空字符串=自动检测
+    #[serde(default)]
+    pub device: String,
+}
+
 pub fn parse_color(hex: &str) -> (f32, f32, f32) {
     let hex = hex.trim_start_matches('#');
     if hex.len() < 6 { return (0.0, 0.0, 0.0); }
@@ -215,12 +227,12 @@ fn dirs() -> std::path::PathBuf {
     let xdg = std::env::var("XDG_CONFIG_HOME").ok();
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".into());
     let base = xdg.unwrap_or_else(|| format!("{}/.config", home));
-    Path::new(&base).join("titan").to_path_buf()
+    Path::new(&base).join("anchor").to_path_buf()
 }
 
 // ── Defaults ────────────────────────────────────────
 
-impl Default for Config { fn default() -> Self { Self { colors: Colors::default(), bar: Bar::default(), wallpaper: Wallpaper::default(), layout: Layout::default(), keybindings: Keybindings::default(), terminal: Terminal::default(), launcher: Launcher::default(), window_rules: Vec::new() } } }
+impl Default for Config { fn default() -> Self { Self { colors: Colors::default(), bar: Bar::default(), wallpaper: Wallpaper::default(), layout: Layout::default(), keybindings: Keybindings::default(), terminal: Terminal::default(), launcher: Launcher::default(), window_rules: Vec::new(), gpu: Gpu::default() } } }
 impl Default for Colors { fn default() -> Self { Self {
     background: Colors::default_bg(), focus_border: Colors::default_focus_border(), unfocus_border: Colors::default_unfocus_border(),
     bar_background: Colors::default_bar_bg(), bar_foreground: Colors::default_bar_fg(),
@@ -244,6 +256,7 @@ impl Default for Layout { fn default() -> Self { Self { border_width: 2, gap: 6,
 impl Default for Keybindings { fn default() -> Self { Self { bindings: Keybindings::default_bindings() } } }
 impl Default for Terminal { fn default() -> Self { Self { command: "foot".into(), font: "monospace".into(), font_size: 12 } } }
 impl Default for Launcher { fn default() -> Self { Self { command: "wmenu".into(), prompt: "Launch".into(), lines: 10 } } }
+impl Default for Gpu { fn default() -> Self { Self { vendor: Gpu::default_vendor(), device: String::new() } } }
 
 impl Colors {
     fn default_bg() -> String { "#0f0f1a".into() }
@@ -308,4 +321,7 @@ impl Launcher {
     fn default_command() -> String { "wmenu".into() }
     fn default_prompt() -> String { "Launch".into() }
     fn default_lines() -> i32 { 10 }
+}
+impl Gpu {
+    fn default_vendor() -> String { "auto".into() }
 }

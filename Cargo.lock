@@ -71,6 +71,27 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "683d7910e743518b0e34f1186f92494becacb047c7b6bf616c96772180fef923"
 
 [[package]]
+name = "anchor"
+version = "0.5.0"
+dependencies = [
+ "chrono",
+ "fontdue",
+ "image",
+ "input",
+ "libc",
+ "serde",
+ "smithay",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "wayland-protocols",
+ "wayland-protocols-misc",
+ "wayland-server",
+ "winit",
+ "xkbcommon",
+]
+
+[[package]]
 name = "android-activity"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2426,27 +2447,6 @@ dependencies = [
  "arrayref",
  "bytemuck",
  "strict-num",
-]
-
-[[package]]
-name = "titan"
-version = "0.5.0"
-dependencies = [
- "chrono",
- "fontdue",
- "image",
- "input",
- "libc",
- "serde",
- "smithay",
- "toml",
- "tracing",
- "tracing-subscriber",
- "wayland-protocols",
- "wayland-protocols-misc",
- "wayland-server",
- "winit",
- "xkbcommon",
 ]
 
 [[package]]

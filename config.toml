@@ -1,5 +1,5 @@
-# Titan Compositor Configuration v25
-# ~/.config/titan/config.toml
+# Anchor Compositor Configuration v25
+# ~/.config/anchor/config.toml
 
 [colors]
 background = "#0d0d1a"
@@ -85,3 +85,16 @@ layout = "columns"
 [[window_rule]]
 app_id = "foot"
 workspace = 0
+
+# ─── GPU 配置 ───
+# gpu_vendor: 优先使用的 GPU vendor
+#   "auto"    — 自动检测（默认，选第一个 DRM 设备）
+#   "nvidia"  — 优先选 NVIDIA GPU
+#   "amd"     — 优先选 AMD GPU
+#   "intel"   — 优先选 Intel GPU
+# gpu_device: 指定 DRM 设备路径（优先于 vendor）
+#   "" 或不设置 — 自动检测
+#   "/dev/dri/card1" — 手动指定
+[gpu]
+vendor = "auto"
+device = ""

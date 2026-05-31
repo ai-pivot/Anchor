@@ -1,8 +1,9 @@
 [package]
-name = "titan"
+name = "anchor"
 version = "0.5.0"
 edition = "2021"
 description = "Minimal tiling Wayland compositor for NVIDIA GPUs"
+license = "MIT"
 
 [features]
 default = ["drm"]
@@ -39,11 +40,11 @@ chrono = "0.4"
 image = "0.25"
 
 [[bin]]
-name = "titan"
+name = "anchor"
 path = "src/main.rs"
 
 [[bin]]
-name = "titan-winit"
+name = "anchor-winit"
 path = "src/main_winit.rs"
 required-features = ["winit"]
 

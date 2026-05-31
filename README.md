@@ -1,8 +1,8 @@
-# Titan
+# Anchor
 
 A Wayland tiling compositor built with [Smithay](https://github.com/Smithay/smithay) 0.7 and Rust.
 
-Designed for NVIDIA proprietary driver environments where GBM/EGL GLES renderers don't work. Uses Pixman CPU rendering as a reliable fallback.
+Cross-GPU compatible: NVIDIA proprietary, AMD, Intel. Works with any logind-backed display manager (GDM/SDDM/LightDM). Uses Pixman CPU rendering for maximum compatibility.
 
 ## Features
 
@@ -14,15 +14,18 @@ Designed for NVIDIA proprietary driver environments where GBM/EGL GLES renderers
 - **Notifications** — Toast overlay triggered on layout/workspace/scratchpad changes.
 - **Screenshot** — `Super+P` dumps the DRM framebuffer.
 - **Fullscreen** — `Super+F` per-window fullscreen.
-- **Configurable** — Colors, gaps, borders, headbar, wallpaper via TOML config.
+- **Configurable** — Colors, gaps, borders, headbar, wallpaper, GPU selection via TOML config.
+- **Cross-GPU** — Auto-detects NVIDIA/AMD/Intel, sets appropriate environment variables.
 - **fontdue TTF Rendering** — Clean text rendering that survives NVIDIA block-linear scanout.
 
 ## Requirements
 
 - Linux with DRM/KMS
-- NVIDIA proprietary driver with `nvidia-drm.modeset=1`
-- GDM (or any logind-backed display manager)
-- [Smithay 0.7 patches](#smithay-patches) applied to cargo registry
+- A GPU with DRM support (NVIDIA proprietary / AMD / Intel)
+- A logind-backed display manager (GDM, SDDM, LightDM)
+
+### NVIDIA-specific
+- `nvidia-drm.modeset=1` kernel parameter required
 
 ### Runtime Dependencies
 
@@ -36,25 +39,23 @@ Designed for NVIDIA proprietary driver environments where GBM/EGL GLES renderers
 ### 1. Build
 
 ```bash
-cargo build --release --bin titan
+cargo build --release --bin anchor
 ```
 
-### 2. Apply Smithay Patches
-
-Required for NVIDIA proprietary driver. See [Smithay Patches](#smithay-patches) section.
-
-### 3. Install GDM Session
+### 2. Install Session
 
 ```bash
-sudo cp scripts/titan.desktop /usr/share/wayland-sessions/
+sudo cp scripts/anchor.desktop /usr/share/wayland-sessions/
 ```
 
-The `titan-session` wrapper auto-detects the project directory and sets required
-environment variables (NVIDIA GBM, input method, Wayland hints).
+The `anchor-session` wrapper auto-detects:
+- **GPU type** (NVIDIA/AMD/Intel) and sets appropriate env vars
+- **Project directory** via `dirname` — no hardcoded paths
+- **Input method** from `config.toml` (fcitx/ibus/none)
 
-### 4. Configure (Optional)
+### 3. Configure (Optional)
 
-Copy `config.toml` to `~/.config/titan/config.toml` or edit in project root.
+Copy `config.toml` to `~/.config/anchor/config.toml` or edit in project root.
 
 ## Configuration
 
@@ -76,6 +77,11 @@ margin = 6
 
 [terminal]
 command = "foot"
+
+# GPU configuration (auto-detect by default)
+[gpu]
+vendor = "auto"    # "auto" | "nvidia" | "amd" | "intel"
+device = ""        # "/dev/dri/card1" or empty for auto
 
 # Window rules: auto-assign apps to workspaces
 [[window_rule]]
@@ -132,21 +138,22 @@ draw commands naturally overwrite earlier windows' overflow — no clipping need
 
 ```
 src/
-  main.rs        — Compositor loop, App/Workspace structs, input handling
+  main.rs        — Compositor loop, App/Workspace structs, input handling, GPU auto-detect
   layout.rs      — Layout engine, slot(), headbar, decorations, wallpaper
   text_render.rs — fontdue TTF text rendering
-  config.rs      — TOML config parsing
+  config.rs      — TOML config parsing (with GPU config section)
 scripts/
-  titan-session          — GDM session wrapper
+  anchor-session          — DM session wrapper (GPU auto-detect, cross-platform)
   drm-dump-fb.c          — DRM framebuffer dump tool
   sendkey.c              — uinput keyboard event injector (for testing)
-  titan-launcher         — External launcher fallback
+  anchor-launcher         — External launcher fallback
 ```
 
 ## Known Limitations
 
 - **NVIDIA block-linear scanout**: Pixman renders linear pixels, NVIDIA scans block-linear.
   This causes minor pixel distortion at small scales. Window-sized features render correctly.
+  (AMD/Intel not affected — they use linear scanout.)
 - **No GPU acceleration**: Pixman is CPU-only. No EGL/GLES support on NVIDIA proprietary.
 - **No layer-shell**: External overlays (wmenu, waybar) won't work. Built-in alternatives provided.
 - **No xdg-decoration protocol**: CSD must be disabled in terminal config (e.g., `foot.ini`).
