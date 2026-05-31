@@ -1,4 +1,4 @@
-# Titan Compositor Configuration v20
+# Titan Compositor Configuration v25
 # ~/.config/titan/config.toml
 
 [colors]
@@ -66,3 +66,18 @@ font_size = 12
 command = "wmenu"
 prompt = "Launch"
 lines = 10
+
+# 窗口规则：根据 app_id 自动分配工作区
+[[window_rule]]
+app_id = "firefox"
+workspace = 1
+layout = "master-stack"
+
+[[window_rule]]
+app_id = "code"
+workspace = 2
+layout = "columns"
+
+[[window_rule]]
+app_id = "foot"
+workspace = 0

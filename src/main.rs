@@ -116,11 +116,30 @@ struct App {
     pointer_pos: (f64, f64),
     cfg: Config,
     window_titles: std::collections::HashMap<usize, String>,
+    window_app_ids: std::collections::HashMap<usize, String>,
     vblank_crtcs: std::collections::HashSet<crtc::Handle>,
     wallpaper_cache: wallpaper::WallpaperCache,
     notifications: Vec<Notification>,
+    scratchpad: Option<std::process::Child>,
+    scratchpad_visible: bool,
+    // 工作区切换动画
+    ws_anim: WsAnimation,
     // 多显示器尺寸信息（用于鼠标穿越）
     output_sizes: Vec<(i32, i32, i32, i32)>, // (x, y, w, h) per output
+}
+
+/// 工作区切换动画状态
+struct WsAnimation {
+    /// 动画开始时间
+    start: Option<std::time::Instant>,
+    /// 旧工作区索引
+    from_ws: usize,
+    /// 新工作区索引
+    to_ws: usize,
+    /// 动画时长（ms）
+    duration_ms: u64,
+    /// 方向: -1=左, 1=右
+    direction: i32,
 }
 
 impl BufferHandler for App { fn buffer_destroyed(&mut self, _: &wl_buffer::WlBuffer) {} }
@@ -197,6 +216,48 @@ impl App {
         });
     }
 
+    fn toggle_scratchpad(&mut self) {
+        if self.scratchpad_visible {
+            // 隐藏：杀掉 scratchpad 进程
+            if let Some(ref mut child) = self.scratchpad {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            self.scratchpad = None;
+            self.scratchpad_visible = false;
+            self.notify("Scratchpad hidden");
+        } else {
+            // 显示：启动终端
+            match std::process::Command::new("weston-terminal")
+                .env("WAYLAND_DISPLAY", "wayland-titan")
+                .env("XDG_RUNTIME_DIR", format!("/run/user/{}", unsafe { libc::getuid() }))
+                .spawn()
+            {
+                Ok(child) => {
+                    self.scratchpad = Some(child);
+                    self.scratchpad_visible = true;
+                    self.notify("Scratchpad");
+                }
+                Err(_) => {
+                    // fallback: 用 foot 或 alacritty
+                    match std::process::Command::new("foot")
+                        .env("WAYLAND_DISPLAY", "wayland-titan")
+                        .env("XDG_RUNTIME_DIR", format!("/run/user/{}", unsafe { libc::getuid() }))
+                        .spawn()
+                    {
+                        Ok(child) => {
+                            self.scratchpad = Some(child);
+                            self.scratchpad_visible = true;
+                            self.notify("Scratchpad (foot)");
+                        }
+                        Err(_) => { self.notify("No terminal found"); }
+                    }
+                }
+            }
+        }
+        self.dirty = true;
+    }
+
     fn drain_notifications(&mut self) {
         let now = std::time::Instant::now();
         self.notifications.retain(|n| now.duration_since(n.created) < n.duration);
@@ -224,9 +285,20 @@ impl App {
     fn switch_workspace(&mut self, target: usize) {
         if target >= NUM_WORKSPACES || target == self.active_ws { return; }
         info!("🔀 工作区 {} → {}", self.active_ws + 1, target + 1);
+        
+        // 触发切换动画
+        let dir = if target > self.active_ws { 1 } else { -1 };
+        self.ws_anim = WsAnimation {
+            start: Some(std::time::Instant::now()),
+            from_ws: self.active_ws,
+            to_ws: target,
+            duration_ms: 200,
+            direction: dir,
+        };
 
         // 隐藏当前工作区的窗口（最小化到 1x1）
         let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
+        let _bar_h = bar_h;
         for tl in &self.workspaces[self.active_ws].tops {
             tl.with_pending_state(|st| {
                 st.states.unset(xdg_toplevel::State::Activated);
@@ -375,6 +447,23 @@ impl App {
                                     return FilterResult::Intercept(());
                                 }
                                 Keysym::f => { data.toggle_fullscreen(); return FilterResult::Intercept(()); }
+                                Keysym::p => {
+                                    // 内置截图
+                                    let ts = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                                    let dir = std::path::PathBuf::from("$HOME/Pictures/Screenshots");
+                                    let _ = std::fs::create_dir_all(&dir);
+                                    let path = dir.join(format!("titan-{}.raw", ts));
+                                    let args = format!("timeout 3 ./scripts/drm-dump-fb /dev/dri/card1 {}", path.display());
+                                    std::process::Command::new("sh").arg("-c").arg(&args).spawn().ok();
+                                    data.notify("Screenshot saved");
+                                    return FilterResult::Intercept(());
+                                }
+                                Keysym::grave => {
+                                    // Scratchpad: 切换下拉终端
+                                    data.toggle_scratchpad();
+                                    return FilterResult::Intercept(());
+                                }
                                 Keysym::space => {
                                     let ws = &mut data.workspaces[data.active_ws];
                                     ws.layout = ws.layout.next();
@@ -475,7 +564,6 @@ impl App {
 impl XdgShellHandler for App {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState { &mut self.xdg }
     fn new_toplevel(&mut self, s: ToplevelSurface) {
-        // 新窗口总是添加到当前工作区
         self.workspaces[self.active_ws].tops.push(s);
         let ws = &self.workspaces[self.active_ws];
         let idx = ws.tops.len() - 1;
@@ -493,6 +581,77 @@ impl XdgShellHandler for App {
     fn new_popup(&mut self, _: PopupSurface, _: PositionerState) {}
     fn grab(&mut self, _: PopupSurface, _: wl_seat::WlSeat, _: smithay::utils::Serial) {}
     fn reposition_request(&mut self, _: PopupSurface, _: PositionerState, _: u32) {}
+    fn app_id_changed(&mut self, surface: ToplevelSurface) {
+        use smithay::wayland::compositor::with_states;
+        use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
+        let app_id = with_states(surface.wl_surface(), |states| {
+            states.data_map.get::<XdgToplevelSurfaceData>()
+                .and_then(|d| d.lock().ok())
+                .and_then(|d| d.app_id.clone())
+                .unwrap_or_default()
+        });
+        info!("🆔 app_id_changed: '{}'", app_id);
+        
+        let wl_surf = surface.wl_surface().clone();
+        
+        // 查找该 surface 在哪个工作区
+        let mut found: Option<(usize, usize)> = None;
+        for (ws_idx, ws) in self.workspaces.iter().enumerate() {
+            for (idx, top) in ws.tops.iter().enumerate() {
+                if top.wl_surface() == &wl_surf {
+                    found = Some((ws_idx, idx));
+                    break;
+                }
+            }
+            if found.is_some() { break; }
+        }
+        
+        if let Some((ws_idx, idx)) = found {
+            self.window_app_ids.insert(idx, app_id.clone());
+            
+            // 匹配窗口规则
+            for rule in &self.cfg.window_rules {
+                if !rule.app_id.is_empty() && app_id.contains(&rule.app_id) {
+                    let target_ws = rule.workspace.min(self.workspaces.len() - 1);
+                    if target_ws != ws_idx {
+                        info!("📐 窗口规则: '{}' → 工作区 {}", app_id, target_ws + 1);
+                        if let Some(ref layout_name) = rule.layout {
+                            if let Some(l) = crate::layout::LayoutPreset::from_name(layout_name) {
+                                self.workspaces[target_ws].layout = l;
+                            }
+                        }
+                        // 移动窗口到目标工作区
+                        if self.workspaces[ws_idx].tops.len() > idx {
+                            let top = self.workspaces[ws_idx].tops.remove(idx);
+                            self.workspaces[target_ws].tops.push(top);
+                            self.switch_workspace(target_ws);
+                            self.do_layout();
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    fn title_changed(&mut self, surface: ToplevelSurface) {
+        use smithay::wayland::compositor::with_states;
+        use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
+        let title = with_states(surface.wl_surface(), |states| {
+            states.data_map.get::<XdgToplevelSurfaceData>()
+                .and_then(|d| d.lock().ok())
+                .and_then(|d| d.title.clone())
+                .unwrap_or_default()
+        });
+        let wl_surf = surface.wl_surface().clone();
+        for ws in &self.workspaces {
+            for (idx, top) in ws.tops.iter().enumerate() {
+                if top.wl_surface() == &wl_surf {
+                    self.window_titles.insert(idx, title.clone());
+                    return;
+                }
+            }
+        }
+    }
 }
 
 impl SelectionHandler for App { type SelectionUserData = (); }
@@ -742,9 +901,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         kbd, cfg,
         pointer_pos: (0.0, 0.0),
         window_titles: std::collections::HashMap::new(),
+        window_app_ids: std::collections::HashMap::new(),
         vblank_crtcs: std::collections::HashSet::new(),
         wallpaper_cache: wallpaper::WallpaperCache::new(),
         notifications: Vec::new(),
+        scratchpad: None,
+        scratchpad_visible: false,
+        ws_anim: WsAnimation { start: None, from_ws: 0, to_ws: 0, duration_ms: 200, direction: 0 },
         output_sizes,
     };
     let listener = ListeningSocket::bind("wayland-titan")?;
@@ -864,6 +1027,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ws = &state.workspaces[state.active_ws];
             let n_windows = ws.tops.len();
             let fullscreen = ws.fullscreen;
+            
+            // 计算工作区切换动画偏移（稍后在循环中使用 ow 计算）
+            let ws_anim_active = state.ws_anim.start.is_some();
+            let ws_anim_dir = state.ws_anim.direction;
+            let ws_anim_duration = state.ws_anim.duration_ms;
+            let ws_anim_elapsed = state.ws_anim.start.map(|s| s.elapsed().as_millis() as u64);
 
             for oi in 0..titan_outputs.len() {
                 let out = &mut titan_outputs[oi];
@@ -908,9 +1077,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                             } else {
+                                // 计算工作区切换动画偏移
+                                let ws_offset: i32 = if ws_anim_active {
+                                    if let Some(elapsed) = ws_anim_elapsed {
+                                        if elapsed < ws_anim_duration {
+                                            let t = elapsed as f32 / ws_anim_duration as f32;
+                                            let t_ease = 1.0 - (1.0 - t).powi(3);
+                                            (ws_anim_dir as f32 * ow as f32 * (1.0 - t_ease)) as i32
+                                        } else {
+                                            0
+                                        }
+                                    } else { 0 }
+                                } else { 0 };
+                                
                                 for (i, tl) in ws.tops.iter().enumerate() {
                                     let (x, y, _w, _h) = layout::slot(i, n_windows, ow, oh, bar_h, &state.cfg, state.workspaces[state.active_ws].layout);
-                                    for elem in render_elements_from_surface_tree(&mut renderer, tl.wl_surface(), (x, y), 1.0, 1.0, Kind::Unspecified) {
+                                    for elem in render_elements_from_surface_tree(&mut renderer, tl.wl_surface(), (x + ws_offset, y), 1.0, 1.0, Kind::Unspecified) {
                                         elems.push(elem);
                                     }
                                 }
@@ -927,13 +1109,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         // 窗口暗色背景（在壁纸之上、窗口内容之下）
                         if Some(out.crtc) == primary_crtc && fullscreen.is_none() {
-                            layout::render_window_bg(&mut f, &state.cfg, n_windows, ow, oh, bar_h, state.workspaces[state.active_ws].layout);
+                            let ws_offset2: i32 = if ws_anim_active {
+                                if let Some(elapsed) = ws_anim_elapsed {
+                                    if elapsed < ws_anim_duration {
+                                        let t = elapsed as f32 / ws_anim_duration as f32;
+                                        let t_ease = 1.0 - (1.0 - t).powi(3);
+                                        (ws_anim_dir as f32 * ow as f32 * (1.0 - t_ease)) as i32
+                                    } else { 0 }
+                                } else { 0 }
+                            } else { 0 };
+                            layout::render_window_bg_anim(&mut f, &state.cfg, n_windows, ow, oh, bar_h, state.workspaces[state.active_ws].layout, ws_offset2);
                         }
                         draw_render_elements(&mut f, 1.0, &elems, &[dmg])?;
 
                         if Some(out.crtc) == primary_crtc && fullscreen.is_none() {
+                            let ws_offset3: i32 = if ws_anim_active {
+                                if let Some(elapsed) = ws_anim_elapsed {
+                                    if elapsed < ws_anim_duration {
+                                        let t = elapsed as f32 / ws_anim_duration as f32;
+                                        let t_ease = 1.0 - (1.0 - t).powi(3);
+                                        (ws_anim_dir as f32 * ow as f32 * (1.0 - t_ease)) as i32
+                                    } else { 0 }
+                                } else { 0 }
+                            } else { 0 };
                             for (i, _) in ws.tops.iter().enumerate() {
-                                layout::render_window_decorations(&mut f, &state.cfg, i, n_windows, focus_idx, ow, oh, bar_h, state.workspaces[state.active_ws].layout);
+                                layout::render_window_decorations_anim(&mut f, &state.cfg, i, n_windows, focus_idx, ow, oh, bar_h, state.workspaces[state.active_ws].layout, ws_offset3);
                             }
                         }
 
@@ -978,6 +1178,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             state.dirty = false;
+            // 动画进行中时持续请求渲染
+            if state.ws_anim.start.map(|s| (s.elapsed().as_millis() as u64) < state.ws_anim.duration_ms).unwrap_or(false) {
+                state.dirty = true;
+            }
             state.frame += 1;
             state.drain_notifications();
             if state.frame == 1 { info!("✅ 第一帧渲染！"); }

@@ -20,6 +20,25 @@ pub struct Config {
     pub terminal: Terminal,
     #[serde(default)]
     pub launcher: Launcher,
+    #[serde(default)]
+    pub window_rules: Vec<WindowRule>,
+}
+
+/// 窗口规则：根据 app-id 或 title 自动分配工作区/布局
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowRule {
+    /// 应用 ID 匹配（子串）
+    #[serde(default)]
+    pub app_id: String,
+    /// 标题匹配（子串）
+    #[serde(default)]
+    pub title: String,
+    /// 分配到工作区 (0-indexed)
+    #[serde(default)]
+    pub workspace: usize,
+    /// 使用的布局
+    #[serde(default)]
+    pub layout: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -201,7 +220,7 @@ fn dirs() -> std::path::PathBuf {
 
 // ── Defaults ────────────────────────────────────────
 
-impl Default for Config { fn default() -> Self { Self { colors: Colors::default(), bar: Bar::default(), wallpaper: Wallpaper::default(), layout: Layout::default(), keybindings: Keybindings::default(), terminal: Terminal::default(), launcher: Launcher::default() } } }
+impl Default for Config { fn default() -> Self { Self { colors: Colors::default(), bar: Bar::default(), wallpaper: Wallpaper::default(), layout: Layout::default(), keybindings: Keybindings::default(), terminal: Terminal::default(), launcher: Launcher::default(), window_rules: Vec::new() } } }
 impl Default for Colors { fn default() -> Self { Self {
     background: Colors::default_bg(), focus_border: Colors::default_focus_border(), unfocus_border: Colors::default_unfocus_border(),
     bar_background: Colors::default_bar_bg(), bar_foreground: Colors::default_bar_fg(),

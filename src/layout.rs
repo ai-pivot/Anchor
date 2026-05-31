@@ -34,6 +34,15 @@ impl LayoutPreset {
             Self::Grid => "Grid",
         }
     }
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "master-stack" | "masterstack" => Some(Self::MasterStack),
+            "columns" | "column" => Some(Self::Columns),
+            "center" => Some(Self::Center),
+            "grid" => Some(Self::Grid),
+            _ => None,
+        }
+    }
 }
 
 impl Default for LayoutPreset {
@@ -142,12 +151,16 @@ pub fn slot(i: usize, n: usize, ow: i32, oh: i32, bar_h: i32, cfg: &Config, layo
 // ═══════════════════════════════════════════════════════════
 
 pub fn render_window_bg(f: &mut impl Frame, cfg: &Config, n: usize, ow: i32, oh: i32, bar_h: i32, layout: LayoutPreset) {
+    render_window_bg_anim(f, cfg, n, ow, oh, bar_h, layout, 0);
+}
+
+pub fn render_window_bg_anim(f: &mut impl Frame, cfg: &Config, n: usize, ow: i32, oh: i32, bar_h: i32, layout: LayoutPreset, offset_x: i32) {
     if n == 0 { return; }
     let bw = cfg.layout.border_width;
     let bg = color_hex(&cfg.colors.background);
     for i in 0..n {
         let (x, y, w, h) = slot(i, n, ow, oh, bar_h, cfg, layout);
-        f.clear(bg, &[rect(x - bw, y - bw, w + 2 * bw, h + 2 * bw)]).ok();
+        f.clear(bg, &[rect(x - bw + offset_x, y - bw, w + 2 * bw, h + 2 * bw)]).ok();
     }
 }
 
@@ -194,9 +207,19 @@ pub fn render_window_decorations(
     ow: i32, oh: i32, bar_h: i32,
     layout: LayoutPreset,
 ) {
+    render_window_decorations_anim(f, cfg, i, n, focus_idx, ow, oh, bar_h, layout, 0);
+}
+
+pub fn render_window_decorations_anim(
+    f: &mut impl Frame, cfg: &Config,
+    i: usize, n: usize, focus_idx: Option<usize>,
+    ow: i32, oh: i32, bar_h: i32,
+    layout: LayoutPreset, offset_x: i32,
+) {
     if n == 0 { return; }
     let bw = cfg.layout.border_width;
     let (x, y, w, h) = slot(i, n, ow, oh, bar_h, cfg, layout);
+    let x = x + offset_x;
     let is_focused = focus_idx == Some(i);
 
     if is_focused {
