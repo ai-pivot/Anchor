@@ -24,6 +24,8 @@ pub struct Config {
     pub window_rules: Vec<WindowRule>,
     #[serde(default)]
     pub gpu: Gpu,
+    #[serde(default)]
+    pub cursor: Cursor,
 }
 
 /// 窗口规则：根据 app-id 或 title 自动分配工作区/布局
@@ -149,8 +151,6 @@ pub struct Terminal {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Launcher {
-    #[serde(default = "Launcher::default_command")]
-    pub command: String,
     #[serde(default = "Launcher::default_prompt")]
     pub prompt: String,
     #[serde(default = "Launcher::default_lines")]
@@ -165,6 +165,19 @@ pub struct Gpu {
     /// 手动指定 DRM 设备路径，空字符串=自动检测
     #[serde(default)]
     pub device: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Cursor {
+    /// X11 cursor theme 名称，空字符串=使用内置光标
+    #[serde(default)]
+    pub theme: String,
+    /// 光标名称 (默认 "left_ptr")
+    #[serde(default = "Cursor::default_name")]
+    pub name: String,
+    /// 光标像素大小 (每个逻辑像素的实际像素数)
+    #[serde(default = "Cursor::default_size")]
+    pub size: usize,
 }
 
 pub fn parse_color(hex: &str) -> (f32, f32, f32) {
@@ -232,7 +245,7 @@ fn dirs() -> std::path::PathBuf {
 
 // ── Defaults ────────────────────────────────────────
 
-impl Default for Config { fn default() -> Self { Self { colors: Colors::default(), bar: Bar::default(), wallpaper: Wallpaper::default(), layout: Layout::default(), keybindings: Keybindings::default(), terminal: Terminal::default(), launcher: Launcher::default(), window_rules: Vec::new(), gpu: Gpu::default() } } }
+impl Default for Config { fn default() -> Self { Self { colors: Colors::default(), bar: Bar::default(), wallpaper: Wallpaper::default(), layout: Layout::default(), keybindings: Keybindings::default(), terminal: Terminal::default(), launcher: Launcher::default(), window_rules: Vec::new(), gpu: Gpu::default(), cursor: Cursor::default() } } }
 impl Default for Colors { fn default() -> Self { Self {
     background: Colors::default_bg(), focus_border: Colors::default_focus_border(), unfocus_border: Colors::default_unfocus_border(),
     bar_background: Colors::default_bar_bg(), bar_foreground: Colors::default_bar_fg(),
@@ -255,8 +268,9 @@ impl Default for Wallpaper { fn default() -> Self { Self {
 impl Default for Layout { fn default() -> Self { Self { border_width: 2, gap: 6, margin: 0 } } }
 impl Default for Keybindings { fn default() -> Self { Self { bindings: Keybindings::default_bindings() } } }
 impl Default for Terminal { fn default() -> Self { Self { command: "foot".into(), font: "monospace".into(), font_size: 12 } } }
-impl Default for Launcher { fn default() -> Self { Self { command: "wmenu".into(), prompt: "Launch".into(), lines: 10 } } }
+impl Default for Launcher { fn default() -> Self { Self { prompt: "Launch".into(), lines: 10 } } }
 impl Default for Gpu { fn default() -> Self { Self { vendor: Gpu::default_vendor(), device: String::new() } } }
+impl Default for Cursor { fn default() -> Self { Self { theme: String::new(), name: Cursor::default_name(), size: Cursor::default_size() } } }
 
 impl Colors {
     fn default_bg() -> String { "#0f0f1a".into() }
@@ -318,10 +332,13 @@ impl Terminal {
     fn default_font_size() -> i32 { 12 }
 }
 impl Launcher {
-    fn default_command() -> String { "wmenu".into() }
     fn default_prompt() -> String { "Launch".into() }
     fn default_lines() -> i32 { 10 }
 }
 impl Gpu {
     fn default_vendor() -> String { "auto".into() }
+}
+impl Cursor {
+    fn default_name() -> String { "left_ptr".into() }
+    fn default_size() -> usize { 3 }
 }

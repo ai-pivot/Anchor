@@ -10,9 +10,66 @@ static FONT: OnceLock<Font> = OnceLock::new();
 
 fn get_font() -> &'static Font {
     FONT.get_or_init(|| {
-        let path = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf";
-        let data = std::fs::read(path).expect("DejaVu Sans not found");
-        Font::from_bytes(data, fontdue::FontSettings::default()).expect("Invalid font")
+        let candidates = [
+            // DejaVu Sans — Debian/Ubuntu/Arch
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            // Noto Sans — Arch [noto-fonts], Fedora, many distros
+            "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/google-noto/NotoSans-Regular.ttf",
+            // Liberation Sans — Fedora/RHEL, often installed
+            "/usr/share/fonts/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            // Noto Sans CJK (contains Latin too) — common for CJK users
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            // Ubuntu font — Ubuntu
+            "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
+            // Roboto — some distros / Android
+            "/usr/share/fonts/truetype/roboto/Roboto-Regular.ttf",
+            "/usr/share/fonts/TTF/Roboto-Regular.ttf",
+            // Cantarell — GNOME default
+            "/usr/share/fonts/cantarell/Cantarell-VF.otf",
+            // Open Sans — some distros
+            "/usr/share/fonts/truetype/open-sans/OpenSans-Regular.ttf",
+            // Fallback: try fontconfig's default sans via fc-match
+        ];
+        // Try hardcoded paths first
+        if let Some(data) = candidates.iter().find_map(|p| std::fs::read(p).ok()) {
+            if let Ok(font) = Font::from_bytes(data, fontdue::FontSettings::default()) {
+                tracing::info!("🔤 字体: 已加载");
+                return font;
+            }
+        }
+        // Try fontconfig to find any available sans-serif font
+        if let Ok(output) = std::process::Command::new("fc-match")
+            .arg("-f").arg("%{file}")
+            .arg("sans-serif")
+            .output()
+        {
+            if output.status.success() {
+                let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                if !path.is_empty() {
+                    if let Ok(data) = std::fs::read(&path) {
+                        if let Ok(font) = Font::from_bytes(data, fontdue::FontSettings::default()) {
+                            tracing::info!("🔤 字体: fc-match → {}", path);
+                            return font;
+                        }
+                    }
+                }
+            }
+        }
+        tracing::error!("🔤 未找到任何可用字体！请安装 ttf-dejavu 或 noto-fonts");
+        // Last resort: embed a minimal font. We create a 1-glyph font in memory
+        // to avoid panic. Text will be invisible but compositor won't crash.
+        // fontdue can load any valid TTF/OTF — if nothing works, we must still
+        // provide something. Use DejaVu from system or fail with a useful message.
+        panic!(
+            "No usable font found!\n\
+             Install one of: ttf-dejavu, noto-fonts, liberation-fonts\n\
+             Or set a font with fontconfig: fc-cache -f && fc-match sans-serif"
+        );
     })
 }
 

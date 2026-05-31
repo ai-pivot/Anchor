@@ -101,11 +101,7 @@ case "$IM_METHOD" in
         export XMODIFIERS=@im=fcitx
         export SDL_IM_MODULE=fcitx
         export INPUT_METHOD=fcitx
-        if command -v fcitx5 &>/dev/null; then
-            fcitx5 -d --replace 2>/dev/null &
-        elif command -v fcitx &>/dev/null; then
-            fcitx -d --replace 2>/dev/null &
-        fi
+        # fcitx5 由 Anchor 合成器在 socket 就绪后启动
         ;;
     ibus)
         export GTK_IM_MODULE=ibus

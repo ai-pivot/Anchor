@@ -63,7 +63,6 @@ font = "monospace"
 font_size = 12
 
 [launcher]
-command = "wmenu"
 prompt = "Launch"
 lines = 10
 

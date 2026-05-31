@@ -9,6 +9,7 @@ mod font;
 mod text_render;
 mod block_linear;
 mod wallpaper;
+mod cursor;
 
 use std::{
     os::unix::io::OwnedFd,
@@ -21,21 +22,21 @@ use config::Config;
 use smithay::{
     backend::{
         allocator::{Format, Fourcc, Modifier,
-            gbm::{GbmAllocator, GbmBufferFlags, GbmDevice}},
-        drm::{DrmDevice, DrmDeviceFd, DrmEvent, GbmBufferedSurface},
-        input::{InputEvent, KeyState},
+            gbm::{GbmAllocator, GbmBufferFlags, GbmDevice}},        drm::{DrmDevice, DrmDeviceFd, DrmEvent, GbmBufferedSurface},
+        input::{Axis, ButtonState, InputEvent, KeyState, PointerAxisEvent},
         libinput::LibinputInputBackend,
         renderer::{Bind, Frame, Renderer,
             pixman::PixmanRenderer,
             element::{surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement}, Kind},
             utils::{draw_render_elements, on_commit_buffer_handler}, Color32F},
-        session::{Session, Event as SessionEvent, libseat::{LibSeatSession, LibSeatSessionNotifier}},
+        session::{Session, Event as SessionEvent, libseat::LibSeatSession},
     },
     delegate_compositor, delegate_data_device, delegate_input_method_manager,
-    delegate_output, delegate_seat, delegate_shm, delegate_text_input_manager, delegate_xdg_shell,
+    delegate_output, delegate_seat, delegate_shm, delegate_text_input_manager,
+    delegate_virtual_keyboard_manager, delegate_xdg_shell,
     input::{
         keyboard::{FilterResult, Keysym, ModifiersState, XkbConfig},
-        pointer::CursorImageStatus, Seat, SeatHandler, SeatState,
+        pointer::{AxisFrame, CursorImageStatus, MotionEvent, PointerHandle}, Seat, SeatHandler, SeatState,
     },
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
@@ -59,6 +60,7 @@ use smithay::{
         shell::xdg::{PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState},
         shm::{ShmHandler, ShmState},
         text_input::TextInputManagerState,
+        virtual_keyboard::VirtualKeyboardManagerState,
     },
 };
 use wayland_protocols::xdg::shell::server::xdg_toplevel;
@@ -116,8 +118,10 @@ struct App {
     dh: DisplayHandle, active: bool,
     dirty: bool,
     kbd: smithay::input::keyboard::KeyboardHandle<Self>,
+    pointer: PointerHandle<Self>,
     pointer_pos: (f64, f64),
     cfg: Config,
+    cursor_img: cursor::CursorImage,
     window_titles: std::collections::HashMap<usize, String>,
     window_app_ids: std::collections::HashMap<usize, String>,
     vblank_crtcs: std::collections::HashSet<crtc::Handle>,
@@ -162,6 +166,52 @@ impl App {
     fn focus_idx(&self) -> Option<usize> {
         let ws = &self.workspaces[self.active_ws];
         ws.focus.as_ref().and_then(|s| ws.tops.iter().position(|tl| tl.wl_surface() == s))
+    }
+
+    /// Find the surface under the pointer.
+    /// Returns (WlSurface, slot_offset_in_global_space).
+    /// Smithay computes surface-local coords as: event.location - slot_offset
+    fn pointer_focus(&self) -> Option<(WlSurface, Point<f64, Logical>)> {
+        let px = self.pointer_pos.0 as i32;
+        let py = self.pointer_pos.1 as i32;
+        let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
+        if py < bar_h { return None; }
+        let ws = &self.workspaces[self.active_ws];
+
+        // Fullscreen: entire area below bar
+        if let Some(fi) = ws.fullscreen {
+            if let Some(tl) = ws.tops.get(fi) {
+                return Some((tl.wl_surface().clone(), Point::from((0.0, bar_h as f64))));
+            }
+        }
+
+        // Normal: hit-test each window slot
+        for (i, tl) in ws.tops.iter().enumerate() {
+            let (x, y, w, h) = layout::slot(i, ws.tops.len(), self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
+            if px >= x && px < x + w && py >= y && py < y + h {
+                return Some((tl.wl_surface().clone(), Point::from((x as f64, y as f64))));
+            }
+        }
+
+        // Popup hit-test: if click is outside all slots, check popup surfaces
+        // Popups can extend beyond their parent's slot boundaries
+        for popup in self.xdg.popup_surfaces() {
+            // Use compositor's with_states to get the popup's geometry
+            let popup_surf = popup.wl_surface();
+            if let Some(parent) = popup.get_parent_surface() {
+                // Find the parent's slot position
+                for (i, tl) in ws.tops.iter().enumerate() {
+                    if tl.wl_surface() == &parent {
+                        let (x, y, _w, _h) = layout::slot(i, ws.tops.len(), self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
+                        // The popup is a child of this toplevel
+                        // Return the parent surface — Smithay will route to the popup via subsurface tree
+                        return Some((parent, Point::from((x as f64, y as f64))));
+                    }
+                }
+            }
+        }
+
+        None
     }
 
     fn fullscreen(&self) -> Option<usize> { self.workspaces[self.active_ws].fullscreen }
@@ -227,7 +277,7 @@ impl App {
         });
     }
 
-    fn load_apps() -> Vec<(String, String)> {
+    fn load_apps(terminal_cmd: &str) -> Vec<(String, String)> {
         let mut apps = Vec::new();
         let dirs = [
             "/usr/share/applications".to_string(),
@@ -257,7 +307,7 @@ impl App {
                                 }
                                 if !app_name.is_empty() && !app_exec.is_empty() && !no_display {
                                     if is_terminal {
-                                        app_exec = format!("foot {}", app_exec);
+                                        app_exec = format!("{} {}", terminal_cmd, app_exec);
                                     }
                                     apps.push((app_name, app_exec));
                                 }
@@ -278,7 +328,7 @@ impl App {
             self.launcher_query.clear();
             self.launcher_apps.clear();
         } else {
-            let all_apps = Self::load_apps();
+            let all_apps = Self::load_apps(&self.cfg.terminal.command);
             self.launcher_apps = all_apps;
             self.launcher_query.clear();
             self.launcher_selected = 0;
@@ -323,31 +373,22 @@ impl App {
             self.scratchpad_visible = false;
             self.notify("Scratchpad hidden");
         } else {
-            // 显示：启动终端
+            // 显示：启动终端（使用用户配置的终端）
             self.scratchpad_pending = true;
-            match std::process::Command::new("weston-terminal")
+            let uid = unsafe { libc::getuid() };
+            match std::process::Command::new(&self.cfg.terminal.command)
                 .env("WAYLAND_DISPLAY", "wayland-anchor")
-                .env("XDG_RUNTIME_DIR", format!("/run/user/{}", unsafe { libc::getuid() }))
+                .env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"))
                 .spawn()
             {
                 Ok(child) => {
                     self.scratchpad = Some(child);
                     self.scratchpad_visible = true;
-                    self.notify("Scratchpad");
+                    self.notify(&format!("Scratchpad ({})", self.cfg.terminal.command));
                 }
-                Err(_) => {
-                    match std::process::Command::new("foot")
-                        .env("WAYLAND_DISPLAY", "wayland-anchor")
-                        .env("XDG_RUNTIME_DIR", format!("/run/user/{}", unsafe { libc::getuid() }))
-                        .spawn()
-                    {
-                        Ok(child) => {
-                            self.scratchpad = Some(child);
-                            self.scratchpad_visible = true;
-                            self.notify("Scratchpad (foot)");
-                        }
-                        Err(_) => { self.scratchpad_pending = false; self.notify("No terminal found"); }
-                    }
+                Err(e) => {
+                    self.scratchpad_pending = false;
+                    self.notify(&format!("Failed to launch {}: {}", self.cfg.terminal.command, e));
                 }
             }
         }
@@ -665,44 +706,87 @@ impl App {
                 let screen_w = self.osize.w as f64;
                 let screen_h = self.osize.h as f64;
                 if self.pointer_pos.0 < 0.0 {
-                    // 跑到左边屏幕
                     if self.output_sizes.len() > 1 {
-                        self.pointer_pos.0 = 0.0; // TODO: warp to left screen
+                        self.pointer_pos.0 = 0.0;
                     } else {
                         self.pointer_pos.0 = 0.0;
                     }
                 }
                 if self.pointer_pos.0 > screen_w {
-                    // 跑到右边屏幕
                     if self.output_sizes.len() > 1 {
-                        self.pointer_pos.0 = screen_w - 1.0; // TODO: warp to right screen
+                        self.pointer_pos.0 = screen_w - 1.0;
                     } else {
                         self.pointer_pos.0 = screen_w - 1.0;
                     }
                 }
                 self.pointer_pos.1 = self.pointer_pos.1.clamp(0.0, screen_h - 1.0);
+
+                // 转发给客户端
+                let serial = SERIAL_COUNTER.next_serial();
+                let time = (event.time() / 1000) as u32;
+                let focus = self.pointer_focus();
+                let ptr = self.pointer.clone();
+                ptr.motion(self, focus, &MotionEvent {
+                    location: Point::from((self.pointer_pos.0, self.pointer_pos.1)),
+                    serial,
+                    time,
+                });
+                ptr.frame(self);
+
                 self.dirty = true;
             }
             InputEvent::PointerButton { event } => {
-                use smithay::backend::input::ButtonState;
+                // 点击聚焦（仅 Press 时）
                 if event.state() == ButtonState::Pressed {
                     let px = self.pointer_pos.0 as i32;
                     let py = self.pointer_pos.1 as i32;
                     let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
-                    if py < bar_h { return; }
-                    let ws = &self.workspaces[self.active_ws];
-                    for (i, tl) in ws.tops.iter().enumerate() {
-                        let (x, y, w, h) = layout::slot(i, ws.tops.len(), self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
-                        if px >= x && px < x + w && py >= y && py < y + h {
-                            let surf = tl.wl_surface().clone();
-                            self.workspaces[self.active_ws].focus = Some(surf.clone());
-                            let kbd = self.kbd.clone();
-                            let serial = SERIAL_COUNTER.next_serial();
-                            kbd.set_focus(self, Some(surf), serial);
-                            break;
+                    if py >= bar_h {
+                        let ws = &self.workspaces[self.active_ws];
+                        for (i, tl) in ws.tops.iter().enumerate() {
+                            let (x, y, w, h) = layout::slot(i, ws.tops.len(), self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
+                            if px >= x && px < x + w && py >= y && py < y + h {
+                                let surf = tl.wl_surface().clone();
+                                self.workspaces[self.active_ws].focus = Some(surf.clone());
+                                let kbd = self.kbd.clone();
+                                let serial = SERIAL_COUNTER.next_serial();
+                                kbd.set_focus(self, Some(surf), serial);
+                                break;
+                            }
                         }
                     }
                 }
+
+                // 转发按钮事件给客户端
+                let serial = SERIAL_COUNTER.next_serial();
+                let time = (event.time() / 1000) as u32;
+                let ptr = self.pointer.clone();
+                ptr.button(self, &smithay::input::pointer::ButtonEvent {
+                    serial,
+                    time,
+                    button: event.button_code(),
+                    state: event.state(),
+                });
+                ptr.frame(self);
+            }
+            InputEvent::PointerAxis { event } => {
+                let time = (event.time() / 1000) as u32;
+                let mut frame = AxisFrame::new(time).source(event.source());
+                if let Some(v) = event.amount(Axis::Vertical) {
+                    frame = frame.value(Axis::Vertical, v);
+                }
+                if let Some(v) = event.amount(Axis::Horizontal) {
+                    frame = frame.value(Axis::Horizontal, v);
+                }
+                if let Some(v) = event.amount_v120(Axis::Vertical) {
+                    frame = frame.v120(Axis::Vertical, v as i32);
+                }
+                if let Some(v) = event.amount_v120(Axis::Horizontal) {
+                    frame = frame.v120(Axis::Horizontal, v as i32);
+                }
+                let ptr = self.pointer.clone();
+                ptr.axis(self, frame);
+                ptr.frame(self);
             }
             _ => {}
         }
@@ -758,9 +842,15 @@ impl XdgShellHandler for App {
             kbd.set_focus(self, Some(surf), serial);
         }
     }
-    fn new_popup(&mut self, _: PopupSurface, _: PositionerState) {}
-    fn grab(&mut self, _: PopupSurface, _: wl_seat::WlSeat, _: smithay::utils::Serial) {}
-    fn reposition_request(&mut self, _: PopupSurface, _: PositionerState, _: u32) {}
+    fn new_popup(&mut self, popup: PopupSurface, _positioner: PositionerState) {
+        let _ = popup.send_configure();
+    }
+    fn grab(&mut self, popup: PopupSurface, _seat: wl_seat::WlSeat, _serial: smithay::utils::Serial) {
+        let _ = popup.send_configure();
+    }
+    fn reposition_request(&mut self, popup: PopupSurface, _positioner: PositionerState, _token: u32) {
+        let _ = popup.send_configure();
+    }
     fn app_id_changed(&mut self, surface: ToplevelSurface) {
         use smithay::wayland::compositor::with_states;
         use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
@@ -841,9 +931,18 @@ impl ClientDndGrabHandler for App {}
 impl ServerDndGrabHandler for App { fn send(&mut self, _: String, _: OwnedFd, _: Seat<Self>) {} }
 
 impl InputMethodHandler for App {
-    fn new_popup(&mut self, _surface: ImPopupSurface) {}
-    fn dismiss_popup(&mut self, _surface: ImPopupSurface) {}
-    fn popup_repositioned(&mut self, _surface: ImPopupSurface) {}
+    fn new_popup(&mut self, surface: ImPopupSurface) {
+        info!("🔤 IM popup: new");
+        let _ = surface;
+    }
+    fn dismiss_popup(&mut self, surface: ImPopupSurface) {
+        info!("🔤 IM popup: dismiss");
+        let _ = surface;
+    }
+    fn popup_repositioned(&mut self, surface: ImPopupSurface) {
+        info!("🔤 IM popup: repositioned");
+        let _ = surface;
+    }
     fn parent_geometry(&self, _parent: &WlSurface) -> Rectangle<i32, Logical> { Rectangle::default() }
 }
 
@@ -892,7 +991,9 @@ impl ShmHandler for App { fn shm_state(&self) -> &ShmState { &self.shm } }
 impl SeatHandler for App {
     type KeyboardFocus = WlSurface; type PointerFocus = WlSurface; type TouchFocus = WlSurface;
     fn seat_state(&mut self) -> &mut SeatState<Self> { &mut self.seat_state }
-    fn focus_changed(&mut self, _: &Seat<Self>, _: Option<&WlSurface>) {}
+    fn focus_changed(&mut self, _: &Seat<Self>, surface: Option<&WlSurface>) {
+        if surface.is_some() { info!("⌨️  键盘焦点改变"); }
+    }
     fn cursor_image(&mut self, _: &Seat<Self>, _: CursorImageStatus) {}
 }
 
@@ -1053,6 +1154,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut seat_state = SeatState::new();
     let mut seat = seat_state.new_wl_seat(&dh, "seat0");
     let kbd = seat.add_keyboard(XkbConfig::default(), 200, 25)?;
+    let pointer = seat.add_pointer();
 
     let _output_manager = OutputManagerState::new();
     info!("✅ wl_output");
@@ -1083,7 +1185,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             size: (mw as i32 / 10, mh as i32 / 10).into(),
             subpixel: Subpixel::Unknown, make: gpu_vendor.clone(), model: ci.name.clone(),
         });
-        let output_mode = Mode { size: (mw as i32, mh as i32).into(), refresh: 59000 };
+        let output_mode = Mode { size: (mw as i32, mh as i32).into(), refresh: ci.mode.vrefresh() as i32 * 1000 };
         wl_output.add_mode(output_mode);
         wl_output.set_preferred(output_mode);
         wl_output.change_current_state(
@@ -1111,7 +1213,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     InputMethodManagerState::new::<App, _>(&dh, |_client| true);
     TextInputManagerState::new::<App>(&dh);
-    info!("✅ text-input / input-method");
+    VirtualKeyboardManagerState::new::<App, _>(&dh, |_client| true);
+    info!("✅ text-input / input-method / virtual-keyboard");
+
+    // dmabuf: 不注册 global（NVIDIA block-linear 不兼容 Pixman）
+    info!("✅ dmabuf handler ready (global not advertised)");
+
+    // 加载光标
+    let cursor_img = if !cfg.cursor.theme.is_empty() {
+        cursor::CursorImage::load_from_theme(&cfg.cursor.theme, &cfg.cursor.name, cfg.cursor.size)
+            .unwrap_or_else(|| {
+                info!("⚠️  光标主题 '{}' 加载失败，使用内置光标", cfg.cursor.theme);
+                cursor::CursorImage::builtin(cfg.cursor.size)
+            })
+    } else {
+        // 尝试读取系统默认主题
+        let default_theme = std::env::var("XCURSOR_THEME").unwrap_or_else(|_| "default".into());
+        cursor::CursorImage::load_from_theme(&default_theme, &cfg.cursor.name, cfg.cursor.size)
+            .unwrap_or_else(|| cursor::CursorImage::builtin(cfg.cursor.size))
+    };
 
     let mut state = App {
         comp: CompositorState::new::<App>(&dh), xdg: XdgShellState::new::<App>(&dh),
@@ -1123,7 +1243,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         run: true, frame: 0,
         dh: dh.clone(), active: false,
         dirty: true,
-        kbd, cfg,
+        kbd, pointer, cfg,
+        cursor_img,
         pointer_pos: (0.0, 0.0),
         window_titles: std::collections::HashMap::new(),
         window_app_ids: std::collections::HashMap::new(),
@@ -1213,9 +1334,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     std::process::Command::new("fcitx5")
+        .arg("-d")
         .env("WAYLAND_DISPLAY", "wayland-anchor")
         .env("XDG_RUNTIME_DIR", format!("/run/user/{}", unsafe { libc::getuid() }))
-        .env("XMODIFIERS", "@im=fcitx").env("QT_IM_MODULE", "fcitx").env("GTK_IM_MODULE", "fcitx")
+        .env("XMODIFIERS", "@im=fcitx")
+        .env("QT_IM_MODULE", "fcitx")
+        .env("GTK_IM_MODULE", "fcitx")
+        .env("SDL_IM_MODULE", "fcitx")
         .spawn().ok();
 
     info!("🔄 渲染中...");
@@ -1417,18 +1542,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         // Step 8: 光标
                         if Some(out.crtc) == primary_crtc {
-                            let cx = state.pointer_pos.0 as i32;
-                            let cy = state.pointer_pos.1 as i32;
-                            let cc = Color32F::new(1.0, 1.0, 1.0, 1.0);
-                            let _ = f.clear(cc, &[Rectangle::new(Point::new(cx, cy), Size::new(4, 22))]);
-                            let _ = f.clear(cc, &[Rectangle::new(Point::new(cx + 4, cy + 4), Size::new(4, 4))]);
-                            let _ = f.clear(cc, &[Rectangle::new(Point::new(cx + 8, cy + 8), Size::new(4, 4))]);
-                            let _ = f.clear(cc, &[Rectangle::new(Point::new(cx + 10, cy + 12), Size::new(4, 4))]);
-                            let _ = f.clear(cc, &[Rectangle::new(Point::new(cx + 8, cy + 14), Size::new(4, 4))]);
-                            let _ = f.clear(cc, &[Rectangle::new(Point::new(cx + 4, cy + 16), Size::new(4, 4))]);
-                            let bc = Color32F::new(0.0, 0.0, 0.0, 1.0);
-                            let _ = f.clear(bc, &[Rectangle::new(Point::new(cx - 1, cy), Size::new(1, 23))]);
-                            let _ = f.clear(bc, &[Rectangle::new(Point::new(cx, cy - 1), Size::new(5, 1))]);
+                            let cx = state.pointer_pos.0 as i32 - state.cursor_img.hotspot_x as i32;
+                            let cy = state.pointer_pos.1 as i32 - state.cursor_img.hotspot_y as i32;
+                            state.cursor_img.render(&mut f, cx, cy);
                         }
 
                         let _ = f.finish()?;
@@ -1441,6 +1557,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             state.dirty = false;
+            // 发送 frame callback（仅在渲染后发送）
+            let now = start.elapsed().as_millis() as u32;
+            for s in state.xdg.toplevel_surfaces() { send_frames(s.wl_surface(), now); }
             // 动画进行中时持续请求渲染
             if state.ws_anim.start.map(|s| (s.elapsed().as_millis() as u64) < state.ws_anim.duration_ms).unwrap_or(false) {
                 state.dirty = true;
@@ -1452,15 +1571,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         eloop.dispatch(Some(Duration::from_millis(16)), &mut state)?;
+        // 时钟每秒更新（bar enabled 时）
         if state.frame % 60 == 0 && state.cfg.bar.enabled { state.dirty = true; }
+        // CPU/MEM 状态每 5 秒更新
+        if state.frame % 300 == 0 { state.dirty = true; }
 
         if let Ok(Some(stream)) = listener.accept() {
             clients.push(display.handle().insert_client(stream, Arc::new(ClientState::default()))?);
         }
         display.dispatch_clients(&mut state)?;
         display.flush_clients()?;
-        let now = start.elapsed().as_millis() as u32;
-        for s in state.xdg.toplevel_surfaces() { send_frames(s.wl_surface(), now); }
     }
 
     info!("👋"); Ok(())
@@ -1474,3 +1594,4 @@ delegate_data_device!(App);
 delegate_output!(App);
 delegate_input_method_manager!(App);
 delegate_text_input_manager!(App);
+delegate_virtual_keyboard_manager!(App);
