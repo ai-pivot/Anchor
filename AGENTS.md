@@ -16,6 +16,7 @@
 ```
 src/
   main.rs        — Main compositor loop, App struct, Workspace, keyboard/mouse handling, GPU auto-detect
+  xwayland.rs    — XWayland support (X11 app compatibility: spawn, surface tracking, helpers)
   layout.rs      — Layout engine (slot calculation, headbar, decorations, wallpaper)
   text_render.rs — fontdue-based TTF text rendering
   config.rs      — TOML config parsing (includes GPU config section)
@@ -41,6 +42,7 @@ Cargo.toml        — Dependencies (fontdue, smithay, pixman, etc.)
 | Fullscreen | `Super+F` | Per-window fullscreen |
 | Move window | `Super+Shift+1-9` | Move focused window to workspace |
 | Close | `Super+Q` | Close focused window |
+| XWayland | Auto | X11 app support (Feishu, Chrome, Edge, etc.) |
 
 ## Rendering Pipeline
 
@@ -180,3 +182,10 @@ For SDDM: Create `/usr/share/wayland-sessions/anchor.desktop` with same content.
 6. **Disable foot CSD.** Set `csd.preferred=none` in `~/.config/foot/foot.ini`.
 7. **GPU auto-detect is robust.** Reads vendor ID from sysfs, falls back to first card.
    No NVIDIA-specific code in main path — env vars are only set by `anchor-session`.
+8. **X11 windows live in `Workspace.x11_surfaces`**, not in `tops`. ALL focus/click/
+   close/layout/decoration code must cover BOTH `ws.tops` AND `ws.x11_surfaces`.
+9. **`client_compositor_state` must handle `XWaylandClientData`.** The XWayland
+   client uses a different `ClientData` type. Use `if let` fallback, never `.unwrap()`.
+10. **XWayland `DISPLAY` must be passed to child processes.** `std::env::set_var`
+    works but `/proc/PID/environ` won't show it. Also pass via `cmd.env("DISPLAY", ...)`
+    in launcher/terminal spawns for reliability.

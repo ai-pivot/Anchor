@@ -296,21 +296,23 @@ pub fn render_wallpaper(f: &mut impl Frame, cfg: &Config, ow: i32, oh: i32, fram
 
     let accent = parse_color(&cfg.colors.focus_border);
 
+    // Batch grid lines: one draw call for all horizontal, one for all vertical
     let grid = opaque(accent.0 * 0.03, accent.1 * 0.03, accent.2 * 0.03);
-    for y in (0..oh).step_by(64) {
-        f.clear(grid, &[rect(0, y, ow, 1)]).ok();
-    }
-    for x in (0..ow).step_by(64) {
-        f.clear(grid, &[rect(x, 0, 1, oh)]).ok();
-    }
+    let h_lines: Vec<Rectangle<i32, Physical>> = (0..oh).step_by(64)
+        .map(|y| rect(0, y, ow, 1)).collect();
+    let v_lines: Vec<Rectangle<i32, Physical>> = (0..ow).step_by(64)
+        .map(|x| rect(x, 0, 1, oh)).collect();
+    if !h_lines.is_empty() { f.clear(grid, &h_lines).ok(); }
+    if !v_lines.is_empty() { f.clear(grid, &v_lines).ok(); }
 
+    // Batch all dots into a single draw call
     let dot = opaque(accent.0 * 0.05, accent.1 * 0.05, accent.2 * 0.05);
-    for y in (0..oh).step_by(64) {
-        for x in (0..ow).step_by(64) {
-            f.clear(dot, &[rect(x, y, 2, 2)]).ok();
-        }
-    }
+    let dots: Vec<Rectangle<i32, Physical>> = (0..oh).step_by(64)
+        .flat_map(|y| (0..ow).step_by(64).map(move |x| rect(x, y, 2, 2)))
+        .collect();
+    if !dots.is_empty() { f.clear(dot, &dots).ok(); }
 
+    // Animated glow spots (6 calls — fine)
     let t = frame as f32 * 0.012;
     let spots: [(f32, f32, f32, f32, i32, f32); 3] = [
         (t.sin(), t.cos(), 0.5, 0.5, 160, 0.03),

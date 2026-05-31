@@ -78,7 +78,7 @@ fn rect(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Physical> {
     Rectangle::new(Point::new(x, y), Size::new(w.max(0), h.max(0)))
 }
 
-/// 渲染一行文字
+/// 渲染一行文字（批次优化：每个字形收集所有行矩形，一次 f.clear 调用）
 pub fn draw_text(
     f: &mut impl Frame,
     text: &str,
@@ -99,10 +99,10 @@ pub fn draw_text(
         let (w, h) = (glyph.width, glyph.height);
         if w == 0 || h == 0 { continue; }
 
-        // 用 key 获取 bitmap
         let (_metrics, bitmap) = font.rasterize_config(glyph.key);
 
-        // 逐行渲染：合并连续非零像素为矩形（减少 f.clear 调用次数）
+        // Collect all run rectangles for this glyph, then issue one f.clear
+        let mut glyph_rects: Vec<Rectangle<i32, Physical>> = Vec::with_capacity(h);
         for row in 0..h {
             let mut run_start: Option<usize> = None;
             for col in 0..=w {
@@ -110,9 +110,12 @@ pub fn draw_text(
                 if alpha > 30 {
                     if run_start.is_none() { run_start = Some(col); }
                 } else if let Some(cs) = run_start.take() {
-                    let _ = f.clear(fg, &[rect(gx + cs as i32, gy + row as i32, (col - cs) as i32, 1)]);
+                    glyph_rects.push(rect(gx + cs as i32, gy + row as i32, (col - cs) as i32, 1));
                 }
             }
+        }
+        if !glyph_rects.is_empty() {
+            let _ = f.clear(fg, &glyph_rects);
         }
         let glyph_right = gx + w as i32;
         if glyph_right > max_right { max_right = glyph_right; }

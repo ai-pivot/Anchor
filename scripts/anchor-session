@@ -16,9 +16,10 @@ export GDK_BACKEND=wayland
 export QT_QPA_PLATFORM=wayland
 export SDL_VIDEODRIVER=wayland
 
-# Electron/Chromium Wayland 支持
-export ELECTRON_OZONE_PLATFORM_HINT=wayland
-export CHROME_FLAGS="--ozone-platform=wayland --enable-features=UseOzonePlatform"
+# Electron/Chromium — 不强制 Wayland，走 XWayland 更稳定
+# (Chrome/Edge Wayland 模式 bug 多，X11 → XWayland 更可靠)
+unset ELECTRON_OZONE_PLATFORM_HINT
+unset CHROME_FLAGS
 
 # ─── GPU 自动检测 ───
 detect_gpu() {

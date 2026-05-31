@@ -20,9 +20,10 @@ winit = ["smithay/backend_winit", "dep:winit"]
 [dependencies]
 smithay = { version = "0.7", default-features = false, features = [
     "renderer_gl",
-    "renderer_pixman",
+    "renderer_multi",
     "wayland_frontend",
     "desktop",
+    "xwayland",
 ] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
@@ -38,6 +39,8 @@ serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 chrono = "0.4"
 image = "0.25"
+zbus = "5"
+tokio = { version = "1", features = ["rt"] }
 
 [[bin]]
 name = "anchor"

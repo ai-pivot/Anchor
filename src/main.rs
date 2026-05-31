@@ -10,11 +10,13 @@ mod text_render;
 mod block_linear;
 mod wallpaper;
 mod cursor;
+mod notify;
+mod xwayland;
 
 use std::{
     os::unix::io::OwnedFd,
     os::fd::AsRawFd,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -22,18 +24,19 @@ use config::Config;
 use smithay::{
     backend::{
         allocator::{Format, Fourcc, Modifier,
-            gbm::{GbmAllocator, GbmBufferFlags, GbmDevice}},        drm::{DrmDevice, DrmDeviceFd, DrmEvent, GbmBufferedSurface},
+            gbm::{GbmAllocator, GbmBufferFlags, GbmDevice}},
+        drm::{DrmDevice, DrmDeviceFd, DrmEvent, GbmBufferedSurface},
         input::{Axis, ButtonState, InputEvent, KeyState, PointerAxisEvent},
         libinput::LibinputInputBackend,
-        renderer::{Bind, Frame, Renderer,
-            pixman::PixmanRenderer,
-            element::{surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement}, Kind},
+        renderer::{ImportDma, ImportMem, Bind, Frame, Renderer,
+            gles::GlesRenderer,
+            element::{RenderElement, surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement}, Kind},
             utils::{draw_render_elements, on_commit_buffer_handler}, Color32F},
         session::{Session, Event as SessionEvent, libseat::LibSeatSession},
     },
-    delegate_compositor, delegate_data_device, delegate_input_method_manager,
-    delegate_output, delegate_seat, delegate_shm, delegate_text_input_manager,
-    delegate_virtual_keyboard_manager, delegate_xdg_shell,
+    desktop::{PopupManager, PopupKind},    delegate_compositor, delegate_data_device, delegate_input_method_manager,
+    delegate_output, delegate_primary_selection, delegate_seat, delegate_shm, delegate_text_input_manager,
+    delegate_virtual_keyboard_manager, delegate_xdg_decoration, delegate_xdg_shell,
     input::{
         keyboard::{FilterResult, Keysym, ModifiersState, XkbConfig},
         pointer::{AxisFrame, CursorImageStatus, MotionEvent, PointerHandle}, Seat, SeatHandler, SeatState,
@@ -56,8 +59,11 @@ use smithay::{
         selection::{
             SelectionHandler,
             data_device::{ClientDndGrabHandler, DataDeviceHandler, DataDeviceState,
-                ServerDndGrabHandler}},
-        shell::xdg::{PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState},
+                ServerDndGrabHandler},
+            primary_selection::{PrimarySelectionHandler, PrimarySelectionState},
+        },
+        shell::xdg::{PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+            decoration::{XdgDecorationState, XdgDecorationHandler}},
         shm::{ShmHandler, ShmState},
         text_input::TextInputManagerState,
         virtual_keyboard::VirtualKeyboardManagerState,
@@ -80,11 +86,13 @@ struct Workspace {
     split: layout::SplitDir,
     /// 下一个新窗口使用的分割方向（设一次消费一次）
     pending_split: Option<layout::SplitDir>,
+    /// X11 (XWayland) surfaces on this workspace
+    x11_surfaces: Vec<smithay::xwayland::X11Surface>,
 }
 
 impl Workspace {
     fn new() -> Self {
-        Self { tops: Vec::new(), focus: None, fullscreen: None, layout: LayoutPreset::default(), split: layout::SplitDir::Horizontal, pending_split: None }
+        Self { tops: Vec::new(), focus: None, fullscreen: None, layout: LayoutPreset::default(), split: layout::SplitDir::Horizontal, pending_split: None, x11_surfaces: Vec::new() }
     }
 }
 
@@ -110,7 +118,9 @@ struct Notification {
 
 struct App {
     comp: CompositorState, xdg: XdgShellState, shm: ShmState, seat_state: SeatState<Self>,
-    dd: DataDeviceState, seat: Seat<Self>,
+    dd: DataDeviceState, primary_sel: PrimarySelectionState, seat: Seat<Self>,
+    deco: XdgDecorationState,
+    popup_manager: PopupManager,
     osize: Size<i32, Logical>,
     workspaces: Vec<Workspace>,
     active_ws: usize,
@@ -126,11 +136,20 @@ struct App {
     window_app_ids: std::collections::HashMap<usize, String>,
     vblank_crtcs: std::collections::HashSet<crtc::Handle>,
     wallpaper_cache: wallpaper::WallpaperCache,
+    /// Cached GPU texture for image wallpaper
+    wallpaper_texture: Option<smithay::backend::renderer::gles::GlesTexture>,
     notifications: Vec<Notification>,
     scratchpad: Option<std::process::Child>,
     scratchpad_visible: bool,
     scratchpad_surface: Option<ToplevelSurface>,
     scratchpad_pending: bool,
+    // IM popup (fcitx5 candidate box)
+    im_popup: Option<ImPopupSurface>,
+    /// Pending toplevels — not yet confirmed by app_id.
+    /// Chromium tooltip windows have empty app_id and live ~15ms.
+    /// Real windows always set a non-empty app_id via app_id_changed.
+    pending_tops: Vec<ToplevelSurface>,
+    dbus_notifications: Arc<Mutex<notify::NotificationState>>,
     // 内置启动器
     launcher_visible: bool,
     launcher_query: String,
@@ -140,6 +159,10 @@ struct App {
     ws_anim: WsAnimation,
     // 多显示器尺寸信息（用于鼠标穿越）
     output_sizes: Vec<(i32, i32, i32, i32)>, // (x, y, w, h) per output
+    // XWayland (X11 app support)
+    xw: xwayland::XWaylandState,
+    /// XWayland display number (e.g. 1 for :1), set when XWayland becomes ready
+    xdisplay: Option<u32>,
 }
 
 /// 工作区切换动画状态
@@ -165,52 +188,107 @@ impl App {
 
     fn focus_idx(&self) -> Option<usize> {
         let ws = &self.workspaces[self.active_ws];
-        ws.focus.as_ref().and_then(|s| ws.tops.iter().position(|tl| tl.wl_surface() == s))
+        if let Some(idx) = ws.focus.as_ref().and_then(|s| ws.tops.iter().position(|tl| tl.wl_surface() == s)) {
+            Some(idx)
+        } else {
+            // X11 surfaces — offset by Wayland toplevel count
+            let n_wl = ws.tops.len();
+            ws.focus.as_ref().and_then(|s| ws.x11_surfaces.iter().position(|xs| xs.wl_surface().as_ref() == Some(s)).map(|i| n_wl + i))
+        }
     }
 
-    /// Find the surface under the pointer.
-    /// Returns (WlSurface, slot_offset_in_global_space).
-    /// Smithay computes surface-local coords as: event.location - slot_offset
     fn pointer_focus(&self) -> Option<(WlSurface, Point<f64, Logical>)> {
-        let px = self.pointer_pos.0 as i32;
-        let py = self.pointer_pos.1 as i32;
+        let px = self.pointer_pos.0;
+        let py = self.pointer_pos.1;
         let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
-        if py < bar_h { return None; }
+        if py < bar_h as f64 { return None; }
         let ws = &self.workspaces[self.active_ws];
 
         // Fullscreen: entire area below bar
         if let Some(fi) = ws.fullscreen {
             if let Some(tl) = ws.tops.get(fi) {
-                return Some((tl.wl_surface().clone(), Point::from((0.0, bar_h as f64))));
+                let tl_pos = Point::from((0.0, bar_h as f64));
+                if let Some(r) = self.popup_at_pointer(tl, tl_pos) { return Some(r); }
+                return Some((tl.wl_surface().clone(), tl_pos));
             }
         }
 
-        // Normal: hit-test each window slot
+        // Check ALL toplevels' XDG popups first (they render on top of windows)
         for (i, tl) in ws.tops.iter().enumerate() {
-            let (x, y, w, h) = layout::slot(i, ws.tops.len(), self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
-            if px >= x && px < x + w && py >= y && py < y + h {
+            let (x, y, _, _) = layout::slot(i, ws.tops.len(), self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
+            let tl_pos = Point::from((x as f64, y as f64));
+            if let Some(r) = self.popup_at_pointer(tl, tl_pos) {
+                return Some(r);
+            }
+        }
+
+        // Hit-test window slots (main toplevel surfaces)
+        let n_wl = ws.tops.len();
+        let n_x11 = ws.x11_surfaces.len();
+        let n_all = n_wl + n_x11;
+        for (i, tl) in ws.tops.iter().enumerate() {
+            let (x, y, w, h) = layout::slot(i, n_all, self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
+            if px >= x as f64 && px < (x + w) as f64 && py >= y as f64 && py < (y + h) as f64 {
                 return Some((tl.wl_surface().clone(), Point::from((x as f64, y as f64))));
             }
         }
 
-        // Popup hit-test: if click is outside all slots, check popup surfaces
-        // Popups can extend beyond their parent's slot boundaries
-        for popup in self.xdg.popup_surfaces() {
-            // Use compositor's with_states to get the popup's geometry
-            let popup_surf = popup.wl_surface();
-            if let Some(parent) = popup.get_parent_surface() {
-                // Find the parent's slot position
-                for (i, tl) in ws.tops.iter().enumerate() {
-                    if tl.wl_surface() == &parent {
-                        let (x, y, _w, _h) = layout::slot(i, ws.tops.len(), self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
-                        // The popup is a child of this toplevel
-                        // Return the parent surface — Smithay will route to the popup via subsurface tree
-                        return Some((parent, Point::from((x as f64, y as f64))));
-                    }
+        // Hit-test X11 surfaces
+        for (xi, xs) in ws.x11_surfaces.iter().enumerate() {
+            let global_i = n_wl + xi;
+            let (x, y, w, h) = layout::slot(global_i, n_all, self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
+            if px >= x as f64 && px < (x + w) as f64 && py >= y as f64 && py < (y + h) as f64 {
+                if let Some(wl) = xs.wl_surface() {
+                    return Some((wl.clone(), Point::from((x as f64, y as f64))));
                 }
             }
         }
 
+        // Fallback: focused toplevel
+        if let Some(ref focus_surf) = ws.focus {
+            for (i, tl) in ws.tops.iter().enumerate() {
+                if tl.wl_surface() == focus_surf {
+                    let (x, y, _w, _h) = layout::slot(i, ws.tops.len(), self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
+                    return Some((focus_surf.clone(), Point::from((x as f64, y as f64))));
+                }
+            }
+        }
+
+        // Last resort
+        for (i, tl) in ws.tops.iter().enumerate().rev() {
+            let (x, y, _w, _h) = layout::slot(i, ws.tops.len(), self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
+            return Some((tl.wl_surface().clone(), Point::from((x as f64, y as f64))));
+        }
+
+        None
+    }
+
+    /// Check if the pointer is over any XDG popup of the given toplevel.
+    /// Returns (popup_wl_surface, popup_global_position) if found.
+    fn popup_at_pointer(&self, tl: &ToplevelSurface, tl_pos: Point<f64, Logical>) -> Option<(WlSurface, Point<f64, Logical>)> {
+        let px = self.pointer_pos.0;
+        let py = self.pointer_pos.1;
+
+        let tl_geo_loc = smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
+            states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
+                .map(|g| g.loc)
+        }).unwrap_or_default();
+
+        let popups: Vec<_> = PopupManager::popups_for_surface(tl.wl_surface()).collect();
+        if popups.is_empty() { return None; }
+        for (popup, popup_offset) in popups {
+            let popup_geo = popup.geometry();
+            let offset_x = (tl_geo_loc.x + popup_offset.x - popup_geo.loc.x) as f64;
+            let offset_y = (tl_geo_loc.y + popup_offset.y - popup_geo.loc.y) as f64;
+            let popup_x = tl_pos.x + offset_x;
+            let popup_y = tl_pos.y + offset_y;
+            let popup_w = popup_geo.size.w as f64;
+            let popup_h = popup_geo.size.h as f64;
+
+            if px >= popup_x && px < popup_x + popup_w && py >= popup_y && py < popup_y + popup_h {
+                return Some((popup.wl_surface().clone(), Point::from((popup_x, popup_y))));
+            }
+        }
         None
     }
 
@@ -219,13 +297,15 @@ impl App {
 
     fn do_layout(&mut self) {
         let ws_idx = self.active_ws;
-        let n = self.workspaces[ws_idx].tops.len();
+        let n_wl = self.workspaces[ws_idx].tops.len();
+        let n_x11 = self.workspaces[ws_idx].x11_surfaces.len();
+        let n = n_wl + n_x11;
         if n == 0 { return; }
         let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
 
         // 修正 fullscreen
         if let Some(fi) = self.workspaces[ws_idx].fullscreen {
-            if fi >= n { self.workspaces[ws_idx].fullscreen = None; }
+            if fi >= n_wl { self.workspaces[ws_idx].fullscreen = None; }
         }
         let fullscreen = self.workspaces[ws_idx].fullscreen;
 
@@ -265,6 +345,15 @@ impl App {
                 });
                 info!("📐 layout 窗口 #{}: {}x{}", i, w, h);
                 tl.send_configure();
+            }
+            // X11 windows — configure with layout positions
+            for (xi, xs) in self.workspaces[ws_idx].x11_surfaces.iter().enumerate() {
+                if xs.wl_surface().is_none() { continue; }
+                let global_i = n_wl + xi;
+                let (x, y, w, h) = layout::slot(global_i, n, osize_w, osize_h, bar_h, &self.cfg, self.workspaces[self.active_ws].layout, self.workspaces[self.active_ws].split);
+                let rect = Rectangle::from_loc_and_size((x, y), (w, h));
+                let _ = xs.configure(Some(rect));
+                info!("📐 layout X11 #{}: {}x{} at ({},{})", global_i, w, h, x, y);
             }
         }
     }
@@ -349,12 +438,15 @@ impl App {
         if let Some((_, (_, exec))) = filtered.get(self.launcher_selected) {
             let exec_cmd = exec.clone();
             info!("🚀 启动器: {}", exec_cmd);
-            std::process::Command::new("sh")
-                .arg("-c")
+            let mut cmd = std::process::Command::new("sh");
+            cmd.arg("-c")
                 .arg(&exec_cmd)
                 .env("WAYLAND_DISPLAY", "wayland-anchor")
-                .env("XDG_RUNTIME_DIR", format!("/run/user/{}", unsafe { libc::getuid() }))
-                .spawn().ok();
+                .env("XDG_RUNTIME_DIR", format!("/run/user/{}", unsafe { libc::getuid() }));
+            if let Some(d) = self.xdisplay {
+                cmd.env("DISPLAY", format!(":{}", d));
+            }
+            cmd.spawn().ok();
         }
         self.launcher_visible = false;
         self.launcher_query.clear();
@@ -363,23 +455,24 @@ impl App {
 
     fn toggle_scratchpad(&mut self) {
         if self.scratchpad_visible {
-            // 隐藏：杀掉 scratchpad 进程 + 清除 surface
-            if let Some(ref mut child) = self.scratchpad {
-                let _ = child.kill();
-                let _ = child.wait();
-            }
-            self.scratchpad = None;
-            self.scratchpad_surface = None;
+            // Hide: keep the terminal running, just stop rendering
             self.scratchpad_visible = false;
             self.notify("Scratchpad hidden");
+        } else if self.scratchpad.is_some() {
+            // Show: already have a running terminal, just toggle visibility
+            self.scratchpad_visible = true;
+            self.notify("Scratchpad");
         } else {
-            // 显示：启动终端（使用用户配置的终端）
+            // First time: launch terminal
             self.scratchpad_pending = true;
             let uid = unsafe { libc::getuid() };
-            match std::process::Command::new(&self.cfg.terminal.command)
-                .env("WAYLAND_DISPLAY", "wayland-anchor")
-                .env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"))
-                .spawn()
+            let mut cmd = std::process::Command::new(&self.cfg.terminal.command);
+            cmd.env("WAYLAND_DISPLAY", "wayland-anchor")
+                .env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"));
+            if let Some(d) = self.xdisplay {
+                cmd.env("DISPLAY", format!(":{}", d));
+            }
+            match cmd.spawn()
             {
                 Ok(child) => {
                     self.scratchpad = Some(child);
@@ -591,19 +684,64 @@ impl App {
                             match keysym.modified_sym() {
                                 Keysym::Return => {
                                     info!("⌨️  启动终端");
-                                    std::process::Command::new(&data.cfg.terminal.command)
-                                        .env("WAYLAND_DISPLAY", "wayland-anchor")
+                                    let mut cmd = std::process::Command::new(&data.cfg.terminal.command);
+                                    cmd.env("WAYLAND_DISPLAY", "wayland-anchor")
                                         .env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"))
-                                        .env("XMODIFIERS", "@im=fcitx").env("QT_IM_MODULE", "fcitx").env("GTK_IM_MODULE", "fcitx")
-                                        .env("ELECTRON_OZONE_PLATFORM_HINT", "wayland")
-                                        .spawn().ok();
+                                        .env("XMODIFIERS", "@im=fcitx").env("QT_IM_MODULE", "fcitx").env("GTK_IM_MODULE", "fcitx");
+                                    if let Some(d) = data.xdisplay {
+                                        cmd.env("DISPLAY", format!(":{}", d));
+                                    }
+                                    cmd.spawn().ok();
                                     return FilterResult::Intercept(());
                                 }
                                 Keysym::Escape if mods.shift => { data.run = false; return FilterResult::Intercept(()); }
+                                // Super+Shift+R: reload config & restart
+                                Keysym::r => {
+                                    info!("🔄 Reloading Anchor...");
+                                    std::process::Command::new("kill")
+                                        .arg("-SIGUSR1")
+                                        .arg(std::process::id().to_string())
+                                        .spawn().ok();
+                                    // Just mark dirty to force re-render with fresh state
+                                    data.cfg = Config::load();
+                                    data.wallpaper_cache = wallpaper::WallpaperCache::new();
+                                    data.wallpaper_texture = None;
+                                    {
+                                        let home = std::env::var("HOME").unwrap_or_default();
+                                        let wp_dir = if data.cfg.wallpaper.directory.is_empty() {
+                                            format!("{}/Pictures/wallpapers", home)
+                                        } else {
+                                            data.cfg.wallpaper.directory.clone()
+                                        };
+                                        data.wallpaper_cache.scan_directory(&wp_dir);
+                                        if data.cfg.wallpaper.mode == "image" || data.cfg.wallpaper.mode == "random" {
+                                            let wp_path = if data.cfg.wallpaper.path.is_empty() { String::new() } else { data.cfg.wallpaper.path.clone() };
+                                            data.wallpaper_cache.load(&wp_path, data.osize.w as usize, data.osize.h as usize);
+                                        }
+                                    }
+                                    data.cursor_img = if !data.cfg.cursor.theme.is_empty() {
+                                        cursor::CursorImage::load_from_theme(&data.cfg.cursor.theme, &data.cfg.cursor.name, data.cfg.cursor.size)
+                                            .unwrap_or_else(|| cursor::CursorImage::builtin(data.cfg.cursor.size))
+                                    } else {
+                                        let default_theme = std::env::var("XCURSOR_THEME").unwrap_or_else(|_| "default".into());
+                                        cursor::CursorImage::load_from_theme(&default_theme, &data.cfg.cursor.name, data.cfg.cursor.size)
+                                            .unwrap_or_else(|| cursor::CursorImage::builtin(data.cfg.cursor.size))
+                                    };
+                                    data.notify("Config reloaded ✓");
+                                    data.dirty = true;
+                                    return FilterResult::Intercept(());
+                                }
                                 Keysym::q => {
                                     if let Some(ref surf) = data.workspaces[data.active_ws].focus.clone() {
                                         let ws = &data.workspaces[data.active_ws];
-                                        if let Some(tl) = ws.tops.iter().find(|tl| tl.wl_surface() == surf) { tl.send_close(); }
+                                        // Try Wayland toplevel first
+                                        if let Some(tl) = ws.tops.iter().find(|tl| tl.wl_surface() == surf) {
+                                            tl.send_close();
+                                        }
+                                        // Try X11 surface
+                                        if let Some(xs) = ws.x11_surfaces.iter().find(|xs| xs.wl_surface().as_ref() == Some(surf)) {
+                                            let _ = xs.close();
+                                        }
                                     }
                                     return FilterResult::Intercept(());
                                 }
@@ -742,16 +880,56 @@ impl App {
                     let py = self.pointer_pos.1 as i32;
                     let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
                     if py >= bar_h {
-                        let ws = &self.workspaces[self.active_ws];
-                        for (i, tl) in ws.tops.iter().enumerate() {
-                            let (x, y, w, h) = layout::slot(i, ws.tops.len(), self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
-                            if px >= x && px < x + w && py >= y && py < y + h {
-                                let surf = tl.wl_surface().clone();
-                                self.workspaces[self.active_ws].focus = Some(surf.clone());
-                                let kbd = self.kbd.clone();
-                                let serial = SERIAL_COUNTER.next_serial();
-                                kbd.set_focus(self, Some(surf), serial);
-                                break;
+                        // Check if click is on an XDG popup — if so, don't steal
+                        // keyboard focus (popup grab protocol requires exclusive focus)
+                        let on_popup = {
+                            let ws = &self.workspaces[self.active_ws];
+                            let n_all = ws.tops.len() + ws.x11_surfaces.len();
+                            let mut found = false;
+                            for (i, tl) in ws.tops.iter().enumerate() {
+                                let (x, y, _, _) = layout::slot(i, n_all, self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
+                                let tl_pos = Point::from((x as f64, y as f64));
+                                if self.popup_at_pointer(tl, tl_pos).is_some() {
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            found
+                        };
+
+                        if !on_popup {
+                            let n_wl = self.workspaces[self.active_ws].tops.len();
+                            let n_x11 = self.workspaces[self.active_ws].x11_surfaces.len();
+                            let n_all = n_wl + n_x11;
+                            let mut focused = false;
+                            // Wayland toplevels
+                            for (i, tl) in self.workspaces[self.active_ws].tops.iter().enumerate() {
+                                let (x, y, w, h) = layout::slot(i, n_all, self.osize.w, self.osize.h, bar_h, &self.cfg, self.workspaces[self.active_ws].layout, self.workspaces[self.active_ws].split);
+                                if px >= x && px < x + w && py >= y && py < y + h {
+                                    let surf = tl.wl_surface().clone();
+                                    self.workspaces[self.active_ws].focus = Some(surf.clone());
+                                    let kbd = self.kbd.clone();
+                                    let serial = SERIAL_COUNTER.next_serial();
+                                    kbd.set_focus(self, Some(surf), serial);
+                                    focused = true;
+                                    break;
+                                }
+                            }
+                            // X11 surfaces
+                            if !focused {
+                                for (xi, xs) in self.workspaces[self.active_ws].x11_surfaces.iter().enumerate() {
+                                    let global_i = n_wl + xi;
+                                    let (x, y, w, h) = layout::slot(global_i, n_all, self.osize.w, self.osize.h, bar_h, &self.cfg, self.workspaces[self.active_ws].layout, self.workspaces[self.active_ws].split);
+                                    if px >= x && px < x + w && py >= y && py < y + h {
+                                        if let Some(wl) = xs.wl_surface() {
+                                            self.workspaces[self.active_ws].focus = Some(wl.clone());
+                                            let kbd = self.kbd.clone();
+                                            let serial = SERIAL_COUNTER.next_serial();
+                                            kbd.set_focus(self, Some(wl), serial);
+                                        }
+                                        break;
+                                    }
+                                }
                             }
                         }
                     }
@@ -823,33 +1001,59 @@ impl XdgShellHandler for App {
             return;
         }
         
-        self.workspaces[self.active_ws].tops.push(s);
-        // 消费 pending_split：如果用户按了 Super+Shift+V/B，下一个窗口用新方向
-        if let Some(new_split) = self.workspaces[self.active_ws].pending_split.take() {
-            self.workspaces[self.active_ws].split = new_split;
-            info!("📐 应用 pending split: {:?}", new_split);
-        }
-        let ws = &self.workspaces[self.active_ws];
-        let idx = ws.tops.len() - 1;
-        info!("➕ 窗口 #{} (工作区 {})", idx, self.active_ws + 1);
-        drop(ws);
-        self.do_layout();
-        if let Some(tl) = self.workspaces[self.active_ws].tops.get(idx) {
-            let surf = tl.wl_surface().clone();
-            self.workspaces[self.active_ws].focus = Some(surf.clone());
-            let kbd = self.kbd.clone();
-            let serial = SERIAL_COUNTER.next_serial();
-            kbd.set_focus(self, Some(surf), serial);
-        }
+        self.pending_tops.push(s);
     }
     fn new_popup(&mut self, popup: PopupSurface, _positioner: PositionerState) {
+        info!("🆕 new_popup created");
         let _ = popup.send_configure();
+        if let Err(e) = self.popup_manager.track_popup(PopupKind::Xdg(popup)) {
+            warn!("⚠️  track_popup: {:?}", e);
+        }
     }
     fn grab(&mut self, popup: PopupSurface, _seat: wl_seat::WlSeat, _serial: smithay::utils::Serial) {
+        info!("🆕 grab popup created");
         let _ = popup.send_configure();
+        if let Err(e) = self.popup_manager.track_popup(PopupKind::Xdg(popup)) {
+            warn!("⚠️  track_popup (grab): {:?}", e);
+        }
+        self.dirty = true;
     }
     fn reposition_request(&mut self, popup: PopupSurface, _positioner: PositionerState, _token: u32) {
         let _ = popup.send_configure();
+    }
+    fn fullscreen_request(&mut self, surface: ToplevelSurface, _output: Option<wayland_server::protocol::wl_output::WlOutput>) {
+        // Client (e.g. browser video) requests fullscreen
+        let wl_surf = surface.wl_surface().clone();
+        for (ws_idx, ws) in self.workspaces.iter_mut().enumerate() {
+            for (i, tl) in ws.tops.iter().enumerate() {
+                if tl.wl_surface() == &wl_surf {
+                    info!("🔳 客户端请求全屏 #{} (工作区 {})", i, ws_idx + 1);
+                    ws.fullscreen = Some(i);
+                    self.do_layout();
+                    self.dirty = true;
+                    return;
+                }
+            }
+        }
+        // Surface not in any workspace — just acknowledge
+        surface.send_configure();
+    }
+    fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
+        let wl_surf = surface.wl_surface().clone();
+        for (ws_idx, ws) in self.workspaces.iter_mut().enumerate() {
+            if ws.fullscreen.is_some() {
+                for (i, tl) in ws.tops.iter().enumerate() {
+                    if tl.wl_surface() == &wl_surf {
+                        info!("🔳 客户端取消全屏 #{} (工作区 {})", i, ws_idx + 1);
+                        ws.fullscreen = None;
+                        self.do_layout();
+                        self.dirty = true;
+                        return;
+                    }
+                }
+            }
+        }
+        surface.send_configure();
     }
     fn app_id_changed(&mut self, surface: ToplevelSurface) {
         use smithay::wayland::compositor::with_states;
@@ -863,6 +1067,36 @@ impl XdgShellHandler for App {
         info!("🆔 app_id_changed: '{}'", app_id);
         
         let wl_surf = surface.wl_surface().clone();
+
+        // Check if this is a pending toplevel awaiting confirmation.
+        // Non-empty app_id → real window, promote to tiling layout.
+        // Empty app_id → tooltip/transient (e.g. Chromium hover), ignore.
+        if let Some(pos) = self.pending_tops.iter().position(|t| t.wl_surface() == &wl_surf) {
+            self.pending_tops.remove(pos);
+            // Filter clipboard helper windows — they create invisible toplevels to own selections
+            let is_clipboard = app_id.contains("clipboard") || app_id.contains("wl-copy") || app_id.contains("wl-paste");
+            if !app_id.is_empty() && !is_clipboard {
+                info!("✅ pending → tiling (app_id='{}')", app_id);
+                self.workspaces[self.active_ws].tops.push(surface);
+                if let Some(new_split) = self.workspaces[self.active_ws].pending_split.take() {
+                    self.workspaces[self.active_ws].split = new_split;
+                }
+                let idx = self.workspaces[self.active_ws].tops.len() - 1;
+                info!("➕ 窗口 #{} (工作区 {})", idx, self.active_ws + 1);
+                self.do_layout();
+                if let Some(tl) = self.workspaces[self.active_ws].tops.get(idx) {
+                    let s = tl.wl_surface().clone();
+                    self.workspaces[self.active_ws].focus = Some(s.clone());
+                    let kbd = self.kbd.clone();
+                    let serial = SERIAL_COUNTER.next_serial();
+                    kbd.set_focus(self, Some(s), serial);
+                }
+                self.dirty = true;
+            } else {
+                info!("🗑️ pending → discarded (app_id='{}')", app_id);
+            }
+            return;
+        }
         
         // 查找该 surface 在哪个工作区
         let mut found: Option<(usize, usize)> = None;
@@ -926,6 +1160,9 @@ impl XdgShellHandler for App {
 
 impl SelectionHandler for App { type SelectionUserData = (); }
 impl DataDeviceHandler for App { fn data_device_state(&self) -> &DataDeviceState { &self.dd } }
+impl PrimarySelectionHandler for App {
+    fn primary_selection_state(&self) -> &PrimarySelectionState { &self.primary_sel }
+}
 impl smithay::wayland::output::OutputHandler for App {}
 impl ClientDndGrabHandler for App {}
 impl ServerDndGrabHandler for App { fn send(&mut self, _: String, _: OwnedFd, _: Seat<Self>) {} }
@@ -933,25 +1170,40 @@ impl ServerDndGrabHandler for App { fn send(&mut self, _: String, _: OwnedFd, _:
 impl InputMethodHandler for App {
     fn new_popup(&mut self, surface: ImPopupSurface) {
         info!("🔤 IM popup: new");
-        let _ = surface;
+        self.im_popup = Some(surface);
+        self.dirty = true;
     }
     fn dismiss_popup(&mut self, surface: ImPopupSurface) {
         info!("🔤 IM popup: dismiss");
-        let _ = surface;
+        if self.im_popup.as_ref().map_or(false, |p| p.wl_surface() == surface.wl_surface()) {
+            self.im_popup = None;
+        }
+        self.dirty = true;
     }
     fn popup_repositioned(&mut self, surface: ImPopupSurface) {
         info!("🔤 IM popup: repositioned");
-        let _ = surface;
+        self.im_popup = Some(surface);
+        self.dirty = true;
     }
     fn parent_geometry(&self, _parent: &WlSurface) -> Rectangle<i32, Logical> { Rectangle::default() }
 }
 
 impl CompositorHandler for App {
     fn compositor_state(&mut self) -> &mut CompositorState { &mut self.comp }
-    fn client_compositor_state<'a>(&self, c: &'a Client) -> &'a CompositorClientState { &c.get_data::<ClientState>().unwrap().comp }
+    fn client_compositor_state<'a>(&self, c: &'a Client) -> &'a CompositorClientState {
+        if let Some(cs) = c.get_data::<ClientState>() {
+            &cs.comp
+        } else if let Some(xw) = c.get_data::<smithay::xwayland::XWaylandClientData>() {
+            &xw.compositor_state
+        } else {
+            static FALLBACK: std::sync::OnceLock<CompositorClientState> = std::sync::OnceLock::new();
+            FALLBACK.get_or_init(CompositorClientState::default)
+        }
+    }
     fn commit(&mut self, s: &WlSurface) {
         self.dirty = true;
         on_commit_buffer_handler::<Self>(s);
+        self.popup_manager.commit(s);
     }
     fn destroyed(&mut self, surface: &WlSurface) {
         // 搜索所有工作区找到被销毁的窗口
@@ -984,6 +1236,23 @@ impl CompositorHandler for App {
                 return;
             }
         }
+        // Check if destroyed surface is a pending toplevel (tooltip that never got app_id)
+        let before = self.pending_tops.len();
+        self.pending_tops.retain(|tl| tl.wl_surface() != surface);
+        if self.pending_tops.len() < before {
+            return;
+        }
+        // Check if destroyed surface is an X11 window
+        for ws in &mut self.workspaces {
+            let before = ws.x11_surfaces.len();
+            ws.x11_surfaces.retain(|s| s.wl_surface().as_ref() != Some(surface));
+            if ws.x11_surfaces.len() < before {
+                info!("🗑️ X11 窗口 wl_surface 销毁");
+                self.do_layout();
+                self.dirty = true;
+                return;
+            }
+        }
     }
 }
 
@@ -992,7 +1261,23 @@ impl SeatHandler for App {
     type KeyboardFocus = WlSurface; type PointerFocus = WlSurface; type TouchFocus = WlSurface;
     fn seat_state(&mut self) -> &mut SeatState<Self> { &mut self.seat_state }
     fn focus_changed(&mut self, _: &Seat<Self>, surface: Option<&WlSurface>) {
-        if surface.is_some() { info!("⌨️  键盘焦点改变"); }
+        // Deactivate all X11 surfaces first
+        for ws in &self.workspaces {
+            for xs in &ws.x11_surfaces {
+                let _ = xs.set_activated(false);
+            }
+        }
+        // Activate the focused X11 surface
+        if let Some(surf) = surface {
+            for ws in &self.workspaces {
+                for xs in &ws.x11_surfaces {
+                    if xs.wl_surface().as_ref() == Some(surf) {
+                        let _ = xs.set_activated(true);
+                        return;
+                    }
+                }
+            }
+        }
     }
     fn cursor_image(&mut self, _: &Seat<Self>, _: CursorImageStatus) {}
 }
@@ -1016,16 +1301,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let direct = args.iter().any(|a| a == "--direct");
     let cfg = Config::load();
-    info!("🚀 Anchor v9 ({})", if direct { "direct" } else { "session" });
+    info!("🚀 Anchor v10 GPU ({})", if direct { "direct" } else { "session" });
 
     // ─── GPU 设备选择 ───
-    // 优先级: TITAN_GPU 环境变量 > config.toml [gpu].device > 自动检测
     let gpu_path = if let Ok(p) = std::env::var("TITAN_GPU") {
         std::path::PathBuf::from(p)
     } else if !cfg.gpu.device.is_empty() {
         std::path::PathBuf::from(&cfg.gpu.device)
     } else {
-        // 自动检测：优先按 config 中的 vendor 找，找不到就用第一个 card
         let mut first_card: Option<std::path::PathBuf> = None;
         let mut preferred: Option<std::path::PathBuf> = None;
         let prefer_vendor = cfg.gpu.vendor.to_lowercase();
@@ -1041,7 +1324,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             "nvidia" => vendor == "0x10de",
                             "amd" => vendor == "0x1002",
                             "intel" => vendor == "0x8086",
-                            _ => true, // auto: 第一个就是最好的
+                            _ => true,
                         };
                         if matches && preferred.is_none() {
                             preferred = Some(e.path());
@@ -1057,13 +1340,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     info!("🎮 {}", gpu_path.display());
     
-    // 检测 GPU vendor 名称
     let gpu_vendor = {
         let card_name = gpu_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
         let vendor_str = std::fs::read_to_string(format!("/sys/class/drm/{}/device/vendor", card_name))
-            .unwrap_or_default()
-            .trim()
-            .to_string();
+            .unwrap_or_default().trim().to_string();
         match vendor_str.as_str() {
             "0x10de" => "NVIDIA",
             "0x1002" => "AMD",
@@ -1072,11 +1352,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }.to_string()
     };
     info!("🔍 GPU vendor: {}", gpu_vendor);
-    // 保存 DRM 设备路径到环境变量（截图等子进程使用）
     if let Some(card_name) = gpu_path.file_name() {
         std::env::set_var("TITAN_DRM_DEV", format!("/dev/dri/{}", card_name.to_string_lossy()));
     }
 
+    // ─── Session ───
     let (dev_fd, session, notifier) = if direct {
         let fd = Arc::new(std::fs::OpenOptions::new().read(true).write(true).open(&gpu_path)?);
         let _ = unsafe { libc::ioctl(fd.as_raw_fd(), 0x4000641eu64 as _) };
@@ -1091,18 +1371,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         (DrmDeviceFd::new(DeviceFd::from(fd)), Some(Arc::new(std::sync::Mutex::new(session))), Some(notifier))
     };
 
+    // ─── DRM + GBM 设备 ───
     let (mut device, dn) = DrmDevice::new(dev_fd.clone(), false)?;
     info!("✅ DrmDevice");
-    let dev_fd_copy = dev_fd.clone();
-    let _gbm = GbmDevice::new(dev_fd)?;
-    let mut renderer = PixmanRenderer::new()?;
-    info!("✅ Pixman");
+    let gbm = GbmDevice::new(dev_fd.clone())?;
+    info!("✅ GbmDevice");
 
+    // ─── EGL + GLES 渲染器 ───
+    let egl_display = unsafe { smithay::backend::egl::EGLDisplay::new(gbm.clone())? };
+    info!("✅ EGLDisplay");
+    let egl_context = smithay::backend::egl::EGLContext::new(&egl_display)?;
+    info!("✅ EGLContext");
+    let render_formats: Vec<Format> = egl_context.dmabuf_render_formats().iter().copied().collect();
+    let mut renderer = unsafe { GlesRenderer::new(egl_context)? };
+    info!("✅ GlesRenderer");
+
+    // ─── 多显示器枚举 ───
     let res = device.resource_handles()?;
-    let fmts: Vec<Format> = [Fourcc::Argb8888, Fourcc::Xrgb8888].iter()
-        .flat_map(|&c| [Format{code:c,modifier:Modifier::Linear}, Format{code:c,modifier:Modifier::Invalid}]).collect();
-
-    // ── 多显示器枚举 ──
     let mut anchor_outputs: Vec<AnchorOutput> = Vec::new();
     let mut used_crtcs: std::collections::HashSet<crtc::Handle> = std::collections::HashSet::new();
     let mut output_x_offset: i32 = 0;
@@ -1160,9 +1445,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("✅ wl_output");
 
     let fd_clones: Vec<_> = (0..connector_infos.len())
-        .map(|_| dev_fd_copy.clone())
+        .map(|_| dev_fd.clone())
         .collect();
-
     let mut output_sizes: Vec<(i32, i32, i32, i32)> = Vec::new();
 
     for (idx, ci) in connector_infos.iter().enumerate() {
@@ -1174,13 +1458,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
 
         let gbm_dup = GbmDevice::new(fd_clones[idx].clone())?;
-        let alloc = GbmAllocator::new(gbm_dup, GbmBufferFlags::SCANOUT);
+        let alloc = GbmAllocator::new(gbm_dup, GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT);
         let buf_surf = match GbmBufferedSurface::new(surface, alloc,
-            &[Fourcc::Argb8888, Fourcc::Xrgb8888], fmts.clone().into_iter()) {
-            Ok(bs) => bs,
-            Err(e) => { warn!("⚠️  BufferSurface 创建失败 {}: {:?}", ci.name, e); continue; }
+            &[Fourcc::Argb8888, Fourcc::Xrgb8888, Fourcc::Abgr8888, Fourcc::Xbgr8888], render_formats.iter().copied()) {
+            Ok(bs) => {
+                info!("✅ GbmBufferedSurface 创建成功 ({})", ci.name);
+                bs
+            }
+            Err(e) => {
+                warn!("⚠️  GbmBufferedSurface 失败 {}: {:?}, trying SCANOUT only", ci.name, e);
+                let gbm_dup2 = GbmDevice::new(fd_clones[idx].clone())?;
+                let alloc2 = GbmAllocator::new(gbm_dup2, GbmBufferFlags::SCANOUT);
+                let surface2 = device.create_surface(ci.crtc, ci.mode, &[ci.connector])?;
+                GbmBufferedSurface::new(surface2, alloc2,
+                    &[Fourcc::Argb8888, Fourcc::Xrgb8888], render_formats.iter().copied())?
+            }
         };
-
+        
         let wl_output = Output::new(ci.name.clone(), PhysicalProperties {
             size: (mw as i32 / 10, mh as i32 / 10).into(),
             subpixel: Subpixel::Unknown, make: gpu_vendor.clone(), model: ci.name.clone(),
@@ -1216,8 +1510,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     VirtualKeyboardManagerState::new::<App, _>(&dh, |_client| true);
     info!("✅ text-input / input-method / virtual-keyboard");
 
-    // dmabuf: 不注册 global（NVIDIA block-linear 不兼容 Pixman）
-    info!("✅ dmabuf handler ready (global not advertised)");
+    // dmabuf: 为 GPU 渲染注册 global
+    info!("✅ dmabuf handler ready");
 
     // 加载光标
     let cursor_img = if !cfg.cursor.theme.is_empty() {
@@ -1227,7 +1521,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 cursor::CursorImage::builtin(cfg.cursor.size)
             })
     } else {
-        // 尝试读取系统默认主题
         let default_theme = std::env::var("XCURSOR_THEME").unwrap_or_else(|_| "default".into());
         cursor::CursorImage::load_from_theme(&default_theme, &cfg.cursor.name, cfg.cursor.size)
             .unwrap_or_else(|| cursor::CursorImage::builtin(cfg.cursor.size))
@@ -1237,6 +1530,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         comp: CompositorState::new::<App>(&dh), xdg: XdgShellState::new::<App>(&dh),
         shm: ShmState::new::<App>(&dh, vec![]), seat_state, seat,
         dd: DataDeviceState::new::<App>(&dh),
+        primary_sel: PrimarySelectionState::new::<App>(&dh),
+        deco: XdgDecorationState::new::<App>(&dh),
+        popup_manager: PopupManager::default(),
         osize: primary_size,
         workspaces: (0..NUM_WORKSPACES).map(|_| Workspace::new()).collect(),
         active_ws: 0,
@@ -1250,17 +1546,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         window_app_ids: std::collections::HashMap::new(),
         vblank_crtcs: std::collections::HashSet::new(),
         wallpaper_cache: wallpaper::WallpaperCache::new(),
+        wallpaper_texture: None,
         notifications: Vec::new(),
         scratchpad: None,
         scratchpad_visible: false,
         scratchpad_surface: None,
         scratchpad_pending: false,
+        im_popup: None,
+        pending_tops: Vec::new(),
+        dbus_notifications: notify::start_notification_daemon(),
         launcher_visible: false,
         launcher_query: String::new(),
         launcher_apps: Vec::new(),
         launcher_selected: 0,
         ws_anim: WsAnimation { start: None, from_ws: 0, to_ws: 0, duration_ms: 200, direction: 0 },
         output_sizes,
+        xw: xwayland::XWaylandState::new::<App>(&dh),
+        xdisplay: None,
     };
     let listener = ListeningSocket::bind("wayland-anchor")?;
     std::env::set_var("WAYLAND_DISPLAY", "wayland-anchor");
@@ -1343,13 +1645,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .env("SDL_IM_MODULE", "fcitx")
         .spawn().ok();
 
-    info!("🔄 渲染中...");
+    // ── XWayland ──
+    {
+        let eloop_handle = eloop.handle();
+        match xwayland::spawn_xwayland(&dh) {
+            Ok((xwayland_src, xw_client)) => {
+                eloop.handle().insert_source(xwayland_src, move |event, _, state: &mut App| {
+                    if let smithay::xwayland::XWaylandEvent::Ready { display_number, .. } = event {
+                        state.xdisplay = Some(display_number);
+                    }
+                    xwayland::handle_xwayland_event(
+                        event, &eloop_handle, &xw_client, &mut state.xw,
+                    );
+                }).ok();
+            }
+            Err(e) => {
+                warn!("⚠️  XWayland spawn failed: {} — X11 apps won't work", e);
+            }
+        }
+    }
+
+    info!("🔄 GPU 渲染中...");
+
+    // ── 固定颜色 buffer（用于装饰线等）──
+    let bg_color: [f32; 4] = {
+        let c = config::parse_color(&state.cfg.colors.background);
+        [c.0, c.1, c.2, 1.0]
+    };
+    let focus_color: [f32; 4] = {
+        let c = config::parse_color(&state.cfg.colors.focus_border);
+        [c.0, c.1, c.2, 1.0]
+    };
+    let unfocus_color: [f32; 4] = {
+        let c = config::parse_color(&state.cfg.colors.unfocus_border);
+        [c.0, c.1, c.2, 1.0]
+    };
 
     while state.run {
         if state.active != dev_active {
             if state.active {
                 device.activate(true)?;
-                for out in &mut anchor_outputs { out.buf_surf.reset_buffers(); out.pending_flip = false; }
+                for out in &mut anchor_outputs {
+                    out.buf_surf.reset_buffers();
+                    out.pending_flip = false;
+                }
             } else {
                 device.pause();
                 for out in &mut anchor_outputs { out.pending_flip = false; }
@@ -1363,15 +1702,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             continue;
         }
 
+        // VBlank handling: mark frames as submitted
         for out in &mut anchor_outputs {
             if state.vblank_crtcs.remove(&out.crtc) {
-                if let Err(e) = out.buf_surf.frame_submitted() { warn!("VBlank err: {:?}", e); }
+                if let Err(e) = out.buf_surf.frame_submitted() {
+                    if state.frame > 1 { warn!("VBlank err: {:?}", e); }
+                }
                 out.pending_flip = false;
             }
         }
 
         if state.dirty {
-            // 只清理当前工作区的死亡窗口
+            // Upload wallpaper to GPU texture if needed
+            if state.wallpaper_cache.pixels.is_some() && state.wallpaper_texture.is_none() {
+                if let Some(ref wp) = state.wallpaper_cache.pixels {
+                    let (ww, wh) = state.wallpaper_cache.size;
+                    match renderer.import_memory(
+                        wp,
+                        Fourcc::Argb8888,
+                        Size::new(ww as i32, wh as i32),
+                        false,
+                    ) {
+                        Ok(tex) => {
+                            info!("✅ 壁纸纹理上传 GPU ({}x{})", ww, wh);
+                            state.wallpaper_texture = Some(tex);
+                        }
+                        Err(e) => {
+                            warn!("⚠️  壁纸纹理上传失败: {:?}, fallback gradient", e);
+                            state.wallpaper_cache.pixels = None;
+                        }
+                    }
+                }
+            }
+
             state.workspaces[state.active_ws].tops.retain(|tl| tl.alive());
             let bar_h = if state.cfg.bar.enabled { state.cfg.bar.height } else { 0 };
             let focus_idx = state.focus_idx();
@@ -1382,9 +1745,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let primary_crtc = anchor_outputs.first().map(|o| o.crtc);
             let ws = &state.workspaces[state.active_ws];
             let n_windows = ws.tops.len();
+            let n_x11 = state.workspaces[state.active_ws].x11_surfaces.len();
+            let n_total = n_windows + n_x11;
             let fullscreen = ws.fullscreen;
             
-            // 计算工作区切换动画偏移（稍后在循环中使用 ow 计算）
             let ws_anim_active = state.ws_anim.start.is_some();
             let ws_anim_dir = state.ws_anim.direction;
             let ws_anim_duration = state.ws_anim.duration_ms;
@@ -1398,47 +1762,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Ok((mut dmabuf, _)) => {
                         let ow = out.size.w;
                         let oh = out.size.h;
-
-                        // 壁纸 mmap 写入
-                        if Some(out.crtc) == primary_crtc {
-                            let fb_size = (ow * oh * 4) as usize;
-                            use smithay::backend::allocator::dmabuf::{DmabufMappingMode};
-                            if let Ok(mapping) = dmabuf.map_plane(0, DmabufMappingMode::WRITE) {
-                                let ptr = mapping.ptr();
-                                if !ptr.is_null() {
-                                    let buf = unsafe { std::slice::from_raw_parts_mut(ptr as *mut u8, fb_size) };
-                                    if let Some(ref wp) = state.wallpaper_cache.pixels {
-                                        let (ww, wh) = state.wallpaper_cache.size;
-                                        if ww == ow as usize && wh == oh as usize && wp.len() == fb_size {
-                                            for i in (0..fb_size).step_by(4) {
-                                                buf[i] = wp[i + 2];
-                                                buf[i + 1] = wp[i + 1];
-                                                buf[i + 2] = wp[i];
-                                                buf[i + 3] = 0xFF;
-                                            }
-                                        }
-                                    }
-                                }
-                                drop(mapping);
-                            }
-                        }
+                        let is_primary = Some(out.crtc) == primary_crtc;
 
                         // ═══════════════════════════════════════════════
-                        // Phase 1: 收集渲染元素（bind 之前，需要 &mut renderer）
+                        // Phase 1: collect surface elements (before bind)
                         // ═══════════════════════════════════════════════
-                        let mut all_elems: Vec<WaylandSurfaceRenderElement<PixmanRenderer>> = Vec::new();
+                        let mut win_elems: Vec<Vec<WaylandSurfaceRenderElement<GlesRenderer>>> = Vec::new();
+                        let mut popup_elems: Vec<Vec<WaylandSurfaceRenderElement<GlesRenderer>>> = Vec::new();
+                        let mut sp_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
+                        let mut im_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
+                        let mut im_popup_pos: (i32, i32) = (0, 0);
                         let mut ws_offset: i32 = 0;
-                        
-                        if Some(out.crtc) == primary_crtc {
+                        let mut scratchpad_data: Option<(i32, i32, i32, i32)> = None; // (x, y, w, h)
+
+                        if is_primary {
                             if let Some(fi) = fullscreen {
-                                // 全屏：只渲染聚焦窗口
                                 if let Some(tl) = ws.tops.get(fi) {
-                                    for e in render_elements_from_surface_tree(&mut renderer, tl.wl_surface(), (0, bar_h), 1.0, 1.0, Kind::Unspecified) {
-                                        all_elems.push(e);
+                                    let tl_geo = smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
+                                        states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
+                                    }).unwrap_or_default();
+                                    let tl_render_pos = Point::<i32, Physical>::from((0, bar_h));
+                                    win_elems.push(
+                                        render_elements_from_surface_tree(&mut renderer, tl.wl_surface(), tl_render_pos, 1.0, 1.0, Kind::Unspecified)
+                                    );
+                                    // Collect XDG popups for fullscreen window
+                                    let mut p_elems = Vec::new();
+                                    for (popup, popup_offset) in PopupManager::popups_for_surface(tl.wl_surface()) {
+                                        let offset = (tl_geo.loc + popup_offset - popup.geometry().loc)
+                                            .to_physical_precise_round(1.0);
+                                        let pos = tl_render_pos + offset;
+                                        p_elems.extend(
+                                            render_elements_from_surface_tree(&mut renderer, popup.wl_surface(), pos, 1.0, 1.0, Kind::Unspecified)
+                                        );
                                     }
+                                    popup_elems.push(p_elems);
                                 }
                             } else {
-                                // 工作区切换动画偏移
                                 ws_offset = if ws_anim_active {
                                     if let Some(elapsed) = ws_anim_elapsed {
                                         if elapsed < ws_anim_duration {
@@ -1448,124 +1807,260 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         } else { 0 }
                                     } else { 0 }
                                 } else { 0 };
-                                
-                                // 正序收集所有窗口元素到同一个 vec
-                                // 后收集的窗口渲染时覆盖先收集的溢出
+
                                 for (i, tl) in ws.tops.iter().enumerate() {
-                                    let (x, y, _w, _h) = layout::slot(i, n_windows, ow, oh, bar_h, &state.cfg, state.workspaces[state.active_ws].layout, state.workspaces[state.active_ws].split);
-                                    for e in render_elements_from_surface_tree(&mut renderer, tl.wl_surface(), (x + ws_offset, y), 1.0, 1.0, Kind::Unspecified) {
-                                        all_elems.push(e);
+                                    let (x, y, _w, _h) = layout::slot(i, n_total, ow, oh, bar_h, &state.cfg, state.workspaces[state.active_ws].layout, state.workspaces[state.active_ws].split);
+                                    let tl_geo = smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
+                                        states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
+                                    }).unwrap_or_default();
+                                    let tl_render_pos = Point::<i32, Physical>::from((x + ws_offset, y));
+                                    win_elems.push(
+                                        render_elements_from_surface_tree(&mut renderer, tl.wl_surface(), tl_render_pos, 1.0, 1.0, Kind::Unspecified)
+                                    );
+                                    // Collect XDG popups for this window
+                                    let mut p_elems = Vec::new();
+                                    for (popup, popup_offset) in PopupManager::popups_for_surface(tl.wl_surface()) {
+                                        let offset = (tl_geo.loc + popup_offset - popup.geometry().loc)
+                                            .to_physical_precise_round(1.0);
+                                        let pos = tl_render_pos + offset;
+                                        p_elems.extend(
+                                            render_elements_from_surface_tree(&mut renderer, popup.wl_surface(), pos, 1.0, 1.0, Kind::Unspecified)
+                                        );
+                                    }
+                                    popup_elems.push(p_elems);
+                                }
+
+                                // X11 surfaces — render after native Wayland windows
+                                for (xi, xs) in state.workspaces[state.active_ws].x11_surfaces.iter().enumerate() {
+                                    let global_i = n_windows + xi;
+                                    let (x, y, _w, _h) = layout::slot(global_i, n_total, ow, oh, bar_h, &state.cfg, state.workspaces[state.active_ws].layout, state.workspaces[state.active_ws].split);
+                                    if let Some(wl) = xs.wl_surface() {
+                                        let render_pos = Point::<i32, Physical>::from((x + ws_offset, y));
+                                        win_elems.push(
+                                            render_elements_from_surface_tree(&mut renderer, &wl, render_pos, 1.0, 1.0, Kind::Unspecified)
+                                        );
+                                        popup_elems.push(Vec::new());
                                     }
                                 }
                             }
-                        }
 
-                        // Scratchpad 元素收集（bind 之前）
-                        let sp_data = if Some(out.crtc) == primary_crtc {
+                            // Scratchpad surface — collected separately (rendered after background in Step 4)
                             if let Some(ref sp_surf) = state.scratchpad_surface {
                                 if sp_surf.alive() && state.scratchpad_visible {
                                     let sp_w = ow * 3 / 4;
                                     let sp_h = oh / 3;
                                     let sp_x = (ow - sp_w) / 2;
                                     let sp_y = bar_h + 8;
-                                    let sp_elems: Vec<WaylandSurfaceRenderElement<PixmanRenderer>> = render_elements_from_surface_tree(
-                                        &mut renderer, sp_surf.wl_surface(), (sp_x, sp_y), 1.0, 1.0, Kind::Unspecified
-                                    );
-                                    Some((sp_elems, sp_x, sp_y, sp_w, sp_h))
-                                } else { None }
-                            } else { None }
-                        } else { None };
+                                    sp_elems = render_elements_from_surface_tree(&mut renderer, sp_surf.wl_surface(), (sp_x, sp_y), 1.0, 1.0, Kind::Unspecified);
+                                    scratchpad_data = Some((sp_x, sp_y, sp_w, sp_h));
+                                }
+                            }
+
+                            // IM popup (fcitx5 candidate box) — collected separately (rendered on top of windows)
+                            if let Some(ref im_popup) = state.im_popup {
+                                if im_popup.alive() {
+                                    let mut popup_pos = (state.pointer_pos.0 as i32, state.pointer_pos.1 as i32 + 20);
+                                    if let Some(parent) = im_popup.get_parent() {
+                                        let popup_loc = im_popup.location();
+                                        let parent_rect = parent.location;
+                                        for (i, tl) in ws.tops.iter().enumerate() {
+                                            if tl.wl_surface() == &parent.surface {
+                                                let (x, y, _, _) = layout::slot(i, ws.tops.len(), ow, oh, bar_h, &state.cfg, ws.layout, ws.split);
+                                                popup_pos = (x + popup_loc.x, y + popup_loc.y);
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    im_popup_pos = popup_pos;
+                                    im_elems = render_elements_from_surface_tree(&mut renderer, im_popup.wl_surface(), popup_pos, 1.0, 1.0, Kind::Unspecified);
+                                }
+                            }
+                        }
 
                         // ═══════════════════════════════════════════════
-                        // Phase 2: bind + render（一次性绘制）
+                        // Phase 2: bind + render everything (full control)
                         // ═══════════════════════════════════════════════
                         let mut target = renderer.bind(&mut dmabuf)?;
                         let sp_size = Size::<i32, Physical>::new(ow, oh);
                         let mut f = renderer.render(&mut target, sp_size, Transform::Normal)?;
                         let dmg = Rectangle::from_size(sp_size);
 
-                        // Step 1: 壁纸（最底层）
-                        if state.wallpaper_cache.pixels.is_none() {
+                        // Step 1: Wallpaper
+                        if let Some(ref _tex) = state.wallpaper_texture {
+                            if let Some(ref wp) = state.wallpaper_cache.pixels {
+                                let (ww, wh) = state.wallpaper_cache.size;
+                                // Direct GPU texture blit — no element system, no flicker
+                                let _ = f.render_texture_from_to(
+                                    _tex,
+                                    Rectangle::from_size(Size::from((ww as f64, wh as f64))),
+                                    Rectangle::from_size((ow, oh).into()),
+                                    &[Rectangle::from_size((ow, oh).into())],
+                                    &[Rectangle::from_size((ow, oh).into())],
+                                    Transform::Normal,
+                                    1.0,
+                                    None,
+                                    &[],
+                                );
+                            }
+                        } else {
                             layout::render_wallpaper(&mut f, &state.cfg, ow, oh, state.frame);
                         }
 
-                        // Step 2: 所有窗口内容（一次性绘制）
-                        // draw_render_elements 按元素在 vec 中的顺序绘制
-                        // 因为正序收集，后面的窗口元素自然覆盖前面的溢出
-                        draw_render_elements(&mut f, 1.0, &all_elems, &[dmg])?;
+                        // Step 2: Window surfaces + XDG popups — render per-window, painter's algorithm
+                        // Background windows first, focused window last. Popups rendered on top of their parent window.
+                        let fi = focus_idx.unwrap_or(0);
+                        for (i, elems) in win_elems.iter().enumerate() {
+                            if i != fi {
+                                if !elems.is_empty() {
+                                    draw_render_elements(&mut f, 1.0, elems, &[dmg])?;
+                                }
+                                // XDG popups for this background window
+                                if let Some(pe) = popup_elems.get(i) {
+                                    if !pe.is_empty() {
+                                        draw_render_elements(&mut f, 1.0, pe, &[dmg])?;
+                                    }
+                                }
+                            }
+                        }
+                        // Focused window rendered last (on top of other windows)
+                        if let Some(elems) = win_elems.get(fi) {
+                            if !elems.is_empty() {
+                                draw_render_elements(&mut f, 1.0, elems, &[dmg])?;
+                            }
+                        }
+                        // Focused window's XDG popups (on top of focused window)
+                        if let Some(pe) = popup_elems.get(fi) {
+                            if !pe.is_empty() {
+                                draw_render_elements(&mut f, 1.0, pe, &[dmg])?;
+                            }
+                        }
 
-                        // Step 3: 装饰边框（在窗口内容之上）
-                        if Some(out.crtc) == primary_crtc && fullscreen.is_none() {
+                        // Step 2.5: IM popup (on top of ALL windows)
+                        if !im_elems.is_empty() {
+                            draw_render_elements(&mut f, 1.0, &im_elems, &[dmg])?;
+                        }
+
+                        // Step 3: Window decorations
+                        if is_primary && fullscreen.is_none() {
+                            // Wayland toplevels
                             for (i, _) in ws.tops.iter().enumerate() {
                                 layout::render_window_decorations_anim(
-                                    &mut f, &state.cfg, i, n_windows, focus_idx,
+                                    &mut f, &state.cfg, i, n_total, focus_idx,
+                                    ow, oh, bar_h, state.workspaces[state.active_ws].layout, state.workspaces[state.active_ws].split, ws_offset
+                                );
+                            }
+                            // X11 surfaces
+                            for (xi, _) in ws.x11_surfaces.iter().enumerate() {
+                                let global_i = n_windows + xi;
+                                layout::render_window_decorations_anim(
+                                    &mut f, &state.cfg, global_i, n_total, focus_idx,
                                     ow, oh, bar_h, state.workspaces[state.active_ws].layout, state.workspaces[state.active_ws].split, ws_offset
                                 );
                             }
                         }
 
-                        // Step 4: Scratchpad（在装饰之上，不透明背景完全覆盖）
-                        if let Some((ref sp_elems, sp_x, sp_y, sp_w, sp_h)) = sp_data {
-                            let accent = crate::config::parse_color(&state.cfg.colors.focus_border);
+                        // Step 4: Scratchpad — background FIRST, then surface ON TOP
+                        if let Some((sp_x, sp_y, sp_w, sp_h)) = scratchpad_data {
                             let bw = 4;
-                            // 不透明背景
-                            let sp_bg = layout::opaque(0.06, 0.06, 0.10);
-                            f.clear(sp_bg, &[layout::rect(sp_x - bw, sp_y - bw, sp_w + 2 * bw, sp_h + 2 * bw)]).ok();
-                            // 边框
+                            let accent = crate::config::parse_color(&state.cfg.colors.focus_border);
                             let border = layout::opaque(accent.0, accent.1, accent.2);
+                            let sp_bg = layout::opaque(0.06, 0.06, 0.10);
+                            // Background (opaque, covers windows below)
+                            f.clear(sp_bg, &[layout::rect(sp_x - bw, sp_y - bw, sp_w + 2 * bw, sp_h + 2 * bw)]).ok();
+                            // Border (top accent line)
                             f.clear(border, &[layout::rect(sp_x - bw, sp_y - bw, sp_w + 2 * bw, bw)]).ok();
                             f.clear(border, &[layout::rect(sp_x - bw, sp_y + sp_h, sp_w + 2 * bw, bw)]).ok();
                             f.clear(border, &[layout::rect(sp_x - bw, sp_y, bw, sp_h)]).ok();
                             f.clear(border, &[layout::rect(sp_x + sp_w, sp_y, bw, sp_h)]).ok();
-                            // 终端内容
-                            draw_render_elements(&mut f, 1.0, sp_elems, &[dmg])?;
-                            crate::text_render::draw_text(&mut f, "SCRATCHPAD", sp_x + 6, sp_y - 22, 14.0, (accent.0, accent.1, accent.2));
+                            // Scratchpad label
+                            crate::text_render::draw_text(&mut f, "SCRATCHPAD", sp_x + 6, sp_y - 22, 14.0, accent);
+                            // Scratchpad terminal content — rendered AFTER background
+                            draw_render_elements(&mut f, 1.0, &sp_elems, &[dmg])?;
                         }
 
                         // Step 5: Headbar
-                        let ws_counts: Vec<usize> = state.workspaces.iter().map(|w| w.tops.len()).collect();
+                        let ws_counts: Vec<usize> = state.workspaces.iter().map(|w| w.tops.len() + w.x11_surfaces.len()).collect();
                         layout::render_headbar(&mut f, &state.cfg, ow, oh, n_windows, focus_idx, time_secs, &window_title, state.active_ws, NUM_WORKSPACES, &ws_counts);
 
-                        // Step 6: 通知弹窗
-                        if Some(out.crtc) == primary_crtc && !state.notifications.is_empty() {
+                        // Step 6: Notifications
+                        if is_primary && !state.notifications.is_empty() {
                             let accent = crate::config::parse_color(&state.cfg.colors.focus_border);
                             let notif_data: Vec<(String, std::time::Instant, std::time::Duration)> = state.notifications.iter()
                                 .map(|n| (n.text.clone(), n.created, n.duration)).collect();
                             layout::render_notifications(&mut f, &notif_data, ow, state.cfg.bar.height, accent);
                         }
 
-                        // Step 7: 内置启动器
-                        if Some(out.crtc) == primary_crtc && state.launcher_visible {
+                        // Step 7: Launcher
+                        if is_primary && state.launcher_visible {
                             let filtered = state.launcher_filter();
                             layout::render_launcher(&mut f, &state.cfg, ow, oh, &state.launcher_query, &filtered, state.launcher_selected);
                         }
 
-                        // Step 8: 光标
-                        if Some(out.crtc) == primary_crtc {
+                        // Step 8: Cursor (ALWAYS on top)
+                        if is_primary {
                             let cx = state.pointer_pos.0 as i32 - state.cursor_img.hotspot_x as i32;
                             let cy = state.pointer_pos.1 as i32 - state.cursor_img.hotspot_y as i32;
-                            state.cursor_img.render(&mut f, cx, cy);
+                            state.cursor_img.render_batched(&mut f, cx, cy);
                         }
 
-                        let _ = f.finish()?;
+                        let sync = f.finish()?;
                         drop(target);
 
-                        out.buf_surf.queue_buffer(None, None, ())?;
+                        out.buf_surf.queue_buffer(Some(sync), None, ())?;
                         out.pending_flip = true;
                     }
-                    Err(e) => { if state.frame == 0 { error!("❌ {e:?}"); } }
+                    Err(e) => {
+                        if state.frame == 0 { error!("❌ {e:?}"); }
+                    }
                 }
             }
             state.dirty = false;
-            // 发送 frame callback（仅在渲染后发送）
+            // 发送 frame callback
             let now = start.elapsed().as_millis() as u32;
             for s in state.xdg.toplevel_surfaces() { send_frames(s.wl_surface(), now); }
+            // XDG popup surfaces (browser menus, context menus, etc.)
+            for s in state.xdg.toplevel_surfaces() {
+                for (popup, _) in PopupManager::popups_for_surface(s.wl_surface()) {
+                    send_frames(popup.wl_surface(), now);
+                }
+            }
+            // IM popup surface (fcitx5 candidate box) — needs frame callback to commit buffer
+            if let Some(ref im_popup) = state.im_popup {
+                if im_popup.alive() { send_frames(im_popup.wl_surface(), now); }
+            }
+            // Scratchpad surface — needs frame callback to commit buffer
+            if let Some(ref sp_surf) = state.scratchpad_surface {
+                if sp_surf.alive() { send_frames(sp_surf.wl_surface(), now); }
+            }
+            // X11 surfaces — need frame callbacks to update
+            for xs in &state.workspaces[state.active_ws].x11_surfaces {
+                if let Some(wl) = xs.wl_surface() {
+                    send_frames(&wl, now);
+                }
+            }
+            // Handle X11 layout changes
+            // (X11 layout is now triggered directly in map/unmap/destroy handlers)
             // 动画进行中时持续请求渲染
             if state.ws_anim.start.map(|s| (s.elapsed().as_millis() as u64) < state.ws_anim.duration_ms).unwrap_or(false) {
                 state.dirty = true;
             }
             state.frame += 1;
+            // Drain D-Bus notifications into toast system
+            {
+                let dbus_notifs: Vec<_> = state.dbus_notifications.lock()
+                    .map(|mut s| s.pending.drain(..).collect())
+                    .unwrap_or_default();
+                for n in dbus_notifs {
+                    let text = if n.body.is_empty() {
+                        format!("[{}] {}", n.app_name, n.summary)
+                    } else {
+                        format!("[{}] {}", n.app_name, n.summary)
+                    };
+                    state.notify(text);
+                }
+            }
             state.drain_notifications();
+            if state.frame % 60 == 0 { state.popup_manager.cleanup(); }
             if state.frame == 1 { info!("✅ 第一帧渲染！"); }
             if state.frame % 600 == 0 { info!("📊 {} 帧", state.frame); }
         }
@@ -1587,11 +2082,229 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 delegate_xdg_shell!(App);
+delegate_xdg_decoration!(App);
 delegate_compositor!(App);
 delegate_shm!(App);
 delegate_seat!(App);
 delegate_data_device!(App);
+delegate_primary_selection!(App);
 delegate_output!(App);
 delegate_input_method_manager!(App);
 delegate_text_input_manager!(App);
 delegate_virtual_keyboard_manager!(App);
+smithay::delegate_xwayland_shell!(App);
+
+// ── XWayland Handlers ──────────────────────────────────────
+
+impl smithay::wayland::xwayland_shell::XWaylandShellHandler for App {
+    fn xwayland_shell_state(&mut self) -> &mut smithay::wayland::xwayland_shell::XWaylandShellState {
+        &mut self.xw.shell
+    }
+
+    fn surface_associated(
+        &mut self,
+        _xwm: smithay::xwayland::xwm::XwmId,
+        _wl_surface: WlSurface,
+        _surface: smithay::xwayland::X11Surface,
+    ) {
+        tracing::info!("🔗 XWayland surface associated (wl_surface ready)");
+        self.dirty = true;
+    }
+}
+
+impl smithay::xwayland::XwmHandler for App {
+    fn xwm_state(&mut self, _xwm: smithay::xwayland::xwm::XwmId) -> &mut smithay::xwayland::X11Wm {
+        self.xw.xwm.as_mut().expect("XwmHandler called but X11Wm not ready")
+    }
+
+    fn new_window(&mut self, _xwm: smithay::xwayland::xwm::XwmId, window: smithay::xwayland::X11Surface) {
+        tracing::info!("🆕 X11 new_window: class='{}' title='{}'", window.class(), window.title());
+    }
+
+    fn new_override_redirect_window(&mut self, _xwm: smithay::xwayland::xwm::XwmId, window: smithay::xwayland::X11Surface) {
+        self.xw.on_new_or_window(window);
+        self.dirty = true;
+    }
+
+    fn map_window_request(&mut self, _xwm: smithay::xwayland::xwm::XwmId, window: smithay::xwayland::X11Surface) {
+        tracing::info!("🗺️  X11 map_request: class='{}' title='{}'", window.class(), window.title());
+
+        if let Err(e) = window.set_mapped(true) {
+            tracing::warn!("⚠️  X11 set_mapped failed: {:?}", e);
+            return;
+        }
+
+        let wid = window.window_id();
+        let ws = &mut self.workspaces[self.active_ws];
+        let is_new = !ws.x11_surfaces.iter().any(|s| s.window_id() == wid);
+        if is_new {
+            ws.x11_surfaces.push(window.clone());
+        }
+
+        // Focus the new X11 window
+        if let Some(wl) = window.wl_surface() {
+            self.workspaces[self.active_ws].focus = Some(wl.clone());
+            let kbd = self.kbd.clone();
+            let serial = SERIAL_COUNTER.next_serial();
+            kbd.set_focus(self, Some(wl), serial);
+        }
+        self.do_layout();
+        self.dirty = true;
+    }
+
+    fn mapped_override_redirect_window(&mut self, _xwm: smithay::xwayland::xwm::XwmId, window: smithay::xwayland::X11Surface) {
+        tracing::info!("🗺️  X11 OR mapped: class='{}'", window.class());
+        self.dirty = true;
+    }
+
+    fn unmapped_window(&mut self, _xwm: smithay::xwayland::xwm::XwmId, window: smithay::xwayland::X11Surface) {
+        tracing::info!("🗑️  X11 unmapped: class='{}'", window.class());
+        let wid = window.window_id();
+        for ws in &mut self.workspaces {
+            ws.x11_surfaces.retain(|s| s.window_id() != wid);
+        }
+        self.xw.or_surfaces.retain(|s| s.window_id() != wid);
+        self.do_layout();
+        // Refocus
+        let ws = &self.workspaces[self.active_ws];
+        if let Some(last) = ws.tops.last() {
+            let s = last.wl_surface().clone();
+            let kbd = self.kbd.clone();
+            let serial = SERIAL_COUNTER.next_serial();
+            kbd.set_focus(self, Some(s), serial);
+        }
+        self.dirty = true;
+    }
+
+    fn destroyed_window(&mut self, _xwm: smithay::xwayland::xwm::XwmId, window: smithay::xwayland::X11Surface) {
+        tracing::info!("💥 X11 destroyed: class='{}'", window.class());
+        let wid = window.window_id();
+        for ws in &mut self.workspaces {
+            ws.x11_surfaces.retain(|s| s.window_id() != wid);
+        }
+        self.xw.or_surfaces.retain(|s| s.window_id() != wid);
+        self.do_layout();
+        self.dirty = true;
+    }
+
+    fn configure_request(
+        &mut self,
+        _xwm: smithay::xwayland::xwm::XwmId,
+        window: smithay::xwayland::X11Surface,
+        _x: Option<i32>,
+        _y: Option<i32>,
+        w: Option<u32>,
+        h: Option<u32>,
+        _reorder: Option<smithay::xwayland::xwm::Reorder>,
+    ) {
+        self.xw.on_configure_request(&window, w, h);
+    }
+
+    fn configure_notify(
+        &mut self,
+        _xwm: smithay::xwayland::xwm::XwmId,
+        _window: smithay::xwayland::X11Surface,
+        _geometry: Rectangle<i32, Logical>,
+        _above: Option<smithay::xwayland::xwm::X11Window>,
+    ) {
+    }
+
+    fn resize_request(
+        &mut self,
+        _xwm: smithay::xwayland::xwm::XwmId,
+        window: smithay::xwayland::X11Surface,
+        _button: u32,
+        _resize_edge: smithay::xwayland::xwm::ResizeEdge,
+    ) {
+        self.xw.ack_with_current_geometry(&window);
+    }
+
+    fn move_request(
+        &mut self,
+        _xwm: smithay::xwayland::xwm::XwmId,
+        window: smithay::xwayland::X11Surface,
+        _button: u32,
+    ) {
+        self.xw.ack_with_current_geometry(&window);
+    }
+
+    fn send_selection(
+        &mut self,
+        _xwm: smithay::xwayland::xwm::XwmId,
+        _selection: smithay::wayland::selection::SelectionTarget,
+        _mime_type: String,
+        _fd: std::os::unix::io::OwnedFd,
+    ) {
+    }
+
+    fn maximize_request(&mut self, _xwm: smithay::xwayland::xwm::XwmId, window: smithay::xwayland::X11Surface) {
+        self.xw.ack_with_current_geometry(&window);
+    }
+
+    fn unmaximize_request(&mut self, _xwm: smithay::xwayland::xwm::XwmId, window: smithay::xwayland::X11Surface) {
+        self.xw.ack_with_current_geometry(&window);
+    }
+
+    fn fullscreen_request(&mut self, _xwm: smithay::xwayland::xwm::XwmId, window: smithay::xwayland::X11Surface) {
+        let _ = window.set_fullscreen(true);
+    }
+
+    fn unfullscreen_request(&mut self, _xwm: smithay::xwayland::xwm::XwmId, window: smithay::xwayland::X11Surface) {
+        let _ = window.set_fullscreen(false);
+    }
+
+    fn minimize_request(&mut self, _xwm: smithay::xwayland::xwm::XwmId, _window: smithay::xwayland::X11Surface) {}
+    fn unminimize_request(&mut self, _xwm: smithay::xwayland::xwm::XwmId, _window: smithay::xwayland::X11Surface) {}
+
+    fn allow_selection_access(&mut self, _xwm: smithay::xwayland::xwm::XwmId, _selection: smithay::wayland::selection::SelectionTarget) -> bool {
+        false
+    }
+
+    fn property_notify(
+        &mut self,
+        _xwm: smithay::xwayland::xwm::XwmId,
+        window: smithay::xwayland::X11Surface,
+        property: smithay::xwayland::xwm::WmWindowProperty,
+    ) {
+        match property {
+            smithay::xwayland::xwm::WmWindowProperty::Title => {
+                tracing::info!("📝 X11 title: '{}'", window.title());
+            }
+            smithay::xwayland::xwm::WmWindowProperty::Class => {
+                tracing::info!("🆔 X11 class: '{}'", window.class());
+            }
+            _ => {}
+        }
+    }
+
+    fn disconnected(&mut self, _xwm: smithay::xwayland::xwm::XwmId) {
+        tracing::warn!("⚠️  X11 WM disconnected");
+        self.xw.xwm = None;
+    }
+}
+
+// ── XDG Decoration Handler ──────────────────────────────────
+// Tell clients to use server-side decorations (no CSD titlebar)
+impl XdgDecorationHandler for App {
+    fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(Mode::ServerSide);
+        });
+        toplevel.send_configure();
+    }
+    fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode) {
+        use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(Mode::ServerSide);
+        });
+        toplevel.send_configure();
+    }
+    fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
+        toplevel.with_pending_state(|state| {
+            state.decoration_mode = Some(Mode::ServerSide);
+        });
+        toplevel.send_configure();
+    }
+}

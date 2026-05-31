@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 /// Pre-rendered cursor pixel data: (width, height, hotspot_x, hotspot_y, pixels)
 /// pixels is RGBA row-major, scaled to the given pixel_size
+#[derive(Clone)]
 pub struct CursorImage {
     pub width: usize,
     pub height: usize,
@@ -104,6 +105,42 @@ impl CursorImage {
                     Size::new(1, 1),
                 )]);
             }
+        }
+    }
+
+    /// Batched cursor render: groups pixels by color to minimize GLES draw calls.
+    /// Instead of N calls (one per pixel), makes ~2-4 calls (one per color group).
+    pub fn render_batched(&self, f: &mut impl smithay::backend::renderer::Frame, cx: i32, cy: i32) {
+        use smithay::backend::renderer::Color32F;
+        use smithay::utils::{Physical, Point, Rectangle, Size};
+        use std::collections::HashMap;
+
+        // Group pixel positions by their RGBA color
+        let mut color_groups: HashMap<[u8; 4], Vec<Rectangle<i32, Physical>>> = HashMap::new();
+        for y in 0..self.height {
+            for x in 0..self.width {
+                let idx = (y * self.width + x) * 4;
+                let rgba = [
+                    self.pixels[idx],
+                    self.pixels[idx + 1],
+                    self.pixels[idx + 2],
+                    self.pixels[idx + 3],
+                ];
+                if rgba[3] == 0 { continue; }
+                color_groups.entry(rgba).or_default().push(Rectangle::new(
+                    Point::new(cx + x as i32, cy + y as i32),
+                    Size::new(1, 1),
+                ));
+            }
+        }
+
+        // One draw call per color group
+        for (rgba, rects) in color_groups {
+            let r = rgba[0] as f32 / 255.0;
+            let g = rgba[1] as f32 / 255.0;
+            let b = rgba[2] as f32 / 255.0;
+            let color = Color32F::new(r, g, b, 1.0);
+            let _ = f.clear(color, &rects);
         }
     }
 }
