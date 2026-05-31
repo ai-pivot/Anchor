@@ -22,14 +22,11 @@ use config::Config;
 use smithay::{
     backend::{
         allocator::{Format, Fourcc, Modifier,
-            dmabuf::{Dmabuf, DmabufAllocator},
-            gbm::{GbmAllocator, GbmBufferFlags, GbmDevice}},
-        drm::{DrmDevice, DrmDeviceFd, DrmEvent, GbmBufferedSurface},
-        egl::{EGLContext, EGLDisplay},
+            gbm::{GbmAllocator, GbmBufferFlags, GbmDevice}},        drm::{DrmDevice, DrmDeviceFd, DrmEvent, GbmBufferedSurface},
         input::{Axis, ButtonState, InputEvent, KeyState, PointerAxisEvent},
         libinput::LibinputInputBackend,
         renderer::{Bind, Frame, Renderer,
-            gles::{GlesError, GlesRenderer},
+            pixman::PixmanRenderer,
             element::{surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement}, Kind},
             utils::{draw_render_elements, on_commit_buffer_handler}, Color32F},
         session::{Session, Event as SessionEvent, libseat::LibSeatSession},
@@ -1097,20 +1094,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (mut device, dn) = DrmDevice::new(dev_fd.clone(), false)?;
     info!("✅ DrmDevice");
     let dev_fd_copy = dev_fd.clone();
-    let gbm = GbmDevice::new(dev_fd)?;
-
-    // 创建 GPU 渲染器 (GLES via EGL)
-    // EGLDisplay takes ownership of the GbmDevice, so we need to create a second GBM device
-    // for buffer allocation (GbmAllocator)
-    let gbm_alloc = GbmDevice::new(dev_fd_copy.clone())?;
-    let egl_display = unsafe { EGLDisplay::new(gbm)? };
-    let egl_context = EGLContext::new(&egl_display)?;
-    let mut renderer = unsafe { GlesRenderer::new(egl_context)? };
-    info!("✅ GlesRenderer (GPU)");
+    let _gbm = GbmDevice::new(dev_fd)?;
+    let mut renderer = PixmanRenderer::new()?;
+    info!("✅ Pixman");
 
     let res = device.resource_handles()?;
-    // 广播支持的 dmabuf 格式（GPU 渲染器可以处理）
-    let dmabuf_formats: Vec<Format> = [Fourcc::Argb8888, Fourcc::Xrgb8888].iter()
+    let fmts: Vec<Format> = [Fourcc::Argb8888, Fourcc::Xrgb8888].iter()
         .flat_map(|&c| [Format{code:c,modifier:Modifier::Linear}, Format{code:c,modifier:Modifier::Invalid}]).collect();
 
     // ── 多显示器枚举 ──
@@ -1187,7 +1176,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let gbm_dup = GbmDevice::new(fd_clones[idx].clone())?;
         let alloc = GbmAllocator::new(gbm_dup, GbmBufferFlags::SCANOUT);
         let buf_surf = match GbmBufferedSurface::new(surface, alloc,
-            &[Fourcc::Argb8888, Fourcc::Xrgb8888], dmabuf_formats.clone().into_iter()) {
+            &[Fourcc::Argb8888, Fourcc::Xrgb8888], fmts.clone().into_iter()) {
             Ok(bs) => bs,
             Err(e) => { warn!("⚠️  BufferSurface 创建失败 {}: {:?}", ci.name, e); continue; }
         };
@@ -1227,7 +1216,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     VirtualKeyboardManagerState::new::<App, _>(&dh, |_client| true);
     info!("✅ text-input / input-method / virtual-keyboard");
 
-    info!("✅ dmabuf (GPU renderer, formats: {})", dmabuf_formats.len());
+    // dmabuf: 不注册 global（NVIDIA block-linear 不兼容 Pixman）
+    info!("✅ dmabuf handler ready (global not advertised)");
 
     // 加载光标
     let cursor_img = if !cfg.cursor.theme.is_empty() {
@@ -1436,7 +1426,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // ═══════════════════════════════════════════════
                         // Phase 1: 收集渲染元素（bind 之前，需要 &mut renderer）
                         // ═══════════════════════════════════════════════
-                        let mut all_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
+                        let mut all_elems: Vec<WaylandSurfaceRenderElement<PixmanRenderer>> = Vec::new();
                         let mut ws_offset: i32 = 0;
                         
                         if Some(out.crtc) == primary_crtc {
@@ -1478,7 +1468,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let sp_h = oh / 3;
                                     let sp_x = (ow - sp_w) / 2;
                                     let sp_y = bar_h + 8;
-                                    let sp_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = render_elements_from_surface_tree(
+                                    let sp_elems: Vec<WaylandSurfaceRenderElement<PixmanRenderer>> = render_elements_from_surface_tree(
                                         &mut renderer, sp_surf.wl_surface(), (sp_x, sp_y), 1.0, 1.0, Kind::Unspecified
                                     );
                                     Some((sp_elems, sp_x, sp_y, sp_w, sp_h))
