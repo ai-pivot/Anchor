@@ -1,0 +1,6 @@
+[Desktop Entry]
+Name=Titan
+Comment=Titan Wayland Compositor
+Exec=titan-session
+Type=Application
+DesktopNames=titan

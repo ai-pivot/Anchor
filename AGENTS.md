@@ -1,156 +1,176 @@
 # Titan — AGENTS.md
 
-> Wayland tiling compositor in Rust, using Smithay 0.7, targeting NVIDIA 5080D (proprietary driver).
+> Wayland tiling compositor in Rust, using Smithay 0.7.
+> Targets NVIDIA proprietary driver (tested on 5080D).
 
 ## Architecture
 
 - **Language**: Rust
 - **Compositor framework**: Smithay 0.7
-- **GPU**: NVIDIA 5080D (proprietary, `nvidia-drm.modeset=1`)
+- **GPU**: NVIDIA proprietary (`nvidia-drm.modeset=1`)
 - **Renderer**: Pixman (CPU-only; NVIDIA proprietary doesn't support GBM/EGL GLES)
 - **Session**: libseat (logind backend) via GDM
-- **Monitor**: DP-4 on card1 (connector 128), 2560×1440@59Hz
+- **Monitor**: DP-4, 2560×1440@59Hz (configurable)
 
 ## Project Structure
 
 ```
-src/main.rs              — Main compositor (~300 lines)
-scripts/titan-session    — GDM session wrapper
-Cargo.toml               — Dependencies
-/usr/share/wayland-sessions/titan.desktop — GDM login entry
+src/
+  main.rs        — Main compositor loop, App struct, Workspace, keyboard/mouse handling
+  layout.rs      — Layout engine (slot calculation, headbar, decorations, wallpaper)
+  text_render.rs — fontdue-based TTF text rendering
+  config.rs      — TOML config parsing
+  font.rs        — Old bitmap font (superseded by text_render)
+scripts/
+  titan-session   — GDM session wrapper (auto-detects project dir)
+  drm-dump-fb.c   — DRM framebuffer dump tool (compiled separately)
+  titan-launcher  — App launcher script (dmenu/wmenu based)
+config.toml       — User configuration
+Cargo.toml        — Dependencies (fontdue, smithay, pixman, etc.)
 ```
 
-## Critical: Smithay Source Patches (NOT in git)
+## Features (v27)
 
-The following files in the cargo registry are patched. They survive `cargo build` but NOT `cargo clean` — must re-apply after clean.
+| Feature | Keybinding | Description |
+|---------|-----------|-------------|
+| Layout presets | `Super+Space` | MasterStack / Columns / Center / Grid per-workspace |
+| Notifications | Auto | Toast overlay with fade-in/out, 3s duration |
+| Window animations | Auto | Workspace switch slide (200ms ease-out cubic) |
+| Scratchpad | `Super+`` | Quake-style dropdown terminal (floating overlay) |
+| Window rules | config.toml | Auto-assign apps to workspaces by app_id |
+| Screenshot | `Super+P` | DRM framebuffer dump → `$HOME/Pictures/Screenshots/` |
+| App launcher | `Super+D` | Built-in launcher with search filter |
+| Fullscreen | `Super+F` | Per-window fullscreen |
+| Move window | `Super+Shift+1-9` | Move focused window to workspace |
+| Close | `Super+Q` | Close focused window |
 
-### 1. `~/.cargo/registry/src/index.crates.io-*/smithay-0.7.0/src/backend/allocator/gbm.rs`
+## Rendering Pipeline
 
-- **Line ~227**: `implicit=true` fallback when GBM `create_buffer_object_with_modifiers2` fails and modifiers contain `Invalid` or `Linear`. Original is `false`. NVIDIA GBM returns a block-linear modifier that causes `addfb2` to fail; setting `implicit=true` forces the buffer to report `Modifier::Invalid` instead.
+8-step layered pipeline, all rendered via Pixman CPU renderer:
 
-### 2. `~/.cargo/registry/src/index.crates.io-*/smithay-0.7.0/src/backend/renderer/pixman/mod.rs`
+```
+Step 1: Wallpaper (gradient/solid)
+Step 2: Window content (all elements, single draw call)
+Step 3: Window decorations (border lines)
+Step 4: Scratchpad overlay (opaque background + border + content)
+Step 5: Headbar (workspace indicators, clock, date, CPU/MEM)
+Step 6: Notifications (toast overlay)
+Step 7: App launcher (search + list)
+Step 8: Cursor (solid triangle, block-linear safe)
+```
 
-- **`import_dmabuf`**: Relaxed to accept any modifier (not just Linear). NVIDIA GBM creates buffers with modifier `0x300000000606014` (block-linear) which Pixman can't import with strict Linear-only check.
-- **`dmabuf_formats`**: Returns both `Linear` and `Invalid` modifiers for each supported format. Without `Invalid`, the intersection with NVIDIA plane formats (which report `{Invalid, 0x3fffff}`) is empty, causing `NoSupportedRendererFormat`.
+**Key principle**: Window elements are collected in order (0→N) into a single vec,
+then `draw_render_elements` draws them all at once. Later windows naturally
+overwrite earlier windows' overflow. No slot-based clipping needed.
 
-### 3. `~/.cargo/registry/src/index.crates.io-*/smithay-0.7.0/src/backend/drm/surface/gbm.rs`
+## Configuration
 
-- **`test_state` error handling**: Currently STOCK (restored). Do NOT patch this to ignore errors — `test_state` failure means real permission or format issues.
+Config file: `config.toml` in project root or `~/.config/titan/config.toml`.
 
-### 4. `~/.cargo/registry/src/index.crates.io-*/smithay-0.7.0/src/backend/drm/device/fd.rs`
+```toml
+[colors]
+background = "#0d0d1a"
+focus_border = "#7aa2f7"
+unfocus_border = "#24253a"
 
-- **STOCK.** Do NOT modify. The `acquire_master_lock()` EACCES is expected on logind sessions.
+[bar]
+enabled = true
+height = 48
 
-## Critical: Session Lifecycle (THE ROOT CAUSE OF MANY BUGS)
+[layout]
+border_width = 4
+gap = 14
+margin = 6
+
+[terminal]
+command = "foot"
+
+[launcher]
+command = "wmenu"  # fallback: built-in launcher
+
+[[window_rule]]
+app_id = "firefox"
+workspace = 1
+layout = "master-stack"
+```
+
+## Smithay Source Patches (NOT in git)
+
+The following files in the cargo registry are patched. They survive `cargo build`
+but NOT `cargo clean` — must re-apply after clean.
+
+### 1. `smithay-0.7.0/src/backend/allocator/gbm.rs`
+- Line ~227: `implicit=true` fallback when GBM `create_buffer_object_with_modifiers2` fails
+  and modifiers contain `Invalid` or `Linear`. NVIDIA GBM returns block-linear modifier
+  that causes `addfb2` to fail; `implicit=true` forces `Modifier::Invalid`.
+
+### 2. `smithay-0.7.0/src/backend/renderer/pixman/mod.rs`
+- `import_dmabuf`: Relaxed to accept any modifier (not just Linear).
+- `dmabuf_formats`: Returns both `Linear` and `Invalid` modifiers.
+
+## Session Lifecycle
 
 ### The LibSeatSession + Notifier Pattern
 
 `LibSeatSession::new()` returns `(LibSeatSession, LibSeatSessionNotifier)`:
+- **Notifier** holds the ONLY strong reference to the libseat connection state.
+- **If notifier is dropped, the libseat connection closes immediately.**
+- All DRM devices opened via `session.open()` are released. DRM master is lost.
 
-- **`LibSeatSessionNotifier`** holds `Rc<LibSeatSessionImpl>` — the **ONLY strong reference** to the libseat connection state.
-- **`LibSeatSession`** holds only `Weak<LibSeatSessionImpl>`.
-- **If `notifier` is dropped, the libseat connection closes immediately.** All DRM devices opened via `session.open()` are released. DRM master is lost. All subsequent atomic commits return `EACCES / Permission denied (os error 13)`.
+**Correct usage**: Insert notifier into calloop event loop. Wait for
+`SessionEvent::ActivateSession` before creating DRM surfaces.
 
-**Correct usage (as in anvil and all Smithay examples):**
+## NVIDIA DRM Quirks
 
-1. Keep `notifier` alive for the entire lifetime of the compositor.
-2. Insert `notifier` into the calloop event loop via `eloop.handle().insert_source(notifier, ...)`.
-3. Wait for `SessionEvent::ActivateSession` before creating DRM surfaces.
-4. Handle `SessionEvent::PauseSession` / `SessionEvent::ActivateSession` for VT switching.
+- Only `drmModeAddFB2WithModifiers` works (legacy `drmModeAddFB` unsupported)
+- GBM buffer modifier: `0x300000000606014` (block-linear tiling)
+- Plane formats report `{Invalid, 0x3fffff}` modifiers, not Linear
+- `drmSetMaster`: Returns EACCES on logind sessions (expected)
+- Dumb buffers: Not supported for scanout
+- **Black screen**: Pixman renders in linear layout, NVIDIA scanout expects block-linear.
+  Renders correctly at macro scale (window-sized regions) but small pixels may distort.
 
-**Pattern:**
-```rust
-let (session, notifier) = LibSeatSession::new()?;
-let fd = session.open(&gpu_path, OFlags::RDWR)?;
-// ... create DrmDevice, surfaces, etc. ...
-
-// CRITICAL: insert notifier into event loop, keep it alive
-eloop.handle().insert_source(
-    Generic::new(notifier, Interest::READ, Mode::Level),
-    |_, _, state| { /* handle ActivateSession/PauseSession */ }
-)?;
-```
-
-### NVIDIA DRM Quirks
-
-- **`drmModeAddFB` (legacy)**: Not supported. Only `drmModeAddFB2WithModifiers` works.
-- **GBM buffer modifier**: `0x300000000606014` (NVIDIA block-linear tiling).
-- **Plane formats**: Reports `{Invalid, 0x3fffff}` modifiers, not Linear.
-- **`drmSetMaster`**: Returns EACCES on logind sessions (expected, logind manages master via fd passing). Do NOT add manual `drmSetMaster` calls — it triggers kernel `Failed to grab modeset ownership` errors.
-- **Modes via ioctl**: Reports 0 modes through standard ioctl; must use EDID to get mode info.
-- **Dumb buffers**: Not supported for scanout.
-
-## Known Issues
-
-### Black Screen (UNRESOLVED)
-
-Pixman renders pixels in **linear** layout. NVIDIA scanout expects **block-linear** (`0x300000000606014`). The rendered data doesn't match the display format, resulting in a black screen despite frames being successfully submitted (verified: 2040 frames rendered in v5/v6).
-
-**Possible fixes (not yet attempted):**
-1. GLES renderer via GBM EGL display (EGL init previously hung — may work in GDM session context).
-2. CPU-side block-linear tiling before submit.
-3. Force GBM to create Linear buffers (NVIDIA GBM rejects explicit Linear modifier).
-
-## Critical: Deployment & Testing (READ THIS FIRST)
-
-### 正确的部署方法
-
-`titan-session` 脚本直接运行 `./target/release/titan`。所以：
+## Deployment
 
 ```bash
-# 1. 编译 — cargo build 完就自动是新版本，不需要 cp 任何东西
+# 1. Build
 cargo build --release --bin titan
 
-# 2. 杀 Titan 进程让 GDM 重启 session（同一个 logind session，DRM modes 不丢失）
+# 2. Restart (kill process, GDM restarts it)
 kill $(pgrep -f "target/release/titan")
 
-# 3. 等待 GDM 重新启动 Titan（约 5-8 秒）
+# 3. Verify
 sleep 8 && pgrep -a titan
-
-# 4. 截图验证
-sudo scripts/drm-dump-fb /dev/dri/card1 /tmp/titan-current.raw
 ```
 
-### 🚫 绝对禁止的操作
+### GDM Setup
+- Session file: `/usr/share/wayland-sessions/titan.desktop`
+- Session wrapper: `scripts/titan-session` (auto-detects project dir via `dirname`)
+- `titan-session` runs `target/release/titan` directly — no `cp` needed
 
-1. **禁止 `sudo systemctl restart gdm3`** — 这会销毁当前 logind session，NVIDIA DRM modes 丢失，新 session 里 `drmModeGetConnector` 返回 0 modes，Titan 永远启动失败。
-2. **禁止 `sudo reboot`** — 同上，而且还会断开 xbot 连接。
-3. **禁止 `sudo cp target/release/titan /usr/local/bin/titan`** — 没有用。`titan-session` 直接运行 `target/release/titan`，不需要复制到其他路径。
-4. **禁止尝试从 EDID/sysfs 构造 DRM Mode** — NVIDIA modes 问题只能在已有 session 内解决。如果 session 丢失了 modes，只能通过完整的系统启动流程恢复。
-5. **禁止修改 `titan-session` 添加 `--direct`** — `--direct` 模式在 GDM logind session 中无法工作。
+### 🚫 Forbidden Operations
 
-### 如果 Titan 确实无法启动（session 彻底坏了）
+1. **NEVER `systemctl restart gdm3`** — destroys logind session → NVIDIA modes lost → Titan broken
+2. **NEVER `sudo reboot`** — same + disconnects remote access
+3. **NEVER modify `titan-session` to add `--direct`** — doesn't work in GDM logind session
 
-只有在这种情况下才能 `systemctl restart gdm3`，但要知道重启后 Titan 可能因 NVIDIA 0-modes 问题无法自动登录。此时只能等完整的系统 reboot（从 GRUB 开始），GDM greeter 在首次启动时会正确设置 modes。
+### If Session is Completely Broken
 
-## Build & Run
+Only then `systemctl restart gdm3`, but know that Titan may fail to start
+due to NVIDIA 0-modes issue. Requires full system boot from GRUB to recover.
 
-```bash
-cd .
-cargo build --release --bin titan
-# After cargo clean: re-apply all Smithay patches listed above!
-```
+## Key Lessons
 
-**From GDM**: Select "Titan" from the session menu. `titan-session` wrapper sets NVIDIA env vars and launches the binary.
-
-**Important**: Before testing from GDM, ensure no stale sessions hold DRM master:
-```bash
-loginctl list-sessions   # Should only show GDM greeter session
-# If stale sessions exist: loginctl terminate-session <id>
-```
-
-## Git Conventions
-
-- Always `git commit` before changes.
-- Smithay patches are in cargo registry, NOT tracked by git.
-- After `cargo clean`, patches must be re-applied manually.
-
-## Key Lessons (Hard-Won)
-
-1. **Read type definitions before using APIs.** The `Rc`/`Weak` ownership in `LibSeatSession`/`Notifier` is the single most important thing to understand.
+1. **`do_layout()` MUST be called after layout changes.** Forgetting this means
+   windows don't receive `send_configure` → clients release old buffers → new
+   buffers haven't arrived → `render_elements_from_surface_tree` returns empty → black screen.
 2. **Keep notifier alive.** Dropping it kills the entire session silently.
-3. **Don't fight NVIDIA on `drmSetMaster`.** Logind manages master; manual calls break things.
-4. **`test_state` failure is a real error.** Don't patch it to be non-fatal — it indicates actual problems (like a dead session).
-5. **Symptoms ≠ root cause.** "Permission denied" on atomic commit means the fd lost master, not that you need to call `drmSetMaster` harder.
-6. **部署 = `cargo build` + `kill titan`。** 不需要 cp、不需要 restart gdm、不需要 reboot。`titan-session` 直接运行 `target/release/titan`，build 完就是新版本。
-7. **绝对不要 `systemctl restart gdm3`。** 会销毁 logind session → NVIDIA modes 丢失 → Titan 无法启动 → 只能完整 reboot 恢复。正确的做法是 `kill` Titan 进程让 GDM 在同一个 session 里重启它。
+3. **Don't fight NVIDIA on `drmSetMaster`.** Logind manages master.
+4. **`test_state` failure is a real error.** Don't patch it to be non-fatal.
+5. **No slot-based clipping.** Drawing slot backgrounds between windows creates
+   visible seams. Let natural draw order handle overlap.
+6. **Rendering order matters.** Windows → Decorations → Scratchpad → Headbar → Notifications → Launcher → Cursor.
+7. **Scratchpad must intercept `new_toplevel`.** Use a `scratchpad_pending` flag to
+   divert the next toplevel into `scratchpad_surface` instead of workspace tops.
+8. **Disable foot CSD.** Set `csd.preferred=none` in `~/.config/foot/foot.ini` to
+   prevent terminal header from causing size misalignment.

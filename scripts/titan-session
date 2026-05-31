@@ -22,13 +22,47 @@ export __EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.js
 export ELECTRON_OZONE_PLATFORM_HINT=wayland
 export CHROME_FLAGS="--ozone-platform=wayland --enable-features=UseOzonePlatform"
 
-# 输入法
-export GTK_IM_MODULE=fcitx
-export QT_IM_MODULE=fcitx
-export XMODIFIERS=@im=fcitx
-export SDL_IM_MODULE=fcitx
-export GLFW_IM_MODULE=ibus
-export INPUT_METHOD=fcitx
+# ─── 输入法配置 ───
+# 从 config.toml 读取 [input_method].method
+# 支持: fcitx, ibus, none
+IM_METHOD="none"
+CONFIG_FILE=""
+for f in "$PROJECT_DIR/config.toml" "$HOME/.config/titan/config.toml"; do
+    if [ -f "$f" ]; then CONFIG_FILE="$f"; break; fi
+done
+if [ -n "$CONFIG_FILE" ]; then
+    IM_METHOD=$(grep -A1 '\[input_method\]' "$CONFIG_FILE" 2>/dev/null | grep 'method' | sed 's/.*=.*"\(.*\)".*/\1/' | head -1)
+    IM_METHOD="${IM_METHOD:-none}"
+fi
+
+case "$IM_METHOD" in
+    fcitx)
+        export GTK_IM_MODULE=fcitx
+        export QT_IM_MODULE=fcitx
+        export XMODIFIERS=@im=fcitx
+        export SDL_IM_MODULE=fcitx
+        export INPUT_METHOD=fcitx
+        # 启动 fcitx5（如果已安装）
+        if command -v fcitx5 &>/dev/null; then
+            fcitx5 -d --replace 2>/dev/null &
+        elif command -v fcitx &>/dev/null; then
+            fcitx -d --replace 2>/dev/null &
+        fi
+        ;;
+    ibus)
+        export GTK_IM_MODULE=ibus
+        export QT_IM_MODULE=ibus
+        export XMODIFIERS=@im=ibus
+        export SDL_IM_MODULE=ibus
+        export INPUT_METHOD=ibus
+        if command -v ibus-daemon &>/dev/null; then
+            ibus-daemon -drx 2>/dev/null &
+        fi
+        ;;
+    none|*)
+        # 不设置输入法
+        ;;
+esac
 
 # 确保 XDG_RUNTIME_DIR
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"

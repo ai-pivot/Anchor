@@ -67,6 +67,10 @@ command = "wmenu"
 prompt = "Launch"
 lines = 10
 
+[input_method]
+# Supported: "fcitx", "ibus", "none"
+method = "fcitx"
+
 # 窗口规则：根据 app_id 自动分配工作区
 [[window_rule]]
 app_id = "firefox"
