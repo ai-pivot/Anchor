@@ -70,13 +70,20 @@ use smithay::{
     },
 };
 use wayland_protocols::xdg::shell::server::xdg_toplevel;
-use wayland_server::{Client, ListeningSocket,
+use wayland_server::{Client, ListeningSocket, Resource,
     backend::{ClientData, ClientId, DisconnectReason}, protocol::wl_buffer};
 use tracing::{error, info, warn};
 
 // ── Workspace ──────────────────────────────────────────────
 
 const NUM_WORKSPACES: usize = 9;
+
+/// Identifies a window in the unified window list
+#[derive(Clone, Debug)]
+enum WindowSlot {
+    Wl(usize),  // index into tops
+    X11(usize), // index into x11_surfaces
+}
 
 struct Workspace {
     tops: Vec<ToplevelSurface>,
@@ -88,11 +95,62 @@ struct Workspace {
     pending_split: Option<layout::SplitDir>,
     /// X11 (XWayland) surfaces on this workspace
     x11_surfaces: Vec<smithay::xwayland::X11Surface>,
+    /// Unified rendering/focus order. Maps flat index → (type, index).
+    /// E.g. [Wl(0), Wl(1), X11(0), Wl(2)] means render tops[0], tops[1], x11[0], tops[2]
+    /// When empty, defaults to [Wl(0), Wl(1), ..., X11(0), X11(1), ...]
+    window_order: Vec<WindowSlot>,
 }
 
 impl Workspace {
     fn new() -> Self {
-        Self { tops: Vec::new(), focus: None, fullscreen: None, layout: LayoutPreset::default(), split: layout::SplitDir::Horizontal, pending_split: None, x11_surfaces: Vec::new() }
+        Self { tops: Vec::new(), focus: None, fullscreen: None, layout: LayoutPreset::default(), split: layout::SplitDir::Horizontal, pending_split: None, x11_surfaces: Vec::new(), window_order: Vec::new() }
+    }
+
+    /// Get the unified window order. If window_order is empty, generate default (all WL then all X11).
+    fn effective_order(&self) -> Vec<WindowSlot> {
+        if self.window_order.is_empty() {
+            let mut order: Vec<WindowSlot> = (0..self.tops.len()).map(WindowSlot::Wl).collect();
+            order.extend((0..self.x11_surfaces.len()).map(WindowSlot::X11));
+            order
+        } else {
+            // Filter out invalid entries (windows that were closed)
+            self.window_order.iter().filter(|s| match s {
+                WindowSlot::Wl(i) => *i < self.tops.len(),
+                WindowSlot::X11(i) => *i < self.x11_surfaces.len(),
+            }).cloned().collect()
+        }
+    }
+
+    /// Rebuild window_order to match current windows (called after add/remove)
+    fn rebuild_order(&mut self) {
+        let n_wl = self.tops.len();
+        let n_x11 = self.x11_surfaces.len();
+        // Keep existing order, add new windows at the end
+        let mut new_order = Vec::new();
+        let mut wl_used = vec![false; n_wl];
+        let mut x11_used = vec![false; n_x11];
+        // Preserve existing order for windows that still exist
+        for slot in &self.window_order {
+            match slot {
+                WindowSlot::Wl(i) if *i < n_wl && !wl_used[*i] => {
+                    new_order.push(slot.clone());
+                    wl_used[*i] = true;
+                }
+                WindowSlot::X11(i) if *i < n_x11 && !x11_used[*i] => {
+                    new_order.push(slot.clone());
+                    x11_used[*i] = true;
+                }
+                _ => {}
+            }
+        }
+        // Append any new windows not yet in the order
+        for (i, used) in wl_used.iter().enumerate() {
+            if !used { new_order.push(WindowSlot::Wl(i)); }
+        }
+        for (i, used) in x11_used.iter().enumerate() {
+            if !used { new_order.push(WindowSlot::X11(i)); }
+        }
+        self.window_order = new_order;
     }
 }
 
@@ -188,13 +246,18 @@ impl App {
 
     fn focus_idx(&self) -> Option<usize> {
         let ws = &self.workspaces[self.active_ws];
-        if let Some(idx) = ws.focus.as_ref().and_then(|s| ws.tops.iter().position(|tl| tl.wl_surface() == s)) {
-            Some(idx)
-        } else {
-            // X11 surfaces — offset by Wayland toplevel count
-            let n_wl = ws.tops.len();
-            ws.focus.as_ref().and_then(|s| ws.x11_surfaces.iter().position(|xs| xs.wl_surface().as_ref() == Some(s)).map(|i| n_wl + i))
+        let focus = ws.focus.as_ref()?;
+        let order = ws.effective_order();
+        for (i, slot) in order.iter().enumerate() {
+            let matches = match slot {
+                WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| tl.wl_surface() == focus),
+                WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface().map(|wl| &wl == focus)),
+            };
+            if matches == Some(true) {
+                return Some(i);
+            }
         }
+        None
     }
 
     fn pointer_focus(&self) -> Option<(WlSurface, Point<f64, Logical>)> {
@@ -205,59 +268,80 @@ impl App {
         let ws = &self.workspaces[self.active_ws];
 
         // Fullscreen: entire area below bar
+        let order = ws.effective_order();
         if let Some(fi) = ws.fullscreen {
-            if let Some(tl) = ws.tops.get(fi) {
-                let tl_pos = Point::from((0.0, bar_h as f64));
-                if let Some(r) = self.popup_at_pointer(tl, tl_pos) { return Some(r); }
-                return Some((tl.wl_surface().clone(), tl_pos));
-            }
-        }
-
-        // Check ALL toplevels' XDG popups first (they render on top of windows)
-        for (i, tl) in ws.tops.iter().enumerate() {
-            let (x, y, _, _) = layout::slot(i, ws.tops.len(), self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
-            let tl_pos = Point::from((x as f64, y as f64));
-            if let Some(r) = self.popup_at_pointer(tl, tl_pos) {
-                return Some(r);
-            }
-        }
-
-        // Hit-test window slots (main toplevel surfaces)
-        let n_wl = ws.tops.len();
-        let n_x11 = ws.x11_surfaces.len();
-        let n_all = n_wl + n_x11;
-        for (i, tl) in ws.tops.iter().enumerate() {
-            let (x, y, w, h) = layout::slot(i, n_all, self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
-            if px >= x as f64 && px < (x + w) as f64 && py >= y as f64 && py < (y + h) as f64 {
-                return Some((tl.wl_surface().clone(), Point::from((x as f64, y as f64))));
-            }
-        }
-
-        // Hit-test X11 surfaces
-        for (xi, xs) in ws.x11_surfaces.iter().enumerate() {
-            let global_i = n_wl + xi;
-            let (x, y, w, h) = layout::slot(global_i, n_all, self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
-            if px >= x as f64 && px < (x + w) as f64 && py >= y as f64 && py < (y + h) as f64 {
-                if let Some(wl) = xs.wl_surface() {
-                    return Some((wl.clone(), Point::from((x as f64, y as f64))));
+            if let Some(slot) = order.get(fi) {
+                match slot {
+                    WindowSlot::Wl(idx) => {
+                        if let Some(tl) = ws.tops.get(*idx) {
+                            let tl_pos = Point::from((0.0, bar_h as f64));
+                            if let Some(r) = self.popup_at_pointer(tl, tl_pos) { return Some(r); }
+                            return Some((tl.wl_surface().clone(), tl_pos));
+                        }
+                    }
+                    WindowSlot::X11(idx) => {
+                        if let Some(xs) = ws.x11_surfaces.get(*idx) {
+                            if let Some(wl) = xs.wl_surface() {
+                                return Some((wl, Point::from((0.0, bar_h as f64))));
+                            }
+                        }
+                    }
                 }
             }
         }
 
-        // Fallback: focused toplevel
+        // Check ALL toplevels' XDG popups first (they render on top of windows)
+        for (i, slot) in order.iter().enumerate() {
+            if let WindowSlot::Wl(idx) = slot {
+                if let Some(tl) = ws.tops.get(*idx) {
+                    let (x, y, _, _) = layout::slot(i, order.len(), self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
+                    let tl_pos = Point::from((x as f64, y as f64));
+                    if let Some(r) = self.popup_at_pointer(tl, tl_pos) {
+                        return Some(r);
+                    }
+                }
+            }
+        }
+
+        // Hit-test window slots using unified order
+        let n_all = order.len();
+        for (i, slot) in order.iter().enumerate() {
+            let (x, y, w, h) = layout::slot(i, n_all, self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
+            if px >= x as f64 && px < (x + w) as f64 && py >= y as f64 && py < (y + h) as f64 {
+                let surf = match slot {
+                    WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| tl.wl_surface().clone()),
+                    WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()),
+                };
+                if let Some(s) = surf {
+                    return Some((s, Point::from((x as f64, y as f64))));
+                }
+            }
+        }
+
+        // Fallback: focused window
         if let Some(ref focus_surf) = ws.focus {
-            for (i, tl) in ws.tops.iter().enumerate() {
-                if tl.wl_surface() == focus_surf {
-                    let (x, y, _w, _h) = layout::slot(i, ws.tops.len(), self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
+            for (i, slot) in order.iter().enumerate() {
+                let matches = match slot {
+                    WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| tl.wl_surface() == focus_surf),
+                    WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface().map(|wl| &wl == focus_surf)),
+                };
+                if matches == Some(true) {
+                    let (x, y, _w, _h) = layout::slot(i, order.len(), self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
                     return Some((focus_surf.clone(), Point::from((x as f64, y as f64))));
                 }
             }
         }
 
-        // Last resort
-        for (i, tl) in ws.tops.iter().enumerate().rev() {
-            let (x, y, _w, _h) = layout::slot(i, ws.tops.len(), self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
-            return Some((tl.wl_surface().clone(), Point::from((x as f64, y as f64))));
+        // Last resort: last window in order
+        if let Some((i, slot)) = order.iter().enumerate().last() {
+            let (x, y, _w, _h) = layout::slot(i, order.len(), self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
+            let surf = match slot {
+                WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| tl.wl_surface().clone()),
+                WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()),
+            };
+            if let Some(s) = surf {
+                return Some((s, Point::from((x as f64, y as f64))));
+            }
         }
 
         None
@@ -297,63 +381,81 @@ impl App {
 
     fn do_layout(&mut self) {
         let ws_idx = self.active_ws;
-        let n_wl = self.workspaces[ws_idx].tops.len();
-        let n_x11 = self.workspaces[ws_idx].x11_surfaces.len();
-        let n = n_wl + n_x11;
+        let order = self.workspaces[ws_idx].effective_order();
+        let n = order.len();
         if n == 0 { return; }
         let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
 
         // 修正 fullscreen
         if let Some(fi) = self.workspaces[ws_idx].fullscreen {
-            if fi >= n_wl { self.workspaces[ws_idx].fullscreen = None; }
+            if fi >= n { self.workspaces[ws_idx].fullscreen = None; }
         }
         let fullscreen = self.workspaces[ws_idx].fullscreen;
 
         let osize_w = self.osize.w;
         let osize_h = self.osize.h;
-        let gap = self.cfg.layout.gap;
-        let margin = self.cfg.layout.margin;
 
         if let Some(fi) = fullscreen {
-            for (i, tl) in self.workspaces[ws_idx].tops.iter().enumerate() {
-                if i == fi {
-                    tl.with_pending_state(|st| {
-                        st.states.set(xdg_toplevel::State::Activated);
-                        st.states.set(xdg_toplevel::State::Fullscreen);
-                        st.size = Some((osize_w, osize_h - bar_h).into());
-                    });
-                } else {
-                    tl.with_pending_state(|st| {
-                        st.states.unset(xdg_toplevel::State::Activated);
-                        st.states.unset(xdg_toplevel::State::Fullscreen);
-                        st.size = Some((1, 1).into());
-                    });
+            // Fullscreen: make the focused window fill the screen, minimize others
+            for (i, slot) in order.iter().enumerate() {
+                match slot {
+                    WindowSlot::Wl(idx) => {
+                        if let Some(tl) = self.workspaces[ws_idx].tops.get(*idx) {
+                            if i == fi {
+                                tl.with_pending_state(|st| {
+                                    st.states.set(xdg_toplevel::State::Activated);
+                                    st.states.set(xdg_toplevel::State::Fullscreen);
+                                    st.size = Some((osize_w, osize_h - bar_h).into());
+                                });
+                            } else {
+                                tl.with_pending_state(|st| {
+                                    st.states.unset(xdg_toplevel::State::Activated);
+                                    st.states.unset(xdg_toplevel::State::Fullscreen);
+                                    st.size = Some((1, 1).into());
+                                });
+                            }
+                            tl.send_configure();
+                        }
+                    }
+                    WindowSlot::X11(idx) => {
+                        if let Some(xs) = self.workspaces[ws_idx].x11_surfaces.get(*idx) {
+                            if i == fi {
+                                let _ = xs.configure(Some(Rectangle::from_loc_and_size((0, bar_h), (osize_w, osize_h - bar_h))));
+                            } else {
+                                let _ = xs.configure(Some(Rectangle::from_loc_and_size((0, 0), (1, 1))));
+                            }
+                        }
+                    }
                 }
-                tl.send_configure();
             }
         } else {
-            for (i, tl) in self.workspaces[ws_idx].tops.iter().enumerate() {
-                let (_x, _y, w, h) = layout::slot(i, n, osize_w, osize_h, bar_h, &self.cfg, self.workspaces[self.active_ws].layout, self.workspaces[self.active_ws].split);
-                tl.with_pending_state(|st| {
-                    st.states.set(xdg_toplevel::State::Activated);
-                    st.states.unset(xdg_toplevel::State::Fullscreen);
-                    st.states.set(xdg_toplevel::State::TiledLeft);
-                    st.states.set(xdg_toplevel::State::TiledRight);
-                    st.states.set(xdg_toplevel::State::TiledTop);
-                    st.states.set(xdg_toplevel::State::TiledBottom);
-                    st.size = Some((w, h).into());
-                });
-                info!("📐 layout 窗口 #{}: {}x{}", i, w, h);
-                tl.send_configure();
-            }
-            // X11 windows — configure with layout positions
-            for (xi, xs) in self.workspaces[ws_idx].x11_surfaces.iter().enumerate() {
-                if xs.wl_surface().is_none() { continue; }
-                let global_i = n_wl + xi;
-                let (x, y, w, h) = layout::slot(global_i, n, osize_w, osize_h, bar_h, &self.cfg, self.workspaces[self.active_ws].layout, self.workspaces[self.active_ws].split);
-                let rect = Rectangle::from_loc_and_size((x, y), (w, h));
-                let _ = xs.configure(Some(rect));
-                info!("📐 layout X11 #{}: {}x{} at ({},{})", global_i, w, h, x, y);
+            // Normal tiling: layout all windows in order
+            for (i, slot) in order.iter().enumerate() {
+                let (x, y, w, h) = layout::slot(i, n, osize_w, osize_h, bar_h, &self.cfg, self.workspaces[self.active_ws].layout, self.workspaces[self.active_ws].split);
+                match slot {
+                    WindowSlot::Wl(idx) => {
+                        if let Some(tl) = self.workspaces[ws_idx].tops.get(*idx) {
+                            info!("📐 layout 窗口 #{}: {}x{}", i, w, h);
+                            tl.with_pending_state(|st| {
+                                st.states.set(xdg_toplevel::State::Activated);
+                                st.states.unset(xdg_toplevel::State::Fullscreen);
+                                st.states.set(xdg_toplevel::State::TiledLeft);
+                                st.states.set(xdg_toplevel::State::TiledRight);
+                                st.states.set(xdg_toplevel::State::TiledTop);
+                                st.states.set(xdg_toplevel::State::TiledBottom);
+                                st.size = Some((w, h).into());
+                            });
+                            tl.send_configure();
+                        }
+                    }
+                    WindowSlot::X11(idx) => {
+                        if let Some(xs) = self.workspaces[ws_idx].x11_surfaces.get(*idx) {
+                            let rect = Rectangle::from_loc_and_size((x, y), (w, h));
+                            let _ = xs.configure(Some(rect));
+                            info!("📐 layout X11 #{}: {}x{} at ({},{})", i, w, h, x, y);
+                        }
+                    }
+                }
             }
         }
     }
@@ -606,13 +708,49 @@ impl App {
         self.dirty = true;
     }
 
-    /// 用方向键交换窗口位置
+    /// 用方向键切换焦点窗口（Super+方向键）
+    fn focus_direction(&mut self, direction: Keysym) {
+        let order = self.workspaces[self.active_ws].effective_order();
+        let n = order.len();
+        if n == 0 { return; }
+
+        let fi = match self.focus_idx() {
+            Some(i) => i,
+            None => 0,
+        };
+
+        let target = match direction {
+            Keysym::Left | Keysym::Up => fi.saturating_sub(1),
+            Keysym::Right | Keysym::Down => (fi + 1).min(n - 1),
+            _ => return,
+        };
+        if target == fi { return; }
+
+        let ws = &self.workspaces[self.active_ws];
+        let surf = match &order[target] {
+            WindowSlot::Wl(i) => ws.tops.get(*i).map(|tl| tl.wl_surface().clone()),
+            WindowSlot::X11(i) => ws.x11_surfaces.get(*i).and_then(|xs| xs.wl_surface()),
+        };
+        if let Some(surf) = surf {
+            info!("🔍 焦点切换 {} → {}", fi + 1, target + 1);
+            self.workspaces[self.active_ws].focus = Some(surf.clone());
+            let kbd = self.kbd.clone();
+            let serial = SERIAL_COUNTER.next_serial();
+            kbd.set_focus(self, Some(surf), serial);
+            self.dirty = true;
+        }
+    }
+
+    /// 用方向键交换窗口位置（Super+Shift+方向键）
+    /// 支持任意交换，通过 window_order 控制渲染顺序
     fn swap_window(&mut self, direction: Keysym) {
         let fi = match self.focus_idx() {
             Some(i) => i,
             None => return,
         };
-        let n = self.workspaces[self.active_ws].tops.len();
+        let ws = &mut self.workspaces[self.active_ws];
+        ws.rebuild_order();
+        let n = ws.window_order.len();
         if n <= 1 { return; }
 
         let target = match direction {
@@ -622,10 +760,8 @@ impl App {
         };
 
         info!("🔄 交换窗口 {} ↔ {}", fi + 1, target + 1);
-        let ws = &mut self.workspaces[self.active_ws];
-        ws.tops.swap(fi, target);
+        ws.window_order.swap(fi, target);
 
-        // 修正 fullscreen
         if let Some(fs) = ws.fullscreen {
             if fs == fi { ws.fullscreen = Some(target); }
             else if fs == target { ws.fullscreen = Some(fi); }
@@ -795,9 +931,13 @@ impl App {
                                 Keysym::_7 => { data.switch_workspace(6); return FilterResult::Intercept(()); }
                                 Keysym::_8 => { data.switch_workspace(7); return FilterResult::Intercept(()); }
                                 Keysym::_9 => { data.switch_workspace(8); return FilterResult::Intercept(()); }
-                                // Super+方向键：交换窗口
+                                // Super+方向键 / Super+Shift+方向键
                                 Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down => {
-                                    data.swap_window(keysym.modified_sym());
+                                    if mods.shift {
+                                        data.swap_window(keysym.modified_sym());
+                                    } else {
+                                        data.focus_direction(keysym.modified_sym());
+                                    }
                                     return FilterResult::Intercept(());
                                 }
                                 // Super+V: 下一个新窗口纵向分割（类似 sway split v）
@@ -880,55 +1020,44 @@ impl App {
                     let py = self.pointer_pos.1 as i32;
                     let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
                     if py >= bar_h {
-                        // Check if click is on an XDG popup — if so, don't steal
-                        // keyboard focus (popup grab protocol requires exclusive focus)
+                        let order = self.workspaces[self.active_ws].effective_order();
+                        let ws = &self.workspaces[self.active_ws];
+
+                        // Check if click is on an XDG popup — if so, don't steal focus
                         let on_popup = {
-                            let ws = &self.workspaces[self.active_ws];
-                            let n_all = ws.tops.len() + ws.x11_surfaces.len();
                             let mut found = false;
-                            for (i, tl) in ws.tops.iter().enumerate() {
-                                let (x, y, _, _) = layout::slot(i, n_all, self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
-                                let tl_pos = Point::from((x as f64, y as f64));
-                                if self.popup_at_pointer(tl, tl_pos).is_some() {
-                                    found = true;
-                                    break;
+                            for (i, slot) in order.iter().enumerate() {
+                                if let WindowSlot::Wl(idx) = slot {
+                                    if let Some(tl) = ws.tops.get(*idx) {
+                                        let (x, y, _, _) = layout::slot(i, order.len(), self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
+                                        let tl_pos = Point::from((x as f64, y as f64));
+                                        if self.popup_at_pointer(tl, tl_pos).is_some() {
+                                            found = true;
+                                            break;
+                                        }
+                                    }
                                 }
                             }
                             found
                         };
 
                         if !on_popup {
-                            let n_wl = self.workspaces[self.active_ws].tops.len();
-                            let n_x11 = self.workspaces[self.active_ws].x11_surfaces.len();
-                            let n_all = n_wl + n_x11;
-                            let mut focused = false;
-                            // Wayland toplevels
-                            for (i, tl) in self.workspaces[self.active_ws].tops.iter().enumerate() {
+                            let order = self.workspaces[self.active_ws].effective_order();
+                            let n_all = order.len();
+                            for (i, slot) in order.iter().enumerate() {
                                 let (x, y, w, h) = layout::slot(i, n_all, self.osize.w, self.osize.h, bar_h, &self.cfg, self.workspaces[self.active_ws].layout, self.workspaces[self.active_ws].split);
                                 if px >= x && px < x + w && py >= y && py < y + h {
-                                    let surf = tl.wl_surface().clone();
-                                    self.workspaces[self.active_ws].focus = Some(surf.clone());
-                                    let kbd = self.kbd.clone();
-                                    let serial = SERIAL_COUNTER.next_serial();
-                                    kbd.set_focus(self, Some(surf), serial);
-                                    focused = true;
-                                    break;
-                                }
-                            }
-                            // X11 surfaces
-                            if !focused {
-                                for (xi, xs) in self.workspaces[self.active_ws].x11_surfaces.iter().enumerate() {
-                                    let global_i = n_wl + xi;
-                                    let (x, y, w, h) = layout::slot(global_i, n_all, self.osize.w, self.osize.h, bar_h, &self.cfg, self.workspaces[self.active_ws].layout, self.workspaces[self.active_ws].split);
-                                    if px >= x && px < x + w && py >= y && py < y + h {
-                                        if let Some(wl) = xs.wl_surface() {
-                                            self.workspaces[self.active_ws].focus = Some(wl.clone());
-                                            let kbd = self.kbd.clone();
-                                            let serial = SERIAL_COUNTER.next_serial();
-                                            kbd.set_focus(self, Some(wl), serial);
-                                        }
-                                        break;
+                                    let surf = match slot {
+                                        WindowSlot::Wl(idx) => self.workspaces[self.active_ws].tops.get(*idx).map(|tl| tl.wl_surface().clone()),
+                                        WindowSlot::X11(idx) => self.workspaces[self.active_ws].x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()),
+                                    };
+                                    if let Some(surf) = surf {
+                                        self.workspaces[self.active_ws].focus = Some(surf.clone());
+                                        let kbd = self.kbd.clone();
+                                        let serial = SERIAL_COUNTER.next_serial();
+                                        kbd.set_focus(self, Some(surf), serial);
                                     }
+                                    break;
                                 }
                             }
                         }
@@ -1078,6 +1207,7 @@ impl XdgShellHandler for App {
             if !app_id.is_empty() && !is_clipboard {
                 info!("✅ pending → tiling (app_id='{}')", app_id);
                 self.workspaces[self.active_ws].tops.push(surface);
+                self.workspaces[self.active_ws].rebuild_order();
                 if let Some(new_split) = self.workspaces[self.active_ws].pending_split.take() {
                     self.workspaces[self.active_ws].split = new_split;
                 }
@@ -1260,7 +1390,19 @@ impl ShmHandler for App { fn shm_state(&self) -> &ShmState { &self.shm } }
 impl SeatHandler for App {
     type KeyboardFocus = WlSurface; type PointerFocus = WlSurface; type TouchFocus = WlSurface;
     fn seat_state(&mut self) -> &mut SeatState<Self> { &mut self.seat_state }
-    fn focus_changed(&mut self, _: &Seat<Self>, surface: Option<&WlSurface>) {
+    fn focus_changed(&mut self, seat: &Seat<Self>, surface: Option<&WlSurface>) {
+        let dh = self.dh.clone();
+        let client = surface.and_then(|s| s.client());
+
+        // Update data device (clipboard) focus — sends selection offer to new focus client
+        smithay::wayland::selection::data_device::set_data_device_focus::<App>(
+            &dh, seat, client.clone(),
+        );
+        // Update primary selection focus
+        smithay::wayland::selection::primary_selection::set_primary_focus::<App>(
+            &dh, seat, client,
+        );
+
         // Deactivate all X11 surfaces first
         for ws in &self.workspaces {
             for xs in &ws.x11_surfaces {
@@ -1808,38 +1950,43 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     } else { 0 }
                                 } else { 0 };
 
-                                for (i, tl) in ws.tops.iter().enumerate() {
+                                // Unified window rendering using effective_order
+                                let order = ws.effective_order();
+                                for (i, slot) in order.iter().enumerate() {
                                     let (x, y, _w, _h) = layout::slot(i, n_total, ow, oh, bar_h, &state.cfg, state.workspaces[state.active_ws].layout, state.workspaces[state.active_ws].split);
-                                    let tl_geo = smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
-                                        states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
-                                    }).unwrap_or_default();
-                                    let tl_render_pos = Point::<i32, Physical>::from((x + ws_offset, y));
-                                    win_elems.push(
-                                        render_elements_from_surface_tree(&mut renderer, tl.wl_surface(), tl_render_pos, 1.0, 1.0, Kind::Unspecified)
-                                    );
-                                    // Collect XDG popups for this window
-                                    let mut p_elems = Vec::new();
-                                    for (popup, popup_offset) in PopupManager::popups_for_surface(tl.wl_surface()) {
-                                        let offset = (tl_geo.loc + popup_offset - popup.geometry().loc)
-                                            .to_physical_precise_round(1.0);
-                                        let pos = tl_render_pos + offset;
-                                        p_elems.extend(
-                                            render_elements_from_surface_tree(&mut renderer, popup.wl_surface(), pos, 1.0, 1.0, Kind::Unspecified)
-                                        );
-                                    }
-                                    popup_elems.push(p_elems);
-                                }
-
-                                // X11 surfaces — render after native Wayland windows
-                                for (xi, xs) in state.workspaces[state.active_ws].x11_surfaces.iter().enumerate() {
-                                    let global_i = n_windows + xi;
-                                    let (x, y, _w, _h) = layout::slot(global_i, n_total, ow, oh, bar_h, &state.cfg, state.workspaces[state.active_ws].layout, state.workspaces[state.active_ws].split);
-                                    if let Some(wl) = xs.wl_surface() {
-                                        let render_pos = Point::<i32, Physical>::from((x + ws_offset, y));
-                                        win_elems.push(
-                                            render_elements_from_surface_tree(&mut renderer, &wl, render_pos, 1.0, 1.0, Kind::Unspecified)
-                                        );
-                                        popup_elems.push(Vec::new());
+                                    match slot {
+                                        WindowSlot::Wl(idx) => {
+                                            if let Some(tl) = ws.tops.get(*idx) {
+                                                let tl_geo = smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
+                                                    states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
+                                                }).unwrap_or_default();
+                                                let tl_render_pos = Point::<i32, Physical>::from((x + ws_offset, y));
+                                                win_elems.push(
+                                                    render_elements_from_surface_tree(&mut renderer, tl.wl_surface(), tl_render_pos, 1.0, 1.0, Kind::Unspecified)
+                                                );
+                                                let mut p_elems = Vec::new();
+                                                for (popup, popup_offset) in PopupManager::popups_for_surface(tl.wl_surface()) {
+                                                    let offset = (tl_geo.loc + popup_offset - popup.geometry().loc)
+                                                        .to_physical_precise_round(1.0);
+                                                    let pos = tl_render_pos + offset;
+                                                    p_elems.extend(
+                                                        render_elements_from_surface_tree(&mut renderer, popup.wl_surface(), pos, 1.0, 1.0, Kind::Unspecified)
+                                                    );
+                                                }
+                                                popup_elems.push(p_elems);
+                                            }
+                                        }
+                                        WindowSlot::X11(idx) => {
+                                            if let Some(xs) = ws.x11_surfaces.get(*idx) {
+                                                if let Some(wl) = xs.wl_surface() {
+                                                    let render_pos = Point::<i32, Physical>::from((x + ws_offset, y));
+                                                    win_elems.push(
+                                                        render_elements_from_surface_tree(&mut renderer, &wl, render_pos, 1.0, 1.0, Kind::Unspecified)
+                                                    );
+                                                    popup_elems.push(Vec::new());
+                                                }
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -1942,18 +2089,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         // Step 3: Window decorations
                         if is_primary && fullscreen.is_none() {
-                            // Wayland toplevels
-                            for (i, _) in ws.tops.iter().enumerate() {
+                            let order = ws.effective_order();
+                            for (i, _) in order.iter().enumerate() {
                                 layout::render_window_decorations_anim(
                                     &mut f, &state.cfg, i, n_total, focus_idx,
-                                    ow, oh, bar_h, state.workspaces[state.active_ws].layout, state.workspaces[state.active_ws].split, ws_offset
-                                );
-                            }
-                            // X11 surfaces
-                            for (xi, _) in ws.x11_surfaces.iter().enumerate() {
-                                let global_i = n_windows + xi;
-                                layout::render_window_decorations_anim(
-                                    &mut f, &state.cfg, global_i, n_total, focus_idx,
                                     ow, oh, bar_h, state.workspaces[state.active_ws].layout, state.workspaces[state.active_ws].split, ws_offset
                                 );
                             }
@@ -2139,6 +2278,7 @@ impl smithay::xwayland::XwmHandler for App {
         let is_new = !ws.x11_surfaces.iter().any(|s| s.window_id() == wid);
         if is_new {
             ws.x11_surfaces.push(window.clone());
+            ws.rebuild_order();
         }
 
         // Focus the new X11 window
