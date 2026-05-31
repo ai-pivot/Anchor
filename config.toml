@@ -30,7 +30,7 @@ show_cpu = true
 show_memory = true
 
 [wallpaper]
-mode = "gradient"
+mode = "image"
 color = "#0a0a14"
 path = ""
 directory = ""
