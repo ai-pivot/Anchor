@@ -95,7 +95,12 @@ fn draw_7seg_string(f: &mut impl Frame, text: &str, x: i32, y: i32,
                 draw_colon(f, cx, y, dh, t, color);
                 cx += colon_w + gap;
             }
-            ' ' => { cx += dw / 2; }
+            '/' => {
+                // 用小矩形拼斜杠
+                f.clear(color, &[rect(cx + 1, y, t, t)]).ok();
+                f.clear(color, &[rect(cx, y + dh / 2 - t, t, t)]).ok();
+                cx += t + gap;
+            }
             _ => { cx += gap; }
         }
     }
@@ -105,11 +110,13 @@ fn draw_7seg_string(f: &mut impl Frame, text: &str, x: i32, y: i32,
 /// 计算 7-segment 字符串宽度
 fn seg_text_width(text: &str, dw: i32, gap: i32) -> i32 {
     let colon_w = gap + 2;
+    let slash_w = gap + 2;
     let mut w = 0;
     for ch in text.chars() {
         match ch {
             '0'..='9' => w += dw + gap,
             ':' => w += colon_w + gap,
+            '/' => w += slash_w + gap,
             ' ' => w += dw / 2,
             _ => w += gap,
         }
@@ -395,7 +402,7 @@ pub fn render_headbar(
     if cfg.bar.show_date {
         let month = (tm.tm_mon + 1) as u8;
         let day = tm.tm_mday as u8;
-        let date_str = format!("{:02}:{:02}", month, day);
+        let date_str = format!("{:02}/{:02}", month, day);
         let dw2 = seg_text_width(&date_str, dw, dg);
         draw_7seg_string(f, &date_str, rx - dw2, ty, dw, dh, dt, dg,
             opaque(fg.0 * 0.4, fg.1 * 0.4, fg.2 * 0.4));
