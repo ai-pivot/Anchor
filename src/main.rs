@@ -4,7 +4,9 @@
 
 mod config;
 mod layout;
+use layout::LayoutPreset;
 mod font;
+mod text_render;
 mod block_linear;
 mod wallpaper;
 
@@ -72,11 +74,12 @@ struct Workspace {
     tops: Vec<ToplevelSurface>,
     focus: Option<WlSurface>,
     fullscreen: Option<usize>,
+    layout: LayoutPreset,
 }
 
 impl Workspace {
     fn new() -> Self {
-        Self { tops: Vec::new(), focus: None, fullscreen: None }
+        Self { tops: Vec::new(), focus: None, fullscreen: None, layout: LayoutPreset::default() }
     }
 }
 
@@ -164,7 +167,7 @@ impl App {
             }
         } else {
             for (i, tl) in self.workspaces[ws_idx].tops.iter().enumerate() {
-                let (_x, _y, w, h) = layout::slot(i, n, osize_w, osize_h, bar_h, &self.cfg);
+                let (_x, _y, w, h) = layout::slot(i, n, osize_w, osize_h, bar_h, &self.cfg, self.workspaces[self.active_ws].layout);
                 tl.with_pending_state(|st| {
                     st.states.set(xdg_toplevel::State::Activated);
                     st.states.unset(xdg_toplevel::State::Fullscreen);
@@ -350,6 +353,12 @@ impl App {
                                     return FilterResult::Intercept(());
                                 }
                                 Keysym::f => { data.toggle_fullscreen(); return FilterResult::Intercept(()); }
+                                Keysym::space => {
+                                    let ws = &mut data.workspaces[data.active_ws];
+                                    ws.layout = ws.layout.next();
+                                    info!("🔄 布局切换 → {}", ws.layout.name());
+                                    return FilterResult::Intercept(());
+                                }
                                 // Super+1-9：切换工作区
                                 Keysym::_1 => { data.switch_workspace(0); return FilterResult::Intercept(()); }
                                 Keysym::_2 => { data.switch_workspace(1); return FilterResult::Intercept(()); }
@@ -422,7 +431,7 @@ impl App {
                     if py < bar_h { return; }
                     let ws = &self.workspaces[self.active_ws];
                     for (i, tl) in ws.tops.iter().enumerate() {
-                        let (x, y, w, h) = layout::slot(i, ws.tops.len(), self.osize.w, self.osize.h, bar_h, &self.cfg);
+                        let (x, y, w, h) = layout::slot(i, ws.tops.len(), self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout);
                         if px >= x && px < x + w && py >= y && py < y + h {
                             let surf = tl.wl_surface().clone();
                             self.workspaces[self.active_ws].focus = Some(surf.clone());
@@ -532,8 +541,6 @@ fn send_frames(s: &WlSurface, t: u32) {
         |_,st,&()| { for cb in st.cached_state.get::<SurfaceAttributes>().current().frame_callbacks.drain(..) { cb.done(t); } },
         |_,_,&()| true);
 }
-
-// ── main ─────────────────────────────────────────────────
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt().with_env_filter("info,smithay=warn").init();
@@ -877,7 +884,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             } else {
                                 for (i, tl) in ws.tops.iter().enumerate() {
-                                    let (x, y, _w, _h) = layout::slot(i, n_windows, ow, oh, bar_h, &state.cfg);
+                                    let (x, y, _w, _h) = layout::slot(i, n_windows, ow, oh, bar_h, &state.cfg, state.workspaces[state.active_ws].layout);
                                     for elem in render_elements_from_surface_tree(&mut renderer, tl.wl_surface(), (x, y), 1.0, 1.0, Kind::Unspecified) {
                                         elems.push(elem);
                                     }
@@ -895,13 +902,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         // 窗口暗色背景（在壁纸之上、窗口内容之下）
                         if Some(out.crtc) == primary_crtc && fullscreen.is_none() {
-                            layout::render_window_bg(&mut f, &state.cfg, n_windows, ow, oh, bar_h);
+                            layout::render_window_bg(&mut f, &state.cfg, n_windows, ow, oh, bar_h, state.workspaces[state.active_ws].layout);
                         }
                         draw_render_elements(&mut f, 1.0, &elems, &[dmg])?;
 
                         if Some(out.crtc) == primary_crtc && fullscreen.is_none() {
                             for (i, _) in ws.tops.iter().enumerate() {
-                                layout::render_window_decorations(&mut f, &state.cfg, i, n_windows, focus_idx, ow, oh, bar_h);
+                                layout::render_window_decorations(&mut f, &state.cfg, i, n_windows, focus_idx, ow, oh, bar_h, state.workspaces[state.active_ws].layout);
                             }
                         }
 

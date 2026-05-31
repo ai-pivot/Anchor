@@ -32,6 +32,7 @@ xkbcommon = "0.8"
 libinput_crate = { package = "input", version = "0.9" }
 winit = { version = "0.30", optional = true }
 libc = "0.2"
+fontdue = "0.9"
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 chrono = "0.4"

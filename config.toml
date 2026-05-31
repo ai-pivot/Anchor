@@ -15,7 +15,7 @@ bar_separator = "#414868"
 
 [bar]
 enabled = true
-height = 42
+height = 48
 font_size = 14
 workspace_radius = 4
 workspace_spacing = 8
