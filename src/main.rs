@@ -533,6 +533,30 @@ fn send_frames(s: &WlSurface, t: u32) {
         |_,_,&()| true);
 }
 
+/// 从 sysfs EDID 解析首选分辨率（用于 NVIDIA DRM 不报告 modes 的情况）
+fn parse_edid_resolution(conn_name: &str) -> Option<(u32, u32)> {
+    for card in 0..4u8 {
+        let path = format!("/sys/class/drm/card{}-{}/edid", card, conn_name);
+        if let Ok(data) = std::fs::read(&path) {
+            if data.len() < 54 { continue; }
+            // EDID DTD (Detailed Timing Descriptor): bytes 54..72
+            for offset in (54..min(data.len(), 126)).step_by(18) {
+                let dtd = &data[offset..offset + 18];
+                // 跳过 monitor descriptor (pixel clock == 0)
+                if dtd[0] == 0 && dtd[1] == 0 { continue; }
+                let w = dtd[2] as u32 + ((dtd[4] as u32 >> 4) << 8);
+                let h = dtd[5] as u32 + ((dtd[7] as u32 >> 4) << 8);
+                if w >= 640 && h >= 480 {
+                    return Some((w, h));
+                }
+            }
+        }
+    }
+    None
+}
+
+use std::cmp::min;
+
 // ── main ─────────────────────────────────────────────────
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -603,11 +627,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for f in [false, true] {
             if let Ok(info) = device.get_connector(c, f) {
                 if info.state() != connector::State::Connected { continue; }
-                if info.modes().is_empty() {
-                    info!("⚠️  Connector {:?} Connected 但 0 modes (NVIDIA)", c);
-                    continue;
-                }
-                let mode = info.modes().first().copied().unwrap();
+                let mode = if let Some(m) = info.modes().first().copied() {
+                    m
+                } else {
+                    // NVIDIA DRM 通过 ioctl 报告 0 modes，从 EDID 构造 fallback
+                    let conn_name = format!("{:?}", c).to_lowercase().replace(' ', "-");
+                    let (fw, fh) = parse_edid_resolution(&conn_name).unwrap_or((2560, 1440));
+                    info!("⚠️  Connector {:?} 0 modes, EDID fallback: {}x{}", c, fw, fh);
+                    let raw = drm_sys::drm_mode_modeinfo {
+                        clock: ((fw as u32 * fh as u32 * 60 + 4999) / 10000),
+                        hdisplay: fw as u16, hsync_start: fw as u16 + 48, hsync_end: fw as u16 + 80, htotal: fw as u16 + 112, hskew: 0,
+                        vdisplay: fh as u16, vsync_start: fh as u16 + 3, vsync_end: fh as u16 + 5, vtotal: fh as u16 + 10, vscan: 0,
+                        vrefresh: 60,
+                        flags: 0x5, // DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_PVSYNC
+                        type_: 0x40, // DRM_MODE_TYPE_DRIVER
+                        name: {
+                            let mut n = [0i8; 32];
+                            let s = format!("{}x{}", fw, fh);
+                            for (i, b) in s.bytes().enumerate() {
+                                if i >= 32 { break; }
+                                n[i] = b as i8;
+                            }
+                            n
+                        },
+                    };
+                    use smithay::reexports::drm::control::Mode;
+                    Mode::from(raw)
+                };
                 let (mw, mh) = mode.size();
 
                 let mut found_crtc = None;
@@ -633,45 +679,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 });
                 break;
             }
-        }
-    }
-    // NVIDIA DRM 在 GDM restart 后可能暂时报告 0 modes，重试
-    if connector_infos.is_empty() {
-        info!("⏳ 等待 connector modes 就绪...");
-        for retry in 0..5 {
-            std::thread::sleep(Duration::from_secs(2));
-            info!("⏳ 重试 #{}...", retry + 1);
-            for &c in res.connectors() {
-                for f in [false, true] {
-                    if let Ok(info) = device.get_connector(c, f) {
-                        if info.state() != connector::State::Connected { continue; }
-                        if info.modes().is_empty() { continue; }
-                        let mode = info.modes().first().copied().unwrap();
-                        let (mw, mh) = mode.size();
-                        let mut found_crtc = None;
-                        for &enc in info.encoders() {
-                            if let Ok(enc_info) = device.get_encoder(enc) {
-                                for possible_crtc in res.filter_crtcs(enc_info.possible_crtcs()) {
-                                    if !used_crtcs.contains(&possible_crtc) {
-                                        found_crtc = Some(possible_crtc);
-                                        break;
-                                    }
-                                }
-                            }
-                            if found_crtc.is_some() { break; }
-                        }
-                        let Some(crtc_h) = found_crtc else { continue };
-                        used_crtcs.insert(crtc_h);
-                        let conn_name = format!("{:?}", c);
-                        info!("🖥️  Connector {} (CRTC {:?}): {}x{}", conn_name, crtc_h, mw, mh);
-                        connector_infos.push(ConnectorInfo {
-                            connector: c, crtc: crtc_h, mode, name: conn_name,
-                        });
-                        break;
-                    }
-                }
-            }
-            if !connector_infos.is_empty() { break; }
         }
     }
     if connector_infos.is_empty() { return Err("无可用显示器".into()); }
