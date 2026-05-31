@@ -120,7 +120,7 @@ impl Default for LayoutPreset {
 #[inline(always)]
 pub fn opaque(r: f32, g: f32, b: f32) -> Color32F { Color32F::new(r, g, b, 1.0) }
 #[inline(always)]
-fn color_hex(hex: &str) -> Color32F {
+pub fn color_hex(hex: &str) -> Color32F {
     let (r, g, b) = parse_color(hex);
     opaque(r, g, b)
 }
