@@ -184,10 +184,28 @@ impl XWaylandState {
 
     /// Handle `configure_request`. Acknowledges with current or default geometry.
     /// Does NOT change tiled layout — do_layout() controls positions.
-    pub fn on_configure_request(&self, window: &X11Surface, w: Option<u32>, h: Option<u32>) {
+    /// For OR windows (input method popups), accepts the client's requested position.
+    pub fn on_configure_request(&self, window: &X11Surface, x: Option<i32>, y: Option<i32>, w: Option<u32>, h: Option<u32>) {
+        // Check if this is an override-redirect window
+        let is_or = self.or_surfaces.iter().any(|s| s.window_id() == window.window_id());
+        
         if window.wl_surface().is_some() {
-            let geo = window.geometry();
-            let _ = window.configure(Some(geo));
+            if is_or {
+                // OR windows: accept client's requested position and size
+                let cur_geo = window.geometry();
+                let new_x = x.unwrap_or(cur_geo.loc.x);
+                let new_y = y.unwrap_or(cur_geo.loc.y);
+                let new_w = w.map(|v| v as i32).unwrap_or(cur_geo.size.w);
+                let new_h = h.map(|v| v as i32).unwrap_or(cur_geo.size.h);
+                let _ = window.configure(Some(Rectangle::from_loc_and_size(
+                    (new_x, new_y),
+                    (new_w, new_h),
+                )));
+            } else {
+                // Tiled windows: compositor controls position, just ack with current geometry
+                let geo = window.geometry();
+                let _ = window.configure(Some(geo));
+            }
         } else {
             let sw = w.unwrap_or(800) as i32;
             let sh = h.unwrap_or(600) as i32;

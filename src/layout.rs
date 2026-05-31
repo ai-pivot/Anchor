@@ -406,14 +406,14 @@ pub fn render_headbar(
 
     let mut x = S4;
 
-    // ── TITAN logo（正常文字）──
-    let logo_w = text_render::text_width("TITAN", LOGO_SIZE);
+    // ── ANCHOR logo（正常文字）──
+    let logo_w = text_render::text_width("ANCHOR", LOGO_SIZE);
     let logo_y = h / 2 - LOGO_SIZE as i32 / 2 - 2;
     f.clear(opaque(accent.0 * 0.12, accent.1 * 0.12, accent.2 * 0.12),
         &[rect(x - S1, S2, logo_w + S2 + S1, h - S4)]).ok();
     f.clear(opaque(accent.0 * 0.5, accent.1 * 0.5, accent.2 * 0.5),
         &[rect(x - S1, S2, 2, h - S4)]).ok();
-    text_render::draw_text(f, "TITAN", x + 2, logo_y, LOGO_SIZE, accent);
+    text_render::draw_text(f, "ANCHOR", x + 2, logo_y, LOGO_SIZE, accent);
     x += logo_w + S4 + S2;
 
     // 分隔线

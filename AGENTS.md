@@ -51,8 +51,10 @@ Cargo.toml        — Dependencies (fontdue, smithay, pixman, etc.)
 ```
 Step 1: Wallpaper (gradient/solid)
 Step 2: Window content (all elements, single draw call)
+Step 2.5: IM popup (Wayland input method)
 Step 3: Window decorations (border lines)
 Step 4: Scratchpad overlay (opaque background + border + content)
+Step 4.5: X11 override-redirect windows (input method popups, tooltips)
 Step 5: Headbar (workspace indicators, clock, date, CPU/MEM)
 Step 6: Notifications (toast overlay)
 Step 7: App launcher (search + list)
@@ -189,3 +191,12 @@ For SDDM: Create `/usr/share/wayland-sessions/anchor.desktop` with same content.
 10. **XWayland `DISPLAY` must be passed to child processes.** `std::env::set_var`
     works but `/proc/PID/environ` won't show it. Also pass via `cmd.env("DISPLAY", ...)`
     in launcher/terminal spawns for reliability.
+11. **X11 OR windows: `mapped_override_redirect_window` must re-add to `or_surfaces`.**
+    fcitx5 reuses the same X11 window — unmapped removes it, next map won't trigger
+    `new_override_redirect_window`. Without re-adding, the popup disappears permanently.
+12. **X11 OR `configure_request` must accept client position (x, y).** OR windows
+    (input method popups) control their own position. Ignoring x/y causes fcitx5
+    candidate box to snap back to wrong position.
+13. **TTC fonts need `collection_index: 0` in `FontSettings`.** fontdue supports TTC
+    (TrueType Collection) but requires explicit `collection_index`. NotoSansCJK is TTC.
+    Also set `load_substitutions: false` (required field in fontdue 0.9.3).

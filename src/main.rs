@@ -2128,11 +2128,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
 
-                        // Step 3.5: X11 override-redirect windows (input method popups, tooltips)
-                        if !or_elems.is_empty() {
-                            draw_render_elements(&mut f, 1.0, &or_elems, &[dmg])?;
-                        }
-
                         // Step 4: Scratchpad — background FIRST, then surface ON TOP
                         if let Some((sp_x, sp_y, sp_w, sp_h)) = scratchpad_data {
                             let bw = 4;
@@ -2150,6 +2145,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             crate::text_render::draw_text(&mut f, "SCRATCHPAD", sp_x + 6, sp_y - 22, 14.0, accent);
                             // Scratchpad terminal content — rendered AFTER background
                             draw_render_elements(&mut f, 1.0, &sp_elems, &[dmg])?;
+                        }
+
+                        // Step 4.5: X11 override-redirect windows (input method popups, tooltips)
+                        // Must render on top of window content but below headbar
+                        if !or_elems.is_empty() {
+                            draw_render_elements(&mut f, 1.0, &or_elems, &[dmg])?;
                         }
 
                         // Step 5: Headbar
@@ -2234,7 +2235,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let text = if n.body.is_empty() {
                         format!("[{}] {}", n.app_name, n.summary)
                     } else {
-                        format!("[{}] {}", n.app_name, n.summary)
+                        format!("[{}] {} {}", n.app_name, n.summary, n.body)
                     };
                     state.notify(text);
                 }
@@ -2335,6 +2336,11 @@ impl smithay::xwayland::XwmHandler for App {
 
     fn mapped_override_redirect_window(&mut self, _xwm: smithay::xwayland::xwm::XwmId, window: smithay::xwayland::X11Surface) {
         tracing::info!("🗺️  X11 OR mapped: class='{}'", window.class());
+        // Re-add in case it was removed by unmapped_window (fcitx5 reuses the same X11 window)
+        let wid = window.window_id();
+        if !self.xw.or_surfaces.iter().any(|s| s.window_id() == wid) {
+            self.xw.or_surfaces.push(window);
+        }
         self.dirty = true;
     }
 
@@ -2394,13 +2400,13 @@ impl smithay::xwayland::XwmHandler for App {
         &mut self,
         _xwm: smithay::xwayland::xwm::XwmId,
         window: smithay::xwayland::X11Surface,
-        _x: Option<i32>,
-        _y: Option<i32>,
+        x: Option<i32>,
+        y: Option<i32>,
         w: Option<u32>,
         h: Option<u32>,
         _reorder: Option<smithay::xwayland::xwm::Reorder>,
     ) {
-        self.xw.on_configure_request(&window, w, h);
+        self.xw.on_configure_request(&window, x, y, w, h);
     }
 
     fn configure_notify(
