@@ -824,7 +824,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             state.workspaces[state.active_ws].tops.retain(|tl| tl.alive());
             let bar_h = if state.cfg.bar.enabled { state.cfg.bar.height } else { 0 };
             let focus_idx = state.focus_idx();
-            let time_secs = start.elapsed().as_secs();
+            let time_secs = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
             let window_title = state.window_titles.get(&focus_idx.unwrap_or(0))
                 .cloned().unwrap_or_default();
             let primary_crtc = titan_outputs.first().map(|o| o.crtc);
@@ -907,14 +908,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let ws_counts: Vec<usize> = state.workspaces.iter().map(|w| w.tops.len()).collect();
                         layout::render_headbar(&mut f, &state.cfg, ow, oh, n_windows, focus_idx, time_secs, &window_title, state.active_ws, NUM_WORKSPACES, &ws_counts);
 
-                        // 光标
+                        // 光标（粗实心三角形，不受 block-linear 影响）
                         if Some(out.crtc) == primary_crtc {
                             let cx = state.pointer_pos.0 as i32;
                             let cy = state.pointer_pos.1 as i32;
-                            let cc = Color32F::new(1.0, 1.0, 1.0, 0.9);
-                            let _ = f.clear(cc, &[Rectangle::new(Point::new(cx, cy), Size::new(2, 18))]);
-                            let _ = f.clear(cc, &[Rectangle::new(Point::new(cx + 1, cy + 2), Size::new(1, 1))]);
-                            let _ = f.clear(cc, &[Rectangle::new(Point::new(cx + 2, cy + 4), Size::new(1, 1))]);
+                            let cc = Color32F::new(1.0, 1.0, 1.0, 1.0);
+                            // 主三角形：宽 16px，高 22px
+                            // 竖线（左边）
+                            let _ = f.clear(cc, &[Rectangle::new(Point::new(cx, cy), Size::new(4, 22))]);
+                            // 横线段（逐行向右扩展形成三角形）
+                            let _ = f.clear(cc, &[Rectangle::new(Point::new(cx + 4, cy + 4), Size::new(4, 4))]);
+                            let _ = f.clear(cc, &[Rectangle::new(Point::new(cx + 8, cy + 8), Size::new(4, 4))]);
+                            let _ = f.clear(cc, &[Rectangle::new(Point::new(cx + 10, cy + 12), Size::new(4, 4))]);
+                            let _ = f.clear(cc, &[Rectangle::new(Point::new(cx + 8, cy + 14), Size::new(4, 4))]);
+                            let _ = f.clear(cc, &[Rectangle::new(Point::new(cx + 4, cy + 16), Size::new(4, 4))]);
+                            // 黑色边框（对比度）
+                            let bc = Color32F::new(0.0, 0.0, 0.0, 1.0);
+                            let _ = f.clear(bc, &[Rectangle::new(Point::new(cx - 1, cy), Size::new(1, 23))]);
+                            let _ = f.clear(bc, &[Rectangle::new(Point::new(cx, cy - 1), Size::new(5, 1))]);
                         }
 
                         let _ = f.finish()?;
