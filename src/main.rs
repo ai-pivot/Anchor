@@ -557,11 +557,12 @@ impl App {
     /// 将 PNG 图片数据设到 Wayland 剪贴板（image/png）
     fn set_clipboard_png(&mut self, png_data: Vec<u8>) {
         use smithay::wayland::selection::data_device::set_data_device_selection;
+        tracing::info!("📋 设置截图剪贴板: {} bytes", png_data.len());
         let user_data: Arc<[u8]> = Arc::from(png_data);
         set_data_device_selection::<App>(
             &self.dh,
             &self.seat,
-            vec!["image/png".into(), "text/uri-list".into()],
+            vec!["image/png".into()],
             user_data,
         );
         tracing::info!("📋 Screenshot copied to Wayland clipboard");
@@ -1587,6 +1588,7 @@ impl SelectionHandler for App {
         _seat: Seat<Self>,
         user_data: &Self::SelectionUserData,
     ) {
+        tracing::info!("📋 send_selection: ty={:?}, mime={}, data_len={}", ty, mime_type, user_data.len());
         // X11 代理选区标记：user_data 以 "X11_PROXY" 开头（10 bytes magic）
         // 这不可能是正常剪贴板内容
         const X11_PROXY_MAGIC: &[u8] = b"X11_PROXY\x00";
