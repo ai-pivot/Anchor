@@ -150,10 +150,6 @@ struct App {
     layout_anim: LayoutAnimation,
     /// 上一次 layout_workspace 的 slot 位置（动画起点，在每次 layout 后更新）
     prev_positions: Vec<(crate::workspace::WindowSlot, (i32, i32))>,
-    /// 毛玻璃模糊纹理缓存
-    launcher_blur_tex: Option<smithay::backend::renderer::gles::GlesTexture>,
-    /// 毛玻璃纹理尺寸
-    launcher_blur_size: (u32, u32),
     // 屏幕录制
     record_state: record::RecordState,
     // 多显示器尺寸信息（用于鼠标穿越）
@@ -2067,8 +2063,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ws_anim: WsAnimation { start: None, from_ws: 0, to_ws: 0, duration_ms: 200, direction: 0 },
         layout_anim: LayoutAnimation::new(),
         prev_positions: Vec::new(),
-        launcher_blur_tex: None,
-        launcher_blur_size: (1, 1),
         record_state: record::RecordState::new(),
         output_sizes: vec![],
         output_active_ws: vec![],
@@ -2776,24 +2770,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             layout::render_notifications(&mut f, &notif_data, ow, state.cfg.bar.height, accent);
                         }
 
-                        // Step 7: Launcher — 面板外毛玻璃 + 面板 UI
+                        // Step 7: Launcher — 面板外透明（桌面可见）+ 面板本体深色背景
                         if is_focused_output && state.launcher.visible {
-                            // 面板外区域：毛玻璃模糊（有纹理时才渲染，第一帧直接透出桌面）
-                            if let Some(ref blur_tex) = state.launcher_blur_tex {
-                                let _ = f.render_texture_from_to(
-                                    blur_tex,
-                                    Rectangle::from_size(Size::from((state.launcher_blur_size.0 as f64, state.launcher_blur_size.1 as f64))),
-                                    Rectangle::from_size((ow, oh).into()),
-                                    &[Rectangle::from_size((ow, oh).into())],
-                                    &[Rectangle::from_size((ow, oh).into())],
-                                    Transform::Normal,
-                                    1.0,
-                                    None,
-                                    &[],
-                                );
-                            }
-                            // 第一帧无纹理时不做任何覆盖 → 桌面直接透过来（自然）
-
                             // 面板本体: 深色纯色背景（文字可读）
                             let filtered = state.launcher.filtered();
                             let lw = ow * 3 / 4;
@@ -2828,61 +2806,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         let sync = f.finish()?;
                         // drop f 释放对 target 的借用
-
-                        // Step 9.5: 毛玻璃模糊纹理（launcher 可见时，每 5 帧更新）
-                        if is_focused_output && state.launcher.visible {
-                            let do_update = state.launcher_blur_tex.is_none() || state.frame % 5 == 0;
-                            if do_update {
-                                // 读取整个 output 的像素
-                                let blur_scale = 12u32;
-                                let small_w = (ow as u32 / blur_scale).max(1);
-                                let small_h = (oh as u32 / blur_scale).max(1);
-                                let region = Rectangle::from_size((ow, oh).into());
-                                if let Ok(mapping) = renderer.copy_framebuffer(&target, region, Fourcc::Abgr8888) {
-                                    if let Ok(pixels) = renderer.map_texture(&mapping) {
-                                        let full_w = (ow) as usize;
-                                        let full_h = (oh) as usize;
-                                        let mut blurred = vec![0u8; (small_w * small_h * 4) as usize];
-                                        for sy in 0..small_h {
-                                            for sx in 0..small_w {
-                                                let src_x = (sx * blur_scale) as usize;
-                                                let src_y = (sy * blur_scale) as usize;
-                                                let mut r = 0u32; let mut g = 0u32; let mut b = 0u32; let mut count = 0u32;
-                                                for dy in 0..blur_scale {
-                                                    for dx in 0..blur_scale {
-                                                        let px = (src_x + dx as usize).min(full_w.saturating_sub(1));
-                                                        let py = (src_y + dy as usize).min(full_h.saturating_sub(1));
-                                                        let idx = (py * full_w + px) * 4;
-                                                        if idx + 3 < pixels.len() {
-                                                            r += pixels[idx] as u32;
-                                                            g += pixels[idx+1] as u32;
-                                                            b += pixels[idx+2] as u32;
-                                                            count += 1;
-                                                        }
-                                                    }
-                                                }
-                                                if count > 0 {
-                                                    let di = ((sy * small_w + sx) * 4) as usize;
-                                                    blurred[di]   = (r / count * 6 / 10) as u8;
-                                                    blurred[di+1] = (g / count * 6 / 10) as u8;
-                                                    blurred[di+2] = (b / count * 6 / 10) as u8;
-                                                    blurred[di+3] = 255;
-                                                }
-                                            }
-                                        }
-                                        if let Ok(tex) = renderer.import_memory(
-                                            &blurred,
-                                            Fourcc::Abgr8888,
-                                            Size::new(small_w as i32, small_h as i32),
-                                            false,
-                                        ) {
-                                            state.launcher_blur_tex = Some(tex);
-                                            state.launcher_blur_size = (small_w, small_h);
-                                        }
-                                    }
-                                }
-                            }
-                        }
 
                         // Step 10: 执行待处理的截图请求（finish 后 framebuffer 完整，target 仍可用）
                         if is_focused_output {
@@ -2933,8 +2856,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
 
-                        // 屏幕录制帧捕获
-                        if state.record_state.recording && is_focused_output {
+                        // 屏幕录制帧捕获（每 6 帧采样一次 ≈ 10fps，降低 GPU→CPU 压力）
+                        if state.record_state.recording && is_focused_output && state.frame % 6 == 0 {
                             use smithay::backend::allocator::Fourcc;
                             use smithay::backend::renderer::Renderer;
                             let region = Rectangle::from_size((ow, oh).into());

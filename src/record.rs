@@ -1,9 +1,9 @@
-//! 内置屏幕录制 — copy_framebuffer → channel → 后台线程写入 ffmpeg pipe → MP4
+//! 内置屏幕录制 — copy_framebuffer → bounded channel → 后台线程写入 ffmpeg → MP4
 //! Super+R 开始/停止录制
 
 use std::io::Write;
-use std::process::{ChildStdin, Command};
-use std::sync::mpsc;
+use std::process::Command;
+use std::sync::mpsc::{self, SyncSender};
 use tracing::info;
 
 /// 屏幕录制状态
@@ -13,8 +13,8 @@ pub struct RecordState {
     width: u32,
     height: u32,
     fps: u32,
-    /// 帧数据发送通道
-    frame_tx: Option<mpsc::Sender<Vec<u8>>>,
+    /// 帧数据发送通道（容量 2）
+    frame_tx: Option<SyncSender<Vec<u8>>>,
 }
 
 impl RecordState {
@@ -23,7 +23,7 @@ impl RecordState {
             recording: false,
             width: 0,
             height: 0,
-            fps: 30,
+            fps: 10,
             frame_tx: None,
         }
     }
@@ -64,9 +64,9 @@ impl RecordState {
             None => { let _ = child.kill(); return; }
         };
 
-        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        // 容量 2 的同步通道
+        let (tx, rx): (SyncSender<Vec<u8>>, _) = mpsc::sync_channel(2);
 
-        // 后台线程：接收帧 → 写入 ffmpeg pipe → 编码完成
         let _ = std::thread::Builder::new()
             .name("anchor-recorder".into())
             .spawn(move || {
@@ -74,7 +74,7 @@ impl RecordState {
                 while let Ok(frame) = rx.recv() {
                     if pipe.write_all(&frame).is_err() { break; }
                 }
-                drop(pipe); // EOF → ffmpeg 完成编码
+                drop(pipe);
                 let _ = child.wait();
             });
 
@@ -85,22 +85,19 @@ impl RecordState {
         info!("🔴 开始录制 → {} ({}x{} @ {}fps)", output_path, width, height, self.fps);
     }
 
-    /// 发送一帧数据（非阻塞，通过 channel）
+    /// 写入一帧（非阻塞，channel 满就跳过）
     pub fn write_frame(&mut self, data: &[u8]) {
         if !self.recording { return; }
         if let Some(ref tx) = self.frame_tx {
-            if tx.send(data.to_vec()).is_err() {
-                self.recording = false;
-                self.frame_tx = None;
-            }
+            let _ = tx.try_send(data.to_vec());
         }
     }
 
-    /// 停止录制（非阻塞）
+    /// 停止录制
     pub fn stop(&mut self) {
         if !self.recording { return; }
         self.recording = false;
-        self.frame_tx = None; // drop tx → channel disconnect → writer thread exits
+        self.frame_tx = None;
         info!("⏹ 录制已停止");
     }
 }
