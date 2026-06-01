@@ -2285,7 +2285,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let tl_geo = smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
                                         states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
                                     }).unwrap_or_default();
-                                    let tl_render_pos = Point::<i32, Physical>::from((0, bar_h));
+                                    let tl_render_pos = Point::<i32, Physical>::from((-tl_geo.loc.x, bar_h - tl_geo.loc.y));
                                     win_elems.push(
                                         render_elements_from_surface_tree(&mut renderer, tl.wl_surface(), tl_render_pos, 1.0, 1.0, Kind::Unspecified)
                                     );
@@ -2322,7 +2322,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 let tl_geo = smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
                                                     states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
                                                 }).unwrap_or_default();
-                                                let tl_render_pos = Point::<i32, Physical>::from((x + ws_offset, y));
+                                                // 减去 geometry.loc 偏移（CSD 阴影/边框），使内容区精确对齐 slot
+                                                let bx = x - tl_geo.loc.x;
+                                                let by = y - tl_geo.loc.y;
+                                                let tl_render_pos = Point::<i32, Physical>::from((bx + ws_offset, by));
                                                 win_elems.push(
                                                     render_elements_from_surface_tree(&mut renderer, tl.wl_surface(), tl_render_pos, 1.0, 1.0, Kind::Unspecified)
                                                 );
