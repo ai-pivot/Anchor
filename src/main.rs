@@ -2780,13 +2780,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if is_focused_output && state.launcher.visible {
                             // 毛玻璃全屏覆盖（包括面板 + 外部区域）
                             if let Some(ref blur_tex) = state.launcher_blur_tex {
-                                // 全屏模糊背景
+                                // 全屏模糊背景（与壁纸相同的坐标方式）
                                 let _ = f.render_texture_from_to(
                                     blur_tex,
                                     Rectangle::from_size(Size::from((state.launcher_blur_size.0 as f64, state.launcher_blur_size.1 as f64))),
-                                    Rectangle::from_loc_and_size((0, bar_h), (ow, oh - bar_h)),
-                                    &[Rectangle::from_loc_and_size((0, bar_h), (ow, oh - bar_h))],
-                                    &[Rectangle::from_loc_and_size((0, bar_h), (ow, oh - bar_h))],
+                                    Rectangle::from_size((ow, oh).into()),
+                                    &[Rectangle::from_size((ow, oh).into())],
+                                    &[Rectangle::from_size((ow, oh).into())],
                                     Transform::Normal,
                                     1.0,
                                     None,
@@ -2795,7 +2795,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             } else {
                                 // 第一帧 fallback: 全屏深色覆盖
                                 f.clear(layout::opaque(0.06, 0.06, 0.10),
-                                    &[layout::rect(0, bar_h, ow, oh - bar_h)]).ok();
+                                    &[layout::rect(0, 0, ow, oh)]).ok();
                             }
 
                             // 面板本体: 深色半透明背景（比毛玻璃稍暗，文字可读）
@@ -2837,15 +2837,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if is_focused_output && state.launcher.visible {
                             let do_update = state.launcher_blur_tex.is_none() || state.frame % 5 == 0;
                             if do_update {
-                                // 读取整个 output 的像素（避免部分区域越界）
+                                // 读取整个 output 的像素
                                 let blur_scale = 12u32;
                                 let small_w = (ow as u32 / blur_scale).max(1);
-                                let small_h = ((oh - bar_h) as u32 / blur_scale).max(1);
-                                let region = Rectangle::from_loc_and_size((0, bar_h), (ow, oh - bar_h));
+                                let small_h = (oh as u32 / blur_scale).max(1);
+                                let region = Rectangle::from_size((ow, oh).into());
                                 if let Ok(mapping) = renderer.copy_framebuffer(&target, region, Fourcc::Abgr8888) {
                                     if let Ok(pixels) = renderer.map_texture(&mapping) {
                                         let full_w = (ow) as usize;
-                                        let full_h = (oh - bar_h) as usize;
+                                        let full_h = (oh) as usize;
                                         let mut blurred = vec![0u8; (small_w * small_h * 4) as usize];
                                         for sy in 0..small_h {
                                             for sx in 0..small_w {

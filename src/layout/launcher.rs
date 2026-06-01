@@ -23,20 +23,6 @@ pub fn render_launcher(
     let lx = (ow - lw) / 2;
     let ly = bar_h + 24;
 
-    // ── 微网格纹理 ──
-    let grid_step = 32;
-    let grid_color = opaque(accent.0 * 0.03, accent.1 * 0.03, accent.2 * 0.03);
-    let mut grid_rects: Vec<smithay::utils::Rectangle<i32, smithay::utils::Physical>> = Vec::new();
-    for gy in (ly..ly + lh).step_by(grid_step) {
-        grid_rects.push(rect(lx, gy, lw, 1));
-    }
-    for gx in (lx..lx + lw).step_by(grid_step) {
-        grid_rects.push(rect(gx, ly, 1, lh));
-    }
-    if !grid_rects.is_empty() {
-        f.clear(grid_color, &grid_rects).ok();
-    }
-
     // ── 发光边框 ──
     let glow_layers: [(i32, f32); 6] = [
         (6, 0.02), (5, 0.04), (4, 0.08), (3, 0.15), (2, 0.30), (1, 0.55),
