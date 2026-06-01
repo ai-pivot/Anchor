@@ -1062,19 +1062,21 @@ impl App {
                                 }
                                 _ => {}
                             }
-                            // Super+Shift+1-9：移动窗口到工作区
+                            // Super+Shift+1-9：移动窗口到工作区（用 raw_syms 避免 Shift 修饰键影响匹配）
                             if mods.shift {
-                                match keysym.modified_sym() {
-                                    Keysym::_1 => { data.move_window_to_workspace(0); return FilterResult::Intercept(()); }
-                                    Keysym::_2 => { data.move_window_to_workspace(1); return FilterResult::Intercept(()); }
-                                    Keysym::_3 => { data.move_window_to_workspace(2); return FilterResult::Intercept(()); }
-                                    Keysym::_4 => { data.move_window_to_workspace(3); return FilterResult::Intercept(()); }
-                                    Keysym::_5 => { data.move_window_to_workspace(4); return FilterResult::Intercept(()); }
-                                    Keysym::_6 => { data.move_window_to_workspace(5); return FilterResult::Intercept(()); }
-                                    Keysym::_7 => { data.move_window_to_workspace(6); return FilterResult::Intercept(()); }
-                                    Keysym::_8 => { data.move_window_to_workspace(7); return FilterResult::Intercept(()); }
-                                    Keysym::_9 => { data.move_window_to_workspace(8); return FilterResult::Intercept(()); }
-                                    _ => {}
+                                if let Some(raw) = keysym.raw_syms().first() {
+                                    match *raw {
+                                        Keysym::_1 => { data.move_window_to_workspace(0); return FilterResult::Intercept(()); }
+                                        Keysym::_2 => { data.move_window_to_workspace(1); return FilterResult::Intercept(()); }
+                                        Keysym::_3 => { data.move_window_to_workspace(2); return FilterResult::Intercept(()); }
+                                        Keysym::_4 => { data.move_window_to_workspace(3); return FilterResult::Intercept(()); }
+                                        Keysym::_5 => { data.move_window_to_workspace(4); return FilterResult::Intercept(()); }
+                                        Keysym::_6 => { data.move_window_to_workspace(5); return FilterResult::Intercept(()); }
+                                        Keysym::_7 => { data.move_window_to_workspace(6); return FilterResult::Intercept(()); }
+                                        Keysym::_8 => { data.move_window_to_workspace(7); return FilterResult::Intercept(()); }
+                                        Keysym::_9 => { data.move_window_to_workspace(8); return FilterResult::Intercept(()); }
+                                        _ => {}
+                                    }
                                 }
                             }
                         }
@@ -2727,38 +2729,32 @@ impl smithay::xwayland::XwmHandler for App {
         &mut self,
         _xwm: smithay::xwayland::xwm::XwmId,
         selection: smithay::wayland::selection::SelectionTarget,
-        _mime_types: Vec<String>,
+        mime_types: Vec<String>,
     ) {
-        // X11 客户端设置了新选区 → 通过 xclip + wl-copy 桥接到 Wayland 剪贴板
-        if selection == smithay::wayland::selection::SelectionTarget::Clipboard {
-            let display = self.xdisplay.map(|d| format!(":{}", d)).unwrap_or_else(|| ":0".into());
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(50));
-                let result = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(format!(
-                        "DISPLAY={} xclip -selection clipboard -t text/plain -o 2>/dev/null | wl-copy -t text/plain 2>/dev/null",
-                        display
-                    ))
-                    .output();
-                if let Ok(output) = result {
-                    if output.status.success() {
-                        tracing::info!("📋 X11→Wayland clipboard bridge OK");
-                    }
-                }
-            });
+        // X11 sets new selection -> XWM becomes owner, registers with Wayland data device
+        // Smithay auto-handles Wayland client paste requests via X11Wm
+        tracing::info!("X11 new selection: {:?} types={:?}", selection, mime_types);
+        if let Some(xwm) = self.xw.xwm.as_mut() {
+            if let Err(e) = xwm.new_selection(selection, Some(mime_types)) {
+                tracing::warn!("X11 new_selection failed: {:?}", e);
+            }
         }
     }
 
     fn cleared_selection(
         &mut self,
         _xwm: smithay::xwayland::xwm::XwmId,
-        _selection: smithay::wayland::selection::SelectionTarget,
+        selection: smithay::wayland::selection::SelectionTarget,
     ) {
-        // X11 选区被清除
+        tracing::info!("X11 selection cleared: {:?}", selection);
+        if let Some(xwm) = self.xw.xwm.as_mut() {
+            if let Err(e) = xwm.new_selection(selection, None) {
+                tracing::warn!("X11 clear_selection failed: {:?}", e);
+            }
+        }
     }
 
-    fn property_notify(
+        fn property_notify(
         &mut self,
         _xwm: smithay::xwayland::xwm::XwmId,
         window: smithay::xwayland::X11Surface,
