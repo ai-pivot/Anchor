@@ -149,6 +149,10 @@ struct App {
     layout_anim: LayoutAnimation,
     /// 上一次 layout_workspace 的 slot 位置（动画起点，在每次 layout 后更新）
     prev_positions: Vec<(crate::workspace::WindowSlot, (i32, i32))>,
+    /// 毛玻璃模糊纹理缓存
+    launcher_blur_tex: Option<smithay::backend::renderer::gles::GlesTexture>,
+    /// 毛玻璃纹理尺寸
+    launcher_blur_size: (u32, u32),
     // 多显示器尺寸信息（用于鼠标穿越）
     output_sizes: Vec<(i32, i32, i32, i32)>, // (x, y, w, h) per output
     /// 每个 output 当前活跃的工作区索引（独立切换）
@@ -513,6 +517,35 @@ impl App {
         self.layout_workspace(self.active_ws);
     }
 
+    /// 在 tops.remove/x11_surfaces.remove 之后重新映射 prev_positions
+    /// 因为 remove 导致索引移位: Wl(1) 变成 Wl(0), 但 prev_positions 还映射旧索引
+    fn remap_prev_after_remove(&mut self, removed: &WindowSlot) {
+        let removed_clone = removed.clone();
+        self.prev_positions.retain(|(slot, _)| {
+            match (slot, &removed_clone) {
+                (WindowSlot::Wl(a), WindowSlot::Wl(b)) => a != b,
+                (WindowSlot::X11(a), WindowSlot::X11(b)) => a != b,
+                _ => true,
+            }
+        });
+        match removed {
+            WindowSlot::Wl(removed_idx) => {
+                for (slot, _) in &mut self.prev_positions {
+                    if let WindowSlot::Wl(ref mut idx) = slot {
+                        if *idx > *removed_idx { *idx -= 1; }
+                    }
+                }
+            }
+            WindowSlot::X11(removed_idx) => {
+                for (slot, _) in &mut self.prev_positions {
+                    if let WindowSlot::X11(ref mut idx) = slot {
+                        if *idx > *removed_idx { *idx -= 1; }
+                    }
+                }
+            }
+        }
+    }
+
     /// 触发布局动画 + 重新布局
     fn do_layout_animated(&mut self) {
         // 保存动画起点（每个窗口的身份 + 位置）
@@ -788,6 +821,7 @@ impl App {
                     None => return,
                 };
                 self.workspaces[ws_idx].tops.remove(idx);
+                self.remap_prev_after_remove(&WindowSlot::Wl(idx));
                 self.workspaces[ws_idx].rebuild_order();
                 self.workspaces[ws_idx].fullscreen = None;
                 self.workspaces[ws_idx].focus = self.workspaces[ws_idx].tops.last().map(|t| t.wl_surface().clone());
@@ -800,6 +834,7 @@ impl App {
                     None => return,
                 };
                 self.workspaces[ws_idx].x11_surfaces.remove(idx);
+                self.remap_prev_after_remove(&WindowSlot::X11(idx));
                 self.workspaces[ws_idx].rebuild_order();
                 self.workspaces[ws_idx].fullscreen = None;
                 {
@@ -1590,6 +1625,7 @@ impl XdgShellHandler for App {
                         // 移动窗口到目标工作区
                         if self.workspaces[ws_idx].tops.len() > idx {
                             let top = self.workspaces[ws_idx].tops.remove(idx);
+                            self.remap_prev_after_remove(&WindowSlot::Wl(idx));
                             self.workspaces[ws_idx].rebuild_order();
                             self.workspaces[target_ws].tops.push(top);
                             self.workspaces[target_ws].rebuild_order();
@@ -1757,6 +1793,10 @@ impl CompositorHandler for App {
             let closed_idx = self.workspaces[ws_idx].tops.iter().position(|tl| tl.wl_surface() == surface);
             self.workspaces[ws_idx].tops.retain(|tl| tl.wl_surface() != surface);
             if self.workspaces[ws_idx].tops.len() < before {
+                // 重新映射 prev_positions（索引移位修复）
+                if let Some(removed_idx) = closed_idx {
+                    self.remap_prev_after_remove(&WindowSlot::Wl(removed_idx));
+                }
                 info!("🗑️ 窗口关闭 (工作区 {})", ws_idx + 1);
                 // 清理 fullscreen（fullscreen 存的是 effective_order 索引）
                 self.workspaces[ws_idx].fullscreen = None;
@@ -2010,6 +2050,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ws_anim: WsAnimation { start: None, from_ws: 0, to_ws: 0, duration_ms: 200, direction: 0 },
         layout_anim: LayoutAnimation::new(),
         prev_positions: Vec::new(),
+        launcher_blur_tex: None,
+        launcher_blur_size: (1, 1),
         output_sizes: vec![],
         output_active_ws: vec![],
         focused_output: 0,
@@ -2719,6 +2761,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Step 7: Launcher — 只在鼠标所在的 output 上显示
                         if is_focused_output && state.launcher.visible {
                             let filtered = state.launcher.filtered();
+                            let lw = ow * 3 / 4;
+                            let max_items = 12usize;
+                            let item_h: i32 = 36;
+                            let header_h: i32 = 48;
+                            let n_items = filtered.len().min(max_items);
+                            let lh = header_h + (n_items as i32) * item_h + 20;
+                            let lx = (ow - lw) / 2;
+                            let ly = bar_h + 24;
+
+                            // 毛玻璃背景（使用上一帧缓存的模糊纹理）
+                            if let Some(ref blur_tex) = state.launcher_blur_tex {
+                                let _ = f.render_texture_from_to(
+                                    blur_tex,
+                                    Rectangle::from_size(Size::from((state.launcher_blur_size.0 as f64, state.launcher_blur_size.1 as f64))),
+                                    Rectangle::from_loc_and_size((lx, ly), (lw, lh)),
+                                    &[Rectangle::from_loc_and_size((lx, ly), (lw, lh))],
+                                    &[Rectangle::from_loc_and_size((lx, ly), (lw, lh))],
+                                    Transform::Normal,
+                                    1.0,
+                                    None,
+                                    &[],
+                                );
+                            } else {
+                                f.clear(layout::opaque(0.08, 0.08, 0.14),
+                                    &[layout::rect(lx, ly, lw, lh)]).ok();
+                            }
+                            // 渲染 launcher UI 元素
                             layout::render_launcher(&mut f, &state.cfg, ow, oh, &state.launcher.query, &filtered, state.launcher.selected);
                         }
 
@@ -2739,6 +2808,63 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         let sync = f.finish()?;
                         // drop f 释放对 target 的借用
+
+                        // Step 9.5: 毛玻璃模糊纹理更新（launcher 可见时，每 10 帧更新一次）
+                        if is_focused_output && state.launcher.visible && state.frame % 10 == 0 {
+                            let lw = ow * 3 / 4;
+                            let max_items = 12usize;
+                            let item_h: i32 = 36;
+                            let header_h: i32 = 48;
+                            let n_items = state.launcher.filtered().len().min(max_items);
+                            let lh = header_h + (n_items as i32) * item_h + 20;
+                            let lx = (ow - lw) / 2;
+                            let ly = bar_h + 24;
+                            let blur_scale = 8u32;
+                            let small_w = (lw as u32 / blur_scale).max(1);
+                            let small_h = (lh as u32 / blur_scale).max(1);
+                            let region = Rectangle::from_loc_and_size((lx, ly), (lw, lh));
+                            if let Ok(mapping) = renderer.copy_framebuffer(&target, region, Fourcc::Abgr8888) {
+                                if let Ok(pixels) = renderer.map_texture(&mapping) {
+                                    let mut blurred = vec![0u8; (small_w * small_h * 4) as usize];
+                                    for sy in 0..small_h {
+                                        for sx in 0..small_w {
+                                            let src_x = (sx * blur_scale) as usize;
+                                            let src_y = (sy * blur_scale) as usize;
+                                            let mut r = 0u32; let mut g = 0u32; let mut b = 0u32; let mut count = 0u32;
+                                            for dy in 0..blur_scale {
+                                                for dx in 0..blur_scale {
+                                                    let px = (src_x + dx as usize).min((lw as usize).saturating_sub(1));
+                                                    let py = (src_y + dy as usize).min((lh as usize).saturating_sub(1));
+                                                    let idx = (py * lw as usize + px) * 4;
+                                                    if idx + 3 < pixels.len() {
+                                                        r += pixels[idx] as u32;
+                                                        g += pixels[idx+1] as u32;
+                                                        b += pixels[idx+2] as u32;
+                                                        count += 1;
+                                                    }
+                                                }
+                                            }
+                                            if count > 0 {
+                                                let di = ((sy * small_w + sx) * 4) as usize;
+                                                blurred[di]   = (r / count * 7 / 10) as u8;
+                                                blurred[di+1] = (g / count * 7 / 10) as u8;
+                                                blurred[di+2] = (b / count * 7 / 10) as u8;
+                                                blurred[di+3] = 255;
+                                            }
+                                        }
+                                    }
+                                    if let Ok(tex) = renderer.import_memory(
+                                        &blurred,
+                                        Fourcc::Abgr8888,
+                                        Size::new(small_w as i32, small_h as i32),
+                                        false,
+                                    ) {
+                                        state.launcher_blur_tex = Some(tex);
+                                        state.launcher_blur_size = (small_w, small_h);
+                                    }
+                                }
+                            }
+                        }
 
                         // Step 10: 执行待处理的截图请求（finish 后 framebuffer 完整，target 仍可用）
                         if is_focused_output {
@@ -3009,6 +3135,12 @@ impl smithay::xwayland::XwmHandler for App {
     fn destroyed_window(&mut self, _xwm: smithay::xwayland::xwm::XwmId, window: smithay::xwayland::X11Surface) {
         tracing::info!("💥 X11 destroyed: class='{}'", window.class());
         let wid = window.window_id();
+        // 重新映射 prev_positions（X11 窗口索引移位）
+        for ws_idx in 0..self.workspaces.len() {
+            if let Some(removed_idx) = self.workspaces[ws_idx].x11_surfaces.iter().position(|s| s.window_id() == wid) {
+                self.remap_prev_after_remove(&WindowSlot::X11(removed_idx));
+            }
+        }
         for ws in &mut self.workspaces {
             ws.x11_surfaces.retain(|s| s.window_id() != wid);
             ws.rebuild_order();

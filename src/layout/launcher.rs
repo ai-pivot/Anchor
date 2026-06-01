@@ -1,13 +1,12 @@
-//! 启动器渲染 — 毛玻璃风格
-//! 不清除面板背景！壁纸和窗口内容直接透过来 = 真正的毛玻璃效果
-//! 只渲染发光边框 + 搜索框 + 文字 + 列表高亮
+//! 启动器渲染 — 只渲染 UI 元素（背景/毛玻璃由 main.rs 在调用前完成）
+//! 发光边框 + 搜索框 + 应用列表 + 底部信息栏
 
 use crate::config::{parse_color, Config};
 use crate::text_render;
 use smithay::backend::renderer::Frame;
 use super::util::{opaque, rect};
 
-/// 渲染内置启动器
+/// 渲染内置启动器（背景已由调用方渲染为毛玻璃纹理）
 pub fn render_launcher(
     f: &mut impl Frame, cfg: &Config, ow: i32, oh: i32,
     query: &str, filtered: &[(usize, &(String, String))], selected: usize,
@@ -15,7 +14,6 @@ pub fn render_launcher(
     let accent = parse_color(&cfg.colors.focus_border);
     let bar_h = cfg.bar.height;
 
-    // 启动器定位：居中，上半部分
     let lw = ow * 3 / 4;
     let max_items = 12usize;
     let item_h: i32 = 36;
@@ -25,9 +23,21 @@ pub fn render_launcher(
     let lx = (ow - lw) / 2;
     let ly = bar_h + 24;
 
-    // ── 不清除全屏！不清除面板背景！壁纸和窗口内容完全透过来 ──
+    // ── 微网格纹理 ──
+    let grid_step = 32;
+    let grid_color = opaque(accent.0 * 0.03, accent.1 * 0.03, accent.2 * 0.03);
+    let mut grid_rects: Vec<smithay::utils::Rectangle<i32, smithay::utils::Physical>> = Vec::new();
+    for gy in (ly..ly + lh).step_by(grid_step) {
+        grid_rects.push(rect(lx, gy, lw, 1));
+    }
+    for gx in (lx..lx + lw).step_by(grid_step) {
+        grid_rects.push(rect(gx, ly, 1, lh));
+    }
+    if !grid_rects.is_empty() {
+        f.clear(grid_color, &grid_rects).ok();
+    }
 
-    // ── 发光边框（6 层渐变，accent 色）── 面板内部直接是桌面内容
+    // ── 发光边框 ──
     let glow_layers: [(i32, f32); 6] = [
         (6, 0.02), (5, 0.04), (4, 0.08), (3, 0.15), (2, 0.30), (1, 0.55),
     ];
@@ -42,11 +52,8 @@ pub fn render_launcher(
     // 顶部 accent 亮线
     f.clear(opaque(accent.0 * 0.8, accent.1 * 0.8, accent.2 * 0.8),
         &[rect(lx, ly, lw, 2)]).ok();
-    // 底部 accent 亮线
-    f.clear(opaque(accent.0 * 0.5, accent.1 * 0.5, accent.2 * 0.5),
-        &[rect(lx, ly + lh - 1, lw, 1)]).ok();
 
-    // ── 搜索框（半透明背景让文字可读）──
+    // ── 搜索框 ──
     let search_y = ly + 8;
     let search_h = 32;
     f.clear(opaque(0.05, 0.05, 0.09), &[rect(lx + 8, search_y, lw - 16, search_h)]).ok();
@@ -71,7 +78,6 @@ pub fn render_launcher(
         let iy = ly + header_h + (i as i32) * item_h;
 
         if i == selected {
-            // 选中项 — accent 背景条（半透明，仍能看到底下内容）
             f.clear(opaque(accent.0 * 0.12, accent.1 * 0.12, accent.2 * 0.12),
                 &[rect(lx + 4, iy + 2, lw - 8, item_h - 4)]).ok();
             f.clear(opaque(accent.0 * 0.8, accent.1 * 0.8, accent.2 * 0.8),
