@@ -7,6 +7,17 @@ SELF="$(readlink -f "$0")"
 SCRIPT_DIR="$(cd "$(dirname "$SELF")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
+# ─── 确定 anchor 二进制路径 ───
+# 优先使用开发构建，回退到系统安装
+if [ -x "$PROJECT_DIR/target/release/anchor" ]; then
+    ANCHOR_BIN="$PROJECT_DIR/target/release/anchor"
+elif command -v anchor &>/dev/null; then
+    ANCHOR_BIN="$(command -v anchor)"
+else
+    echo "[anchor-session] 错误: 找不到 anchor 二进制文件" >&2
+    exit 1
+fi
+
 # ─── 通用环境变量 ───
 export TERMINAL="${TERMINAL:-foot}"
 export XDG_SESSION_TYPE=wayland
@@ -86,7 +97,7 @@ esac
 # ─── 输入法配置 ───
 IM_METHOD="none"
 CONFIG_FILE=""
-for f in "$PROJECT_DIR/config.toml" "$HOME/.config/anchor/config.toml"; do
+for f in "$HOME/.config/anchor/config.toml" "$PROJECT_DIR/config.toml" "/usr/local/share/doc/anchor/config.toml.example" "/usr/share/doc/anchor/config.toml.example"; do
     if [ -f "$f" ]; then CONFIG_FILE="$f"; break; fi
 done
 if [ -n "$CONFIG_FILE" ]; then
@@ -142,4 +153,4 @@ if command -v gnome-keyring-daemon &>/dev/null && \
     eval $(gnome-keyring-daemon --start --replace --components=secrets,ssh 2>/dev/null)
 fi
 
-exec "$PROJECT_DIR/target/release/anchor" 2>&1 | tee /tmp/anchor-session.log
+exec "$ANCHOR_BIN" 2>&1 | tee /tmp/anchor-session.log

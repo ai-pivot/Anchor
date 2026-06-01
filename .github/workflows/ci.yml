@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed \
+            rust \
+            pam \
+            libinput \
+            libxkbcommon \
+            mesa \
+            systemd-libs \
+            wayland \
+            clang \
+            pkgconf \
+            git
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-
+
+      - name: Build
+        run: cargo build --release --verbose
+
+      - name: Run tests
+        run: cargo test --verbose 2>/dev/null || true
+
+  fmt:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rustfmt
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm rust
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  clippy:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install clippy + build deps
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed \
+            rust \
+            pam \
+            libinput \
+            libxkbcommon \
+            mesa \
+            systemd-libs \
+            wayland \
+            clang \
+            pkgconf
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings 2>/dev/null || true

@@ -1,0 +1,154 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-arch:
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          pacman -Syu --noconfirm
+          pacman -S --noconfirm --needed \
+            rust \
+            pam \
+            libinput \
+            libxkbcommon \
+            mesa \
+            systemd-libs \
+            wayland \
+            clang \
+            pkgconf \
+            git
+
+      - name: Build release
+        run: cargo build --release --verbose
+
+      - name: Package release artifacts
+        run: |
+          mkdir -p anchor-${{ github.ref_name }}/usr/bin
+          mkdir -p anchor-${{ github.ref_name }}/usr/share/wayland-sessions
+          mkdir -p anchor-${{ github.ref_name }}/usr/share/doc/anchor
+
+          cp target/release/anchor anchor-${{ github.ref_name }}/usr/bin/
+          cp scripts/anchor-session anchor-${{ github.ref_name }}/usr/bin/
+          cp scripts/anchor.desktop anchor-${{ github.ref_name }}/usr/share/wayland-sessions/
+          cp config.toml anchor-${{ github.ref_name }}/usr/share/doc/anchor/config.toml.example
+          cp -r scripts/install.sh anchor-${{ github.ref_name}/
+
+          # Create install/uninstall scripts
+          cat > anchor-${{ github.ref_name }}/install.sh << 'INSTALL_EOF'
+          #!/bin/bash
+          set -e
+          cd "$(dirname "$0")"
+          echo "Installing Anchor compositor..."
+          cp -r usr /
+          echo "Installed to /usr/bin/anchor"
+          echo "Session file: /usr/share/wayland-sessions/anchor.desktop"
+          echo ""
+          echo "Copy example config:"
+          echo "  mkdir -p ~/.config/anchor"
+          echo "  cp /usr/share/doc/anchor/config.toml.example ~/.config/anchor/config.toml"
+          echo ""
+          echo "Select 'Anchor' from your display manager to start."
+          INSTALL_EOF
+          chmod +x anchor-${{ github.ref_name }}/install.sh
+
+          cat > anchor-${{ github.ref_name }}/uninstall.sh << 'UNINSTALL_EOF'
+          #!/bin/bash
+          set -e
+          echo "Uninstalling Anchor compositor..."
+          rm -f /usr/bin/anchor /usr/bin/anchor-session
+          rm -f /usr/share/wayland-sessions/anchor.desktop
+          rm -rf /usr/share/doc/anchor
+          echo "Uninstalled."
+          UNINSTALL_EOF
+          chmod +x anchor-${{ github.ref_name }}/uninstall.sh
+
+          tar czf anchor-${{ github.ref_name }}-x86_64.tar.gz anchor-${{ github.ref_name }}/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: anchor-release
+          path: anchor-*.tar.gz
+
+  release:
+    needs: build-arch
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: anchor-release
+
+      - name: Generate release notes
+        id: notes
+        run: |
+          TAG=${{ github.ref_name }}
+          echo "## Installation" >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "### One-click install (Arch Linux / any distro with build deps)" >> RELEASE_NOTES.md
+          echo '```bash' >> RELEASE_NOTES.md
+          echo "curl -sSL https://raw.githubusercontent.com/ai-pivot/Anchor/master/scripts/install.sh | bash" >> RELEASE_NOTES.md
+          echo '```' >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "### Manual install from release binary" >> RELEASE_NOTES.md
+          echo '```bash' >> RELEASE_NOTES.md
+          echo "tar xzf anchor-${TAG}-x86_64.tar.gz" >> RELEASE_NOTES.md
+          echo "cd anchor-${TAG}" >> RELEASE_NOTES.md
+          echo "sudo ./install.sh" >> RELEASE_NOTES.md
+          echo '```' >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "### Arch Linux (AUR)" >> RELEASE_NOTES.md
+          echo '```bash' >> RELEASE_NOTES.md
+          echo "yay -S anchor-wl  # or paru -S anchor-wl" >> RELEASE_NOTES.md
+          echo '```' >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "### Uninstall" >> RELEASE_NOTES.md
+          echo '```bash' >> RELEASE_NOTES.md
+          echo "sudo ./uninstall.sh" >> RELEASE_NOTES.md
+          echo '# or from source:'  >> RELEASE_NOTES.md
+          echo "cd /tmp && git clone https://github.com/ai-pivot/Anchor.git && cd Anchor && sudo scripts/install.sh --uninstall" >> RELEASE_NOTES.md
+          echo '```' >> RELEASE_NOTES.md
+          echo "" >> RELEASE_NOTES.md
+          echo "### Requirements" >> RELEASE_NOTES.md
+          echo "- Linux with DRM/KMS support" >> RELEASE_NOTES.md
+          echo "- PAM (libpam)" >> RELEASE_NOTES.md
+          echo "- Display manager (GDM/SDDM/LightDM) or manual start" >> RELEASE_NOTES.md
+          echo "- NVIDIA users: \`nvidia-drm.modeset=1\` kernel parameter" >> RELEASE_NOTES.md
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body_path: RELEASE_NOTES.md
+          files: anchor-*.tar.gz
+          generate_release_notes: true
+
+  publish-aur:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Publish to AUR
+        uses: KSXGitHub/github-actions-deploy-aur@v3.0.1
+        with:
+          pkgname: anchor-wl
+          pkgbuild: ./PKGBUILD
+          commit_username: ${{ secrets.AUR_USERNAME }}
+          commit_email: ${{ secrets.AUR_EMAIL }}
+          ssh_private_key: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
