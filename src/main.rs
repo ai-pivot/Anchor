@@ -165,6 +165,11 @@ struct App {
     loop_handle: Option<smithay::reexports::calloop::LoopHandle<'static, App>>,
     // 锁屏状态
     lock_state: LockState,
+    // CPU/MEM 统计（headbar 显示用）
+    cpu_usage: f32,        // 0.0 ~ 1.0
+    mem_usage: f32,        // 0.0 ~ 1.0
+    cpu_prev_idle: u64,
+    cpu_prev_total: u64,
 }
 
 /// 工作区切换动画状态
@@ -497,6 +502,50 @@ impl App {
     fn drain_notifications(&mut self) {
         let now = std::time::Instant::now();
         self.notifications.retain(|n| now.duration_since(n.created) < n.duration);
+    }
+
+    /// Read CPU usage from /proc/stat (delta-based)
+    fn update_cpu_usage(&mut self) {
+        if let Ok(data) = std::fs::read_to_string("/proc/stat") {
+            if let Some(line) = data.lines().next() {
+                let fields: Vec<u64> = line.split_whitespace()
+                    .skip(1) // skip "cpu"
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
+                if fields.len() >= 4 {
+                    let idle = fields[3];
+                    let total: u64 = fields.iter().sum();
+                    let d_idle = idle.saturating_sub(self.cpu_prev_idle);
+                    let d_total = total.saturating_sub(self.cpu_prev_total);
+                    if d_total > 0 {
+                        self.cpu_usage = 1.0 - d_idle as f32 / d_total as f32;
+                    }
+                    self.cpu_prev_idle = idle;
+                    self.cpu_prev_total = total;
+                }
+            }
+        }
+    }
+
+    /// Read memory usage from /proc/meminfo
+    fn update_mem_usage(&mut self) {
+        if let Ok(data) = std::fs::read_to_string("/proc/meminfo") {
+            let mut mem_total: u64 = 0;
+            let mut mem_available: u64 = 0;
+            for line in data.lines() {
+                if line.starts_with("MemTotal:") {
+                    mem_total = line.split_whitespace()
+                        .nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                } else if line.starts_with("MemAvailable:") {
+                    mem_available = line.split_whitespace()
+                        .nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                }
+                if mem_total > 0 && mem_available > 0 { break; }
+            }
+            if mem_total > 0 {
+                self.mem_usage = 1.0 - mem_available as f32 / mem_total as f32;
+            }
+        }
     }
 
     fn toggle_fullscreen(&mut self) {
@@ -1810,6 +1859,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         screenshot_result: None,
         loop_handle: None,
         lock_state: LockState::new(),
+        cpu_usage: 0.0,
+        mem_usage: 0.0,
+        cpu_prev_idle: 0,
+        cpu_prev_total: 0,
     };
     let listener = ListeningSocket::bind("wayland-anchor")?;
     std::env::set_var("WAYLAND_DISPLAY", "wayland-anchor");
@@ -2486,7 +2539,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Step 5: Headbar — 每个 output 显示自己的活跃工作区
                         {
                             let ws_counts: Vec<usize> = state.workspaces.iter().map(|w| w.tops.len() + w.x11_surfaces.len()).collect();
-                            layout::render_headbar(&mut f, &state.cfg, ow, oh, n_windows, out_ws_focus_idx, time_secs, &out_window_title, out_ws_idx, NUM_WORKSPACES, &ws_counts);
+                            layout::render_headbar(&mut f, &state.cfg, ow, oh, n_windows, out_ws_focus_idx, time_secs, &out_window_title, out_ws_idx, NUM_WORKSPACES, &ws_counts, state.cpu_usage, state.mem_usage);
                         }
 
                         // Step 6: Notifications — 只在鼠标所在的 output 上显示
@@ -2659,7 +2712,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         // 时钟每秒更新（bar enabled 时）
         if state.frame % 60 == 0 && state.cfg.bar.enabled { state.dirty = true; }
         // CPU/MEM 状态每 5 秒更新
-        if state.frame % 300 == 0 { state.dirty = true; }
+        if state.frame % 300 == 0 {
+            state.update_cpu_usage();
+            state.update_mem_usage();
+            state.dirty = true;
+        }
 
         if let Ok(Some(stream)) = listener.accept() {
             clients.push(display.handle().insert_client(stream, Arc::new(ClientState::default()))?);

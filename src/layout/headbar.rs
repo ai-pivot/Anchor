@@ -1,4 +1,7 @@
-//! 顶栏渲染（logo + 工作区指示器 + 窗口信息 + 日期/时钟）
+//! 顶栏渲染 — 赛博朋克发光风格（与锁屏一致）
+//! 左侧: ANCHOR logo + 工作区指示器
+//! 中央: 窗口信息
+//! 右侧: CPU/MEM 使用率 + 日期 + 时钟
 
 use crate::config::{parse_color, Config};
 use crate::text_render;
@@ -6,52 +9,52 @@ use smithay::{
     backend::renderer::Frame,
     utils::Size,
 };
-use super::util::{color_hex, opaque, rect, S1, S2, S3, S4, S6, LOGO_SIZE, WS_SIZE, TITLE_SIZE, CLOCK_SIZE, DATE_SIZE};
+use super::util::{opaque, rect, S1, S2, S3, S4, S6, LOGO_SIZE, WS_SIZE, TITLE_SIZE, CLOCK_SIZE, DATE_SIZE};
 
-/// 渲染 headbar（v23 — fontdue 正常文字）
+/// 渲染 headbar（v24 — 赛博朋克发光风格 + CPU/MEM）
 pub fn render_headbar(
     f: &mut impl Frame, cfg: &Config, ow: i32, _oh: i32,
     n_windows: usize, focus_idx: Option<usize>, time_secs: u64,
     _window_title: &str,
     active_workspace: usize, total_workspaces: usize,
     workspace_window_counts: &[usize],
+    cpu_usage: f32, mem_usage: f32,
 ) {
     if !cfg.bar.enabled { return; }
     let h = cfg.bar.height;
 
-    let fg = parse_color(&cfg.colors.bar_foreground);
-    let ws_active = parse_color(&cfg.colors.bar_workspace_active);
-    let status_color = parse_color(&cfg.colors.bar_status);
     let accent = parse_color(&cfg.colors.focus_border);
-    let sep_color = parse_color(&cfg.colors.bar_separator);
 
     // ── 背景 ──
-    f.clear(color_hex(&cfg.colors.bar_background), &[smithay::utils::Rectangle::from_size(Size::new(ow, h))]).ok();
+    f.clear(opaque(0.03, 0.03, 0.06), &[smithay::utils::Rectangle::from_size(Size::new(ow, h))]).ok();
 
-    // 底部 accent 发光线
-    for (off, br) in [(0i32, 1.0f32), (1, 0.6), (2, 0.3), (3, 0.12), (4, 0.04)] {
+    // 底部多层 accent 发光线（赛博朋克风格）
+    for (off, br) in [(0i32, 0.8f32), (1, 0.5), (2, 0.25), (3, 0.1), (4, 0.04)] {
         f.clear(opaque(accent.0 * br, accent.1 * br, accent.2 * br),
             &[rect(0, h - 5 + off, ow, 1)]).ok();
     }
 
     let mut x = S4;
 
-    // ── ANCHOR logo（正常文字）──
+    // ── ANCHOR logo ──
     let logo_w = text_render::text_width("ANCHOR", LOGO_SIZE);
     let logo_y = h / 2 - LOGO_SIZE as i32 / 2 - 2;
-    f.clear(opaque(accent.0 * 0.12, accent.1 * 0.12, accent.2 * 0.12),
+    // Logo 背景发光块
+    f.clear(opaque(accent.0 * 0.08, accent.1 * 0.08, accent.2 * 0.08),
         &[rect(x - S1, S2, logo_w + S2 + S1, h - S4)]).ok();
-    f.clear(opaque(accent.0 * 0.5, accent.1 * 0.5, accent.2 * 0.5),
+    // 左侧 accent 竖线
+    f.clear(opaque(accent.0 * 0.6, accent.1 * 0.6, accent.2 * 0.6),
         &[rect(x - S1, S2, 2, h - S4)]).ok();
-    text_render::draw_text(f, "ANCHOR", x + 2, logo_y, LOGO_SIZE, accent);
+    text_render::draw_text(f, "ANCHOR", x + 2, logo_y, LOGO_SIZE,
+        (accent.0 * 0.9, accent.1 * 0.9, accent.2 * 0.9));
     x += logo_w + S4 + S2;
 
-    // 分隔线
-    f.clear(opaque(sep_color.0 * 0.3, sep_color.1 * 0.3, sep_color.2 * 0.3),
+    // 分隔线（带发光）
+    f.clear(opaque(accent.0 * 0.15, accent.1 * 0.15, accent.2 * 0.15),
         &[rect(x, S3, 1, h - S6)]).ok();
     x += S3;
 
-    // ── 工作区指示器 ──
+    // ── 工作区指示器（赛博朋克方块风格）──
     let ws_pad = 6;
     let ws_gap = 3;
     let max_show = total_workspaces.min(9);
@@ -68,30 +71,36 @@ pub fn render_headbar(
         let text_y = block_y + ws_pad;
 
         if is_active {
-            f.clear(opaque(ws_active.0, ws_active.1, ws_active.2),
+            // 激活工作区 — accent 填充 + 顶部亮线
+            f.clear(opaque(accent.0 * 0.2, accent.1 * 0.2, accent.2 * 0.2),
                 &[rect(x, block_y, block_w, block_h)]).ok();
-            f.clear(opaque(ws_active.0 * 1.4, ws_active.1 * 1.4, ws_active.2 * 1.4),
+            f.clear(opaque(accent.0 * 0.8, accent.1 * 0.8, accent.2 * 0.8),
                 &[rect(x, block_y, block_w, 2)]).ok();
-            text_render::draw_text(f, &num_str, x + ws_pad, text_y, WS_SIZE, (0.02, 0.02, 0.05));
+            // 底部发光
+            f.clear(opaque(accent.0 * 0.15, accent.1 * 0.15, accent.2 * 0.15),
+                &[rect(x, block_y + block_h, block_w, 2)]).ok();
+            text_render::draw_text(f, &num_str, x + ws_pad, text_y, WS_SIZE, accent);
         } else if has_wins {
-            f.clear(opaque(fg.0 * 0.12, fg.1 * 0.12, fg.2 * 0.12),
+            // 有窗口 — 暗色填充 + 小指示点
+            f.clear(opaque(accent.0 * 0.06, accent.1 * 0.06, accent.2 * 0.06),
                 &[rect(x, block_y, block_w, block_h)]).ok();
-            f.clear(opaque(fg.0 * 0.5, fg.1 * 0.5, fg.2 * 0.5),
+            f.clear(opaque(accent.0 * 0.4, accent.1 * 0.4, accent.2 * 0.4),
                 &[rect(x + block_w / 2 - 2, block_y + block_h + 1, 4, 2)]).ok();
             text_render::draw_text(f, &num_str, x + ws_pad, text_y, WS_SIZE,
-                (fg.0 * 0.7, fg.1 * 0.7, fg.2 * 0.7));
+                (accent.0 * 0.5, accent.1 * 0.5, accent.2 * 0.5));
         } else {
-            f.clear(opaque(fg.0 * 0.04, fg.1 * 0.04, fg.2 * 0.04),
+            // 空工作区 — 极暗
+            f.clear(opaque(0.02, 0.02, 0.04),
                 &[rect(x, block_y, block_w, block_h)]).ok();
             text_render::draw_text(f, &num_str, x + ws_pad, text_y, WS_SIZE,
-                (fg.0 * 0.2, fg.1 * 0.2, fg.2 * 0.2));
+                (accent.0 * 0.15, accent.1 * 0.15, accent.2 * 0.15));
         }
 
         x += block_w + ws_gap;
     }
 
     // 分隔线
-    f.clear(opaque(sep_color.0 * 0.3, sep_color.1 * 0.3, sep_color.2 * 0.3),
+    f.clear(opaque(accent.0 * 0.15, accent.1 * 0.15, accent.2 * 0.15),
         &[rect(x + S1, S3, 1, h - S6)]).ok();
     x += S4;
 
@@ -101,12 +110,13 @@ pub fn render_headbar(
         let tw = text_render::text_width(&info, TITLE_SIZE);
         let cx = ow / 2 - tw / 2;
         let ty = h / 2 - TITLE_SIZE as i32 / 2 - 1;
-        f.clear(opaque(fg.0 * 0.04, fg.1 * 0.04, fg.2 * 0.04),
+        f.clear(opaque(accent.0 * 0.04, accent.1 * 0.04, accent.2 * 0.04),
             &[rect(cx - S2, S2, tw + S4, h - S4)]).ok();
-        text_render::draw_text(f, &info, cx, ty, TITLE_SIZE, (fg.0 * 0.5, fg.1 * 0.5, fg.2 * 0.5));
+        text_render::draw_text(f, &info, cx, ty, TITLE_SIZE,
+            (accent.0 * 0.4, accent.1 * 0.4, accent.2 * 0.4));
     }
 
-    // ── 右侧：日期 + 时钟 ──
+    // ── 右侧区域 ──
     let time_secs_c = time_secs as libc::time_t;
     let mut tm: libc::tm = unsafe { std::mem::zeroed() };
     unsafe { libc::localtime_r(&time_secs_c, &mut tm) };
@@ -118,24 +128,95 @@ pub fn render_headbar(
     let mut rx = ow - S4;
     let ty = h / 2 - CLOCK_SIZE as i32 / 2 - 1;
 
-    // 日期
+    // ── 时钟 ──
+    let time_str = format!("{:02}:{:02}:{:02}", local_h, minutes, seconds);
+    let tw = text_render::text_width(&time_str, CLOCK_SIZE);
+    f.clear(opaque(accent.0 * 0.06, accent.1 * 0.06, accent.2 * 0.06),
+        &[rect(rx - tw - S2, S2, tw + S4, h - S4)]).ok();
+    text_render::draw_text(f, &time_str, rx - tw, ty, CLOCK_SIZE,
+        (accent.0 * 0.85, accent.1 * 0.85, accent.2 * 0.85));
+    rx -= tw + S4;
+
+    // 分隔线
+    f.clear(opaque(accent.0 * 0.15, accent.1 * 0.15, accent.2 * 0.15),
+        &[rect(rx, S3, 1, h - S6)]).ok();
+    rx -= S3;
+
+    // ── 日期 ──
     if cfg.bar.show_date {
         let month = (tm.tm_mon + 1) as u8;
         let day = tm.tm_mday as u8;
         let date_str = format!("{}-{}-{}", tm.tm_year + 1900, month, day);
         let dw = text_render::text_width(&date_str, DATE_SIZE);
         let dy = h / 2 - DATE_SIZE as i32 / 2 - 1;
-        text_render::draw_text(f, &date_str, rx - dw, dy, DATE_SIZE, (fg.0 * 0.4, fg.1 * 0.4, fg.2 * 0.4));
+        text_render::draw_text(f, &date_str, rx - dw, dy, DATE_SIZE,
+            (accent.0 * 0.35, accent.1 * 0.35, accent.2 * 0.35));
         rx -= dw + S3;
-        f.clear(opaque(sep_color.0 * 0.3, sep_color.1 * 0.3, sep_color.2 * 0.3),
+        f.clear(opaque(accent.0 * 0.15, accent.1 * 0.15, accent.2 * 0.15),
             &[rect(rx, S3, 1, h - S6)]).ok();
         rx -= S3;
     }
 
-    // 时钟
-    let time_str = format!("{:02}:{:02}:{:02}", local_h, minutes, seconds);
-    let tw = text_render::text_width(&time_str, CLOCK_SIZE);
-    f.clear(opaque(accent.0 * 0.08, accent.1 * 0.08, accent.2 * 0.08),
-        &[rect(rx - tw - S2, S2, tw + S4, h - S4)]).ok();
-    text_render::draw_text(f, &time_str, rx - tw, ty, CLOCK_SIZE, status_color);
+    // ── CPU/MEM 使用率（赛博朋克进度条 + 百分比）──
+    let stat_size: f32 = 13.0;
+    let bar_w = 48;
+    let bar_h = 4;
+
+    if cfg.bar.show_memory {
+        let mem_pct = mem_usage * 100.0;
+        let mem_str = format!("MEM {:5.1}%", mem_pct);
+        let mw = text_render::text_width(&mem_str, stat_size);
+        let my = h / 2 - stat_size as i32 / 2 - 6;
+        text_render::draw_text(f, &mem_str, rx - mw, my, stat_size,
+            (accent.0 * 0.5, accent.1 * 0.5, accent.2 * 0.5));
+        // 进度条背景
+        let bar_x = rx - mw;
+        let bar_y = my + stat_size as i32 + 3;
+        f.clear(opaque(0.06, 0.06, 0.10), &[rect(bar_x, bar_y, bar_w, bar_h)]).ok();
+        // 进度条填充（颜色随使用率变化：低=accent绿，高=红）
+        let fill_w = (bar_w as f32 * mem_usage) as i32;
+        let mem_color = if mem_usage < 0.7 {
+            (accent.0 * 0.7, accent.1 * 0.7, accent.2 * 0.7)
+        } else {
+            (0.9, 0.3, 0.3)
+        };
+        if fill_w > 0 {
+            f.clear(opaque(mem_color.0, mem_color.1, mem_color.2),
+                &[rect(bar_x, bar_y, fill_w, bar_h)]).ok();
+            // 进度条发光
+            f.clear(opaque(mem_color.0 * 0.3, mem_color.1 * 0.3, mem_color.2 * 0.3),
+                &[rect(bar_x, bar_y - 1, fill_w, 1)]).ok();
+        }
+        rx -= mw.max(bar_w) + S3;
+        f.clear(opaque(accent.0 * 0.15, accent.1 * 0.15, accent.2 * 0.15),
+            &[rect(rx, S3, 1, h - S6)]).ok();
+        rx -= S3;
+    }
+
+    if cfg.bar.show_cpu {
+        let cpu_pct = cpu_usage * 100.0;
+        let cpu_str = format!("CPU {:5.1}%", cpu_pct);
+        let cw = text_render::text_width(&cpu_str, stat_size);
+        let cy = h / 2 - stat_size as i32 / 2 - 6;
+        text_render::draw_text(f, &cpu_str, rx - cw, cy, stat_size,
+            (accent.0 * 0.5, accent.1 * 0.5, accent.2 * 0.5));
+        // 进度条背景
+        let bar_x = rx - cw;
+        let bar_y = cy + stat_size as i32 + 3;
+        f.clear(opaque(0.06, 0.06, 0.10), &[rect(bar_x, bar_y, bar_w, bar_h)]).ok();
+        // 进度条填充
+        let fill_w = (bar_w as f32 * cpu_usage) as i32;
+        let cpu_color = if cpu_usage < 0.7 {
+            (accent.0 * 0.7, accent.1 * 0.7, accent.2 * 0.7)
+        } else {
+            (0.9, 0.3, 0.3)
+        };
+        if fill_w > 0 {
+            f.clear(opaque(cpu_color.0, cpu_color.1, cpu_color.2),
+                &[rect(bar_x, bar_y, fill_w, bar_h)]).ok();
+            f.clear(opaque(cpu_color.0 * 0.3, cpu_color.1 * 0.3, cpu_color.2 * 0.3),
+                &[rect(bar_x, bar_y - 1, fill_w, 1)]).ok();
+        }
+        rx -= cw.max(bar_w) + S3;
+    }
 }
