@@ -244,3 +244,18 @@ For SDDM: Create `/usr/share/wayland-sessions/anchor.desktop` with same content.
     produces a 180°-rotated image with R/B channels swapped (Xrgb8888's
     byte layout is driver-dependent via `GL_IMPLEMENTATION_COLOR_READ_*`,
     so the BGR→RGB assumption breaks across drivers).
+18. **Multi-monitor mouse clamp must use real boundaries.** Clamp range is
+    `(ox, ox + ow)` not `(ox, ox + ow - 1)`. The `-1` variant makes the
+    pointer unable to ever reach the actual right/bottom edge, and
+    across-screen movement becomes erratic because the "nearest output
+    center" heuristic can flip-flop when the pointer sits at a screen
+    boundary. Always clamp to the real output rectangle in both
+    in-bound and out-of-bound cases.
+19. **X11 OR windows are root-window absolute coordinates.** `X11Surface::geometry()`
+    returns positions in X11 root window space (global). The render pipeline
+    uses output-local coordinates. Always subtract `(ox, oy)` of the current
+    output before passing to `render_elements_from_surface_tree`. Without
+    this, X11 OR popups (fcitx5 candidate box) render at the wrong position
+    in multi-monitor setups, and even on single-monitor setups they may
+    appear behind fullscreen Wayland windows when the underlying X11
+    client has been re-laid-out by a fullscreen toggle.
