@@ -521,18 +521,25 @@ impl App {
         // 执行布局
         self.layout_workspace(self.active_ws);
 
-        // 为新窗口填充假的旧位置（从底部滑入），保证所有窗口都有动画
+        // 为新窗口填充假的旧位置，方向由 split 决定
         let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
+        let split = self.workspaces[self.active_ws].split;
         let mut anim_slots = old_slots;
         let n_new = self.prev_slots.len(); // layout_workspace 刚更新了 prev_slots
         if anim_slots.len() < n_new {
-            // 新增的窗口：旧位置设为屏幕底部（从下方滑入）
             for i in anim_slots.len()..n_new {
-                let (new_x, _new_y, _w, h) = layout::slot(i, n_new, self.osize.w, self.osize.h, bar_h, &self.cfg, self.workspaces[self.active_ws].layout, self.workspaces[self.active_ws].split);
-                // 从 slot 底部下方 80px 的位置开始
-                anim_slots.push((new_x, _new_y + h + 80));
+                let (nx, ny, nw, nh) = layout::slot(i, n_new, self.osize.w, self.osize.h, bar_h, &self.cfg, self.workspaces[self.active_ws].layout, self.workspaces[self.active_ws].split);
+                let fake_pos = match split {
+                    // Horizontal split: 新窗口在右边 → 从右边滑入
+                    layout::SplitDir::Horizontal => (nx + nw + 100, ny),
+                    // Vertical split: 新窗口在下方 → 从下方滑入
+                    layout::SplitDir::Vertical => (nx, ny + nh + 100),
+                };
+                anim_slots.push(fake_pos);
             }
         }
+        // 窗口减少时（关闭窗口），old_slots 比 n_new 多
+        // 多余的 old_slots 直接忽略（不再渲染的窗口）
 
         // 启动动画
         if !anim_slots.is_empty() {
@@ -833,6 +840,7 @@ impl App {
 
 
     /// 用方向键切换焦点窗口（Super+方向键）
+    /// 按屏幕真实几何位置：找到当前焦点窗口在指定方向上最近的邻居
     fn focus_direction(&mut self, direction: Keysym) {
         let order = self.workspaces[self.active_ws].effective_order();
         let n = order.len();
@@ -843,12 +851,41 @@ impl App {
             None => 0,
         };
 
-        let target = match direction {
-            Keysym::Left | Keysym::Up => fi.saturating_sub(1),
-            Keysym::Right | Keysym::Down => (fi + 1).min(n - 1),
-            _ => return,
+        let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
+        let slots: Vec<(i32, i32, i32, i32)> = (0..n)
+            .map(|i| layout::slot(i, n, self.osize.w, self.osize.h, bar_h, &self.cfg, self.workspaces[self.active_ws].layout, self.workspaces[self.active_ws].split))
+            .collect();
+
+        let (fx, fy, fw, fh) = slots[fi];
+        let fcx = fx + fw / 2;
+        let fcy = fy + fh / 2;
+
+        let mut best_idx: Option<usize> = None;
+        let mut best_dist: i32 = i32::MAX;
+
+        for (i, &(sx, sy, sw, sh)) in slots.iter().enumerate() {
+            if i == fi { continue; }
+            let scx = sx + sw / 2;
+            let scy = sy + sh / 2;
+
+            let (is_valid, dist) = match direction {
+                Keysym::Left => (scx < fcx, (fcx - scx).abs()),
+                Keysym::Right => (scx > fcx, (scx - fcx).abs()),
+                Keysym::Up => (scy < fcy, (fcy - scy).abs()),
+                Keysym::Down => (scy > fcy, (scy - fcy).abs()),
+                _ => (false, i32::MAX),
+            };
+
+            if is_valid && dist < best_dist {
+                best_dist = dist;
+                best_idx = Some(i);
+            }
+        }
+
+        let target = match best_idx {
+            Some(t) => t,
+            None => return,
         };
-        if target == fi { return; }
 
         let ws = &self.workspaces[self.active_ws];
         let surf = match &order[target] {
@@ -866,7 +903,7 @@ impl App {
     }
 
     /// 用方向键交换窗口位置（Super+Shift+方向键）
-    /// 支持任意交换，通过 window_order 控制渲染顺序
+    /// 按屏幕真实几何位置：找到当前窗口在指定方向上最近的邻居
     fn swap_window(&mut self, direction: Keysym) {
         let fi = match self.focus_idx() {
             Some(i) => i,
@@ -874,16 +911,50 @@ impl App {
         };
         let ws = &mut self.workspaces[self.active_ws];
         ws.rebuild_order();
-        let n = ws.window_order.len();
+        let order = ws.effective_order();
+        let n = order.len();
         if n <= 1 { return; }
 
-        let target = match direction {
-            Keysym::Left | Keysym::Up => if fi > 0 { fi - 1 } else { return },
-            Keysym::Right | Keysym::Down => if fi + 1 < n { fi + 1 } else { return },
-            _ => return,
+        let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
+        // 计算所有窗口的 slot 位置
+        let slots: Vec<(i32, i32, i32, i32)> = (0..n)
+            .map(|i| layout::slot(i, n, self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split))
+            .collect();
+
+        let (fx, fy, fw, fh) = slots[fi];
+        // 焦点窗口中心
+        let fcx = fx + fw / 2;
+        let fcy = fy + fh / 2;
+
+        // 找到在指定方向上最近的窗口
+        let mut best_idx: Option<usize> = None;
+        let mut best_dist: i32 = i32::MAX;
+
+        for (i, &(sx, sy, sw, sh)) in slots.iter().enumerate() {
+            if i == fi { continue; }
+            let scx = sx + sw / 2;
+            let scy = sy + sh / 2;
+
+            let (is_valid, dist) = match direction {
+                Keysym::Left => (scx < fcx, (fcx - scx).abs()),
+                Keysym::Right => (scx > fcx, (scx - fcx).abs()),
+                Keysym::Up => (scy < fcy, (fcy - scy).abs()),
+                Keysym::Down => (scy > fcy, (scy - fcy).abs()),
+                _ => (false, i32::MAX),
+            };
+
+            if is_valid && dist < best_dist {
+                best_dist = dist;
+                best_idx = Some(i);
+            }
+        }
+
+        let target = match best_idx {
+            Some(t) => t,
+            None => return,
         };
 
-        info!("🔄 交换窗口 {} ↔ {}", fi + 1, target + 1);
+        info!("🔄 交换窗口 {} ↔ {} (方向感知)", fi + 1, target + 1);
         ws.window_order.swap(fi, target);
 
         if let Some(fs) = ws.fullscreen {
@@ -1084,7 +1155,7 @@ impl App {
                                     let name = ws.layout.name();
                                     info!("🔄 布局切换 → {}", name);
                                     data.notify(format!("Layout: {}", name));
-                                    data.do_layout();
+                                    data.do_layout_animated();
                                     return FilterResult::Intercept(());
                                 }
                                 // Super+1-9：切换工作区
@@ -1463,15 +1534,16 @@ impl XdgShellHandler for App {
             let is_clipboard = app_id.contains("clipboard") || app_id.contains("wl-copy") || app_id.contains("wl-paste");
             if !app_id.is_empty() && !is_clipboard {
                 info!("✅ pending → tiling (app_id='{}')", app_id);
-                self.workspaces[self.active_ws].tops.push(surface);
-                self.workspaces[self.active_ws].rebuild_order();
+                self.workspaces[self.active_ws].tops.push(surface.clone());
+                let new_idx = self.workspaces[self.active_ws].tops.len() - 1;
+                // 智能插入：根据 split 方向，将新窗口放在焦点窗口旁边
+                self.workspaces[self.active_ws].insert_next_to_focus(WindowSlot::Wl(new_idx));
                 if let Some(new_split) = self.workspaces[self.active_ws].pending_split.take() {
                     self.workspaces[self.active_ws].split = new_split;
                 }
-                let idx = self.workspaces[self.active_ws].tops.len() - 1;
-                info!("➕ 窗口 #{} (工作区 {})", idx, self.active_ws + 1);
+                info!("➕ 窗口 #{} (工作区 {})", new_idx, self.active_ws + 1);
                 self.do_layout_animated();
-                if let Some(tl) = self.workspaces[self.active_ws].tops.get(idx) {
+                if let Some(tl) = self.workspaces[self.active_ws].tops.get(new_idx) {
                     let s = tl.wl_surface().clone();
                     self.workspaces[self.active_ws].focus = Some(s.clone());
                     let kbd = self.kbd.clone();

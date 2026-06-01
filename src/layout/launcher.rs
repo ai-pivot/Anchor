@@ -1,5 +1,5 @@
-//! 启动器渲染 — 深色半透明风格
-//! 深蓝背景（非纯黑） + 网格纹理 + 发光边框 + accent 高亮
+//! 启动器渲染 — 毛玻璃风格
+//! 启动器本体有深色背景，但周围区域不清除 → 壁纸/窗口透过来 = 毛玻璃效果
 
 use crate::config::{parse_color, Config};
 use crate::text_render;
@@ -24,13 +24,12 @@ pub fn render_launcher(
     let lx = (ow - lw) / 2;
     let ly = bar_h + 24;
 
-    // ── 不清除全屏！壁纸和窗口已渲染好，直接在上面叠加面板 ──
-    // 桌面内容透过来就是"毛玻璃"效果（无需真正的模糊）
+    // ── 周围区域：不清除！壁纸和窗口已渲染，透过来就是毛玻璃效果 ──
 
-    // ── 面板背景（比遮罩略亮，明显可见的深蓝）──
+    // ── 面板本体背景（深色，让文字可读）──
     f.clear(opaque(0.10, 0.10, 0.16), &[rect(lx, ly, lw, lh)]).ok();
 
-    // ── 网格纹理（可见的细线网格，增加层次感）──
+    // ── 微网格纹理 ──
     let grid_step = 32;
     let grid_color = opaque(accent.0 * 0.04, accent.1 * 0.04, accent.2 * 0.04);
     let mut grid_rects: Vec<smithay::utils::Rectangle<i32, smithay::utils::Physical>> = Vec::new();
@@ -44,7 +43,7 @@ pub fn render_launcher(
         f.clear(grid_color, &grid_rects).ok();
     }
 
-    // ── 发光边框（5 层渐变，accent 色）──
+    // ── 发光边框（6 层渐变）──
     let glow_layers: [(i32, f32); 6] = [
         (6, 0.02), (5, 0.04), (4, 0.08), (3, 0.15), (2, 0.30), (1, 0.55),
     ];

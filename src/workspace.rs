@@ -47,10 +47,10 @@ impl Workspace {
         Self {
             tops: Vec::new(),
             focus: None,
-            fullscreen: None,
+            fullscreen: Option::None,
             layout: LayoutPreset::default(),
             split: SplitDir::Horizontal,
-            pending_split: None,
+            pending_split: Option::None,
             x11_surfaces: Vec::new(),
             window_order: Vec::new(),
         }
@@ -112,5 +112,67 @@ impl Workspace {
             }
         }
         self.window_order = new_order;
+    }
+
+    /// Insert a new window slot next to the focused window based on split direction.
+    /// If `pending_split` is set, uses that (and consumes it).
+    /// Otherwise falls back to `self.split`.
+    /// If no focused window or only 1 window, appends at end.
+    ///
+    /// `new_slot`: the WindowSlot to insert (e.g. Wl(idx) or X11(idx))
+    pub fn insert_next_to_focus(&mut self, new_slot: WindowSlot) {
+        self.rebuild_order();
+
+        let split = self.pending_split.take().unwrap_or(self.split);
+
+        let n = self.window_order.len();
+        if n <= 1 {
+            // Empty or single window → just append
+            self.window_order.push(new_slot);
+            return;
+        }
+
+        // Find focused window index in window_order
+        let fi = self.focus_idx();
+        match fi {
+            None => {
+                // No focus → append at end
+                self.window_order.push(new_slot);
+            }
+            Some(fi) => {
+                // Insert relative to focused window
+                match split {
+                    SplitDir::Vertical => {
+                        // Vertical split: new window BELOW focused → insert after focused
+                        let insert_at = (fi + 1).min(self.window_order.len());
+                        self.window_order.insert(insert_at, new_slot);
+                    }
+                    SplitDir::Horizontal => {
+                        // Horizontal split: new window to the RIGHT of focused → insert after focused
+                        let insert_at = (fi + 1).min(self.window_order.len());
+                        self.window_order.insert(insert_at, new_slot);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Find the index in effective_order() of the focused surface.
+    fn focus_idx(&self) -> Option<usize> {
+        let focus_surf = self.focus.as_ref()?;
+        let order = self.effective_order();
+        for (i, slot) in order.iter().enumerate() {
+            let matches = match slot {
+                WindowSlot::Wl(idx) => self.tops.get(*idx)
+                    .map(|tl| tl.wl_surface() == focus_surf)
+                    .unwrap_or(false),
+                WindowSlot::X11(idx) => self.x11_surfaces.get(*idx)
+                    .and_then(|xs| xs.wl_surface())
+                    .map(|wl| &wl == focus_surf)
+                    .unwrap_or(false),
+            };
+            if matches { return Some(i); }
+        }
+        None
     }
 }
