@@ -5,7 +5,6 @@
 mod config;
 mod layout;
 use layout::LayoutPreset;
-mod font;
 mod text_render;
 mod block_linear;
 mod wallpaper;
@@ -14,6 +13,14 @@ mod notify;
 mod xwayland;
 mod screenshot;
 mod auth;
+mod workspace;
+use workspace::{Workspace, WindowSlot, NUM_WORKSPACES};
+mod lock;
+use lock::LockState;
+mod launcher;
+use launcher::LauncherState;
+mod scratchpad;
+use scratchpad::ScratchpadState;
 
 use std::{
     os::unix::io::OwnedFd,
@@ -76,85 +83,7 @@ use wayland_server::{Client, ListeningSocket, Resource,
     backend::{ClientData, ClientId, DisconnectReason}, protocol::wl_buffer};
 use tracing::{error, info, warn};
 
-// ── Workspace ──────────────────────────────────────────────
-
-const NUM_WORKSPACES: usize = 9;
-
-/// Identifies a window in the unified window list
-#[derive(Clone, Debug)]
-enum WindowSlot {
-    Wl(usize),  // index into tops
-    X11(usize), // index into x11_surfaces
-}
-
-struct Workspace {
-    tops: Vec<ToplevelSurface>,
-    focus: Option<WlSurface>,
-    fullscreen: Option<usize>,
-    layout: LayoutPreset,
-    split: layout::SplitDir,
-    /// 下一个新窗口使用的分割方向（设一次消费一次）
-    pending_split: Option<layout::SplitDir>,
-    /// X11 (XWayland) surfaces on this workspace
-    x11_surfaces: Vec<smithay::xwayland::X11Surface>,
-    /// Unified rendering/focus order. Maps flat index → (type, index).
-    /// E.g. [Wl(0), Wl(1), X11(0), Wl(2)] means render tops[0], tops[1], x11[0], tops[2]
-    /// When empty, defaults to [Wl(0), Wl(1), ..., X11(0), X11(1), ...]
-    window_order: Vec<WindowSlot>,
-}
-
-impl Workspace {
-    fn new() -> Self {
-        Self { tops: Vec::new(), focus: None, fullscreen: None, layout: LayoutPreset::default(), split: layout::SplitDir::Horizontal, pending_split: None, x11_surfaces: Vec::new(), window_order: Vec::new() }
-    }
-
-    /// Get the unified window order. If window_order is empty, generate default (all WL then all X11).
-    fn effective_order(&self) -> Vec<WindowSlot> {
-        if self.window_order.is_empty() {
-            let mut order: Vec<WindowSlot> = (0..self.tops.len()).map(WindowSlot::Wl).collect();
-            order.extend((0..self.x11_surfaces.len()).map(WindowSlot::X11));
-            order
-        } else {
-            // Filter out invalid entries (windows that were closed)
-            self.window_order.iter().filter(|s| match s {
-                WindowSlot::Wl(i) => *i < self.tops.len(),
-                WindowSlot::X11(i) => *i < self.x11_surfaces.len(),
-            }).cloned().collect()
-        }
-    }
-
-    /// Rebuild window_order to match current windows (called after add/remove)
-    fn rebuild_order(&mut self) {
-        let n_wl = self.tops.len();
-        let n_x11 = self.x11_surfaces.len();
-        // Keep existing order, add new windows at the end
-        let mut new_order = Vec::new();
-        let mut wl_used = vec![false; n_wl];
-        let mut x11_used = vec![false; n_x11];
-        // Preserve existing order for windows that still exist
-        for slot in &self.window_order {
-            match slot {
-                WindowSlot::Wl(i) if *i < n_wl && !wl_used[*i] => {
-                    new_order.push(slot.clone());
-                    wl_used[*i] = true;
-                }
-                WindowSlot::X11(i) if *i < n_x11 && !x11_used[*i] => {
-                    new_order.push(slot.clone());
-                    x11_used[*i] = true;
-                }
-                _ => {}
-            }
-        }
-        // Append any new windows not yet in the order
-        for (i, used) in wl_used.iter().enumerate() {
-            if !used { new_order.push(WindowSlot::Wl(i)); }
-        }
-        for (i, used) in x11_used.iter().enumerate() {
-            if !used { new_order.push(WindowSlot::X11(i)); }
-        }
-        self.window_order = new_order;
-    }
-}
+// ── Workspace (see workspace.rs) ─────────────────────────────
 
 // ── AnchorOutput ────────────────────────────────────────────
 
@@ -203,10 +132,8 @@ struct App {
     /// Cached GPU texture for image wallpaper
     wallpaper_texture: Option<smithay::backend::renderer::gles::GlesTexture>,
     notifications: Vec<Notification>,
-    scratchpad: Option<std::process::Child>,
-    scratchpad_visible: bool,
-    scratchpad_surface: Option<ToplevelSurface>,
-    scratchpad_pending: bool,
+    // Scratchpad (dropdown terminal)
+    scratchpad: ScratchpadState,
     // IM popup (fcitx5 candidate box)
     im_popup: Option<ImPopupSurface>,
     /// Pending toplevels — not yet confirmed by app_id.
@@ -215,10 +142,7 @@ struct App {
     pending_tops: Vec<ToplevelSurface>,
     dbus_notifications: Arc<Mutex<notify::NotificationState>>,
     // 内置启动器
-    launcher_visible: bool,
-    launcher_query: String,
-    launcher_apps: Vec<(String, String)>, // (name, exec)
-    launcher_selected: usize,
+    launcher: LauncherState,
     // 工作区切换动画
     ws_anim: WsAnimation,
     // 多显示器尺寸信息（用于鼠标穿越）
@@ -240,12 +164,7 @@ struct App {
     /// EventLoop handle（用于 XWM selection 转发等需要注册临时 source 的场景）
     loop_handle: Option<smithay::reexports::calloop::LoopHandle<'static, App>>,
     // 锁屏状态
-    locked: bool,
-    lock_input: String,
-    lock_time: Option<std::time::Instant>,
-    lock_shake: Option<std::time::Instant>,
-    lock_wrong: bool,
-    lock_style: u8, // 0~4: 随机选择的锁屏风格
+    lock_state: LockState,
 }
 
 /// 工作区切换动画状态
@@ -576,128 +495,6 @@ impl App {
         tracing::info!("📋 Screenshot copied to Wayland clipboard");
     }
 
-    fn load_apps(terminal_cmd: &str) -> Vec<(String, String)> {
-        let mut apps = Vec::new();
-        let dirs = [
-            "/usr/share/applications".to_string(),
-            format!("{}/.local/share/applications", std::env::var("HOME").unwrap_or_default()),
-        ];
-        for dir in &dirs {
-            if let Ok(entries) = std::fs::read_dir(dir) {
-                for entry in entries.flatten() {
-                    if let Some(name) = entry.path().to_str() {
-                        if name.ends_with(".desktop") {
-                            if let Ok(content) = std::fs::read_to_string(name) {
-                                let mut app_name = String::new();
-                                let mut app_exec = String::new();
-                                let mut is_terminal = false;
-                                let mut no_display = false;
-                                for line in content.lines() {
-                                    if line.starts_with("Name=") && app_name.is_empty() {
-                                        app_name = line[5..].to_string();
-                                    }
-                                    if line.starts_with("Exec=") && app_exec.is_empty() {
-                                        let exec = &line[5..];
-                                        // 移除 %参数占位符
-                                        app_exec = exec.split_whitespace().next().unwrap_or(exec).to_string();
-                                    }
-                                    if line.starts_with("Terminal=true") { is_terminal = true; }
-                                    if line.starts_with("NoDisplay=true") { no_display = true; }
-                                }
-                                if !app_name.is_empty() && !app_exec.is_empty() && !no_display {
-                                    if is_terminal {
-                                        app_exec = format!("{} {}", terminal_cmd, app_exec);
-                                    }
-                                    apps.push((app_name, app_exec));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-        apps.sort_by(|a, b| a.0.to_lowercase().cmp(&b.0.to_lowercase()));
-        apps.dedup_by(|a, b| a.0 == b.0);
-        apps
-    }
-
-    fn toggle_launcher(&mut self) {
-        if self.launcher_visible {
-            self.launcher_visible = false;
-            self.launcher_query.clear();
-            self.launcher_apps.clear();
-        } else {
-            let all_apps = Self::load_apps(&self.cfg.terminal.command);
-            self.launcher_apps = all_apps;
-            self.launcher_query.clear();
-            self.launcher_selected = 0;
-            self.launcher_visible = true;
-        }
-        self.dirty = true;
-    }
-
-    fn launcher_filter(&self) -> Vec<(usize, &(String, String))> {
-        let q = self.launcher_query.to_lowercase();
-        self.launcher_apps.iter().enumerate()
-            .filter(|(_, (name, _))| name.to_lowercase().contains(&q))
-            .collect()
-    }
-
-    fn launcher_select(&mut self) {
-        let filtered = self.launcher_filter();
-        if let Some((_, (_, exec))) = filtered.get(self.launcher_selected) {
-            let exec_cmd = exec.clone();
-            info!("🚀 启动器: {}", exec_cmd);
-            let mut cmd = std::process::Command::new("sh");
-            cmd.arg("-c")
-                .arg(&exec_cmd)
-                .env("WAYLAND_DISPLAY", "wayland-anchor")
-                .env("XDG_RUNTIME_DIR", format!("/run/user/{}", unsafe { libc::getuid() }));
-            if let Some(d) = self.xdisplay {
-                cmd.env("DISPLAY", format!(":{}", d));
-            }
-            cmd.spawn().ok();
-        }
-        self.launcher_visible = false;
-        self.launcher_query.clear();
-        self.dirty = true;
-    }
-
-    fn toggle_scratchpad(&mut self) {
-        if self.scratchpad_visible {
-            // Hide: keep the terminal running, just stop rendering
-            self.scratchpad_visible = false;
-            self.notify("Scratchpad hidden");
-        } else if self.scratchpad.is_some() {
-            // Show: already have a running terminal, just toggle visibility
-            self.scratchpad_visible = true;
-            self.notify("Scratchpad");
-        } else {
-            // First time: launch terminal
-            self.scratchpad_pending = true;
-            let uid = unsafe { libc::getuid() };
-            let mut cmd = std::process::Command::new(&self.cfg.terminal.command);
-            cmd.env("WAYLAND_DISPLAY", "wayland-anchor")
-                .env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"));
-            if let Some(d) = self.xdisplay {
-                cmd.env("DISPLAY", format!(":{}", d));
-            }
-            match cmd.spawn()
-            {
-                Ok(child) => {
-                    self.scratchpad = Some(child);
-                    self.scratchpad_visible = true;
-                    self.notify(&format!("Scratchpad ({})", self.cfg.terminal.command));
-                }
-                Err(e) => {
-                    self.scratchpad_pending = false;
-                    self.notify(&format!("Failed to launch {}: {}", self.cfg.terminal.command, e));
-                }
-            }
-        }
-        self.dirty = true;
-    }
-
     fn drain_notifications(&mut self) {
         let now = std::time::Instant::now();
         self.notifications.retain(|n| now.duration_since(n.created) < n.duration);
@@ -977,30 +774,16 @@ impl App {
                             }
                         }
                         // ── 锁屏模式键盘处理 ──
-                        if data.locked && state == KeyState::Pressed {
+                        if data.lock_state.locked && state == KeyState::Pressed {
                             let sym = keysym.modified_sym();
                             match sym {
-                                Keysym::Escape => { data.lock_input.clear(); data.lock_wrong = false; data.dirty = true; return FilterResult::Intercept(()); }
+                                Keysym::Escape => { data.lock_state.clear(); data.dirty = true; return FilterResult::Intercept(()); }
                                 Keysym::Return => {
-                                    // Verify password via PAM
-                                    let username = std::env::var("USER").unwrap_or_default();
-                                    let password = data.lock_input.clone();
-                                    if auth::verify_password(&username, &password) {
-                                        info!("🔓 Screen unlocked");
-                                        data.locked = false;
-                                        data.lock_input.clear();
-                                        data.lock_wrong = false;
-                                        data.lock_shake = None;
-                                    } else {
-                                        info!("🔒 Wrong password");
-                                        data.lock_input.clear();
-                                        data.lock_wrong = true;
-                                        data.lock_shake = Some(std::time::Instant::now());
-                                    }
+                                    data.lock_state.try_unlock();
                                     data.dirty = true;
                                     return FilterResult::Intercept(());
                                 }
-                                Keysym::BackSpace => { data.lock_input.pop(); data.lock_wrong = false; data.dirty = true; return FilterResult::Intercept(()); }
+                                Keysym::BackSpace => { data.lock_state.backspace(); data.dirty = true; return FilterResult::Intercept(()); }
                                 _ => {
                                     // Printable characters → append to password
                                     let ch = match sym.raw() {
@@ -1009,8 +792,7 @@ impl App {
                                     };
                                     if let Some(c) = ch {
                                         if !mods.logo && !mods.ctrl && !mods.alt {
-                                            data.lock_input.push(c);
-                                            data.lock_wrong = false;
+                                            data.lock_state.push_char(c);
                                             data.dirty = true;
                                             return FilterResult::Intercept(());
                                         }
@@ -1020,16 +802,16 @@ impl App {
                             // Intercept all other keys when locked
                             return FilterResult::Intercept(());
                         }
-                        if data.locked { return FilterResult::Intercept(()); }
+                        if data.lock_state.locked { return FilterResult::Intercept(()); }
                         // ── 启动器模式键盘处理 ──
-                        if data.launcher_visible && state == KeyState::Pressed {
+                        if data.launcher.visible && state == KeyState::Pressed {
                             let sym = keysym.modified_sym();
                             match sym {
-                                Keysym::Escape => { data.launcher_visible = false; data.launcher_query.clear(); data.dirty = true; return FilterResult::Intercept(()); }
-                                Keysym::Return => { data.launcher_select(); return FilterResult::Intercept(()); }
-                                Keysym::Up => { if data.launcher_selected > 0 { data.launcher_selected -= 1; } data.dirty = true; return FilterResult::Intercept(()); }
-                                Keysym::Down => { let max = data.launcher_filter().len().saturating_sub(1); if data.launcher_selected < max { data.launcher_selected += 1; } data.dirty = true; return FilterResult::Intercept(()); }
-                                Keysym::BackSpace => { data.launcher_query.pop(); data.launcher_selected = 0; data.dirty = true; return FilterResult::Intercept(()); }
+                                Keysym::Escape => { data.launcher.close(); data.dirty = true; return FilterResult::Intercept(()); }
+                                Keysym::Return => { data.launcher.select_and_launch(data.xdisplay); data.dirty = true; return FilterResult::Intercept(()); }
+                                Keysym::Up => { data.launcher.select_up(); data.dirty = true; return FilterResult::Intercept(()); }
+                                Keysym::Down => { data.launcher.select_down(); data.dirty = true; return FilterResult::Intercept(()); }
+                                Keysym::BackSpace => { data.launcher.backspace(); data.dirty = true; return FilterResult::Intercept(()); }
                                 _ => {
                                     // 处理可打印字符
                                     let sym = keysym.modified_sym();
@@ -1042,8 +824,7 @@ impl App {
                                     };
                                     if let Some(c) = ch {
                                         if !mods.logo && !mods.ctrl && !mods.alt {
-                                            data.launcher_query.push(c);
-                                            data.launcher_selected = 0;
+                                            data.launcher.push_char(c);
                                             data.dirty = true;
                                             return FilterResult::Intercept(());
                                         }
@@ -1071,17 +852,7 @@ impl App {
                                     if mods.shift {
                                         data.run = false;
                                     } else {
-                                        info!("🔒 Locking screen");
-                                        data.locked = true;
-                                        data.lock_input.clear();
-                                        data.lock_time = Some(std::time::Instant::now());
-                                        data.lock_wrong = false;
-                                        data.lock_shake = None;
-                                        // 随机选择锁屏风格 (0~4)
-                                        data.lock_style = (std::time::SystemTime::now()
-                                            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().subsec_millis() as u64
-                                            ^ std::process::id() as u64
-                                            ^ (data.pointer_pos.0 as u64).wrapping_mul(7919)) as u8 % 5;
+                                        data.lock_state.lock(data.pointer_pos.0);
                                         data.dirty = true;
                                     }
                                     return FilterResult::Intercept(());
@@ -1137,7 +908,8 @@ impl App {
                                     return FilterResult::Intercept(());
                                 }
                                 Keysym::d => {
-                                    data.toggle_launcher();
+                                    data.launcher.toggle(&data.cfg.terminal.command);
+                                    data.dirty = true;
                                     return FilterResult::Intercept(());
                                 }
                                 Keysym::f => { data.toggle_fullscreen(); return FilterResult::Intercept(()); }
@@ -1157,7 +929,9 @@ impl App {
                                 }
                                 Keysym::grave => {
                                     // Scratchpad: 切换下拉终端
-                                    data.toggle_scratchpad();
+                                    let msg = data.scratchpad.toggle(&data.cfg.terminal.command, data.xdisplay);
+                                    data.notify(msg);
+                                    data.dirty = true;
                                     return FilterResult::Intercept(());
                                 }
                                 Keysym::space => {
@@ -1275,7 +1049,7 @@ impl App {
                 }
 
                 // 锁屏模式：不转发鼠标事件给客户端，仅更新光标位置
-                if self.locked {
+                if self.lock_state.locked {
                     self.dirty = true;
                     return;
                 }
@@ -1299,7 +1073,7 @@ impl App {
             }
             InputEvent::PointerButton { event } => {
                 // 锁屏模式：阻止鼠标按钮
-                if self.locked { return; }
+                if self.lock_state.locked { return; }
                 // 截图区域选择模式：按下记录起点，释放完成截图
                 if self.screenshot.selecting {
                     if event.state() == ButtonState::Pressed {
@@ -1392,7 +1166,7 @@ impl App {
             }
             InputEvent::PointerAxis { event } => {
                 // 锁屏模式：阻止滚轮
-                if self.locked { return; }
+                if self.lock_state.locked { return; }
                 let time = (event.time() / 1000) as u32;
                 let mut frame = AxisFrame::new(time).source(event.source());
                 if let Some(v) = event.amount(Axis::Vertical) {
@@ -1420,9 +1194,7 @@ impl XdgShellHandler for App {
     fn xdg_shell_state(&mut self) -> &mut XdgShellState { &mut self.xdg }
     fn new_toplevel(&mut self, s: ToplevelSurface) {
         // 拦截 scratchpad 窗口
-        if self.scratchpad_pending {
-            self.scratchpad_pending = false;
-            self.scratchpad_surface = Some(s.clone());
+        if self.scratchpad.intercept_toplevel(s.clone()) {
             // 配置为浮动覆盖层：居中、上方 1/3 高度
             let ow = self.osize.w;
             let oh = self.osize.h;
@@ -1985,17 +1757,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         wallpaper_cache: wallpaper::WallpaperCache::new(),
         wallpaper_texture: None,
         notifications: Vec::new(),
-        scratchpad: None,
-        scratchpad_visible: false,
-        scratchpad_surface: None,
-        scratchpad_pending: false,
+        scratchpad: ScratchpadState::new(),
         im_popup: None,
         pending_tops: Vec::new(),
         dbus_notifications: notify::start_notification_daemon(),
-        launcher_visible: false,
-        launcher_query: String::new(),
-        launcher_apps: Vec::new(),
-        launcher_selected: 0,
+        launcher: LauncherState::new(),
         ws_anim: WsAnimation { start: None, from_ws: 0, to_ws: 0, duration_ms: 200, direction: 0 },
         output_sizes: vec![],
         output_active_ws: vec![],
@@ -2006,12 +1772,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pending_screenshot: None,
         screenshot_result: None,
         loop_handle: None,
-        locked: false,
-        lock_input: String::new(),
-        lock_time: None,
-        lock_shake: None,
-        lock_wrong: false,
-        lock_style: 0,
+        lock_state: LockState::new(),
     };
     let listener = ListeningSocket::bind("wayland-anchor")?;
     std::env::set_var("WAYLAND_DISPLAY", "wayland-anchor");
@@ -2480,8 +2241,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
 
                             // Scratchpad surface — collected separately (rendered after background in Step 4)
-                            if let Some(ref sp_surf) = state.scratchpad_surface {
-                                if sp_surf.alive() && state.scratchpad_visible {
+                            if let Some(ref sp_surf) = state.scratchpad.surface {
+                                if sp_surf.alive() && state.scratchpad.visible {
                                     let sp_w = ow * 3 / 4;
                                     let sp_h = oh / 3;
                                     let sp_x = (ow - sp_w) / 2;
@@ -2557,18 +2318,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         // Step 1: Wallpaper
                         // ── Lock screen: skip all normal rendering ──
-                        if state.locked {
+                        if state.lock_state.locked {
                             if is_focused_output {
                                 // 焦点屏幕：完整锁屏 UI（时钟 + 密码输入框）
                                 layout::render_lock_screen(
                                     &mut f, &state.cfg, ow, oh,
                                     time_secs, state.frame,
-                                    &state.lock_input, state.lock_wrong, state.lock_shake,
-                                    state.lock_style,
+                                    &state.lock_state.input, state.lock_state.wrong, state.lock_state.shake,
+                                    state.lock_state.style,
                                 );
                             } else {
                                 // 其他屏幕：暗色覆盖 + 同风格背景
-                                layout::render_lock_screen_dim(&mut f, &state.cfg, ow, oh, state.frame, state.lock_style);
+                                layout::render_lock_screen_dim(&mut f, &state.cfg, ow, oh, state.frame, state.lock_state.style);
                             }
                             let sync = f.finish()?;
                             drop(target);
@@ -2681,9 +2442,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
                         // Step 7: Launcher — 只在鼠标所在的 output 上显示
-                        if is_focused_output && state.launcher_visible {
-                            let filtered = state.launcher_filter();
-                            layout::render_launcher(&mut f, &state.cfg, ow, oh, &state.launcher_query, &filtered, state.launcher_selected);
+                        if is_focused_output && state.launcher.visible {
+                            let filtered = state.launcher.filtered();
+                            layout::render_launcher(&mut f, &state.cfg, ow, oh, &state.launcher.query, &filtered, state.launcher.selected);
                         }
 
                         // Step 8: Cursor — 只在鼠标所在的 output 上渲染（坐标需要转换）
@@ -2795,7 +2556,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if im_popup.alive() { send_frames(im_popup.wl_surface(), now); }
             }
             // Scratchpad surface — needs frame callback to commit buffer
-            if let Some(ref sp_surf) = state.scratchpad_surface {
+            if let Some(ref sp_surf) = state.scratchpad.surface {
                 if sp_surf.alive() { send_frames(sp_surf.wl_surface(), now); }
             }
             // X11 surfaces — need frame callbacks to update

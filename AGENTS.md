@@ -15,18 +15,30 @@
 
 ```
 src/
-  main.rs        — Main compositor loop, App struct, Workspace, keyboard/mouse handling, GPU auto-detect
+  main.rs        — Main compositor loop, App struct, keyboard/mouse handling, GPU auto-detect
+  workspace.rs   — Workspace struct, WindowSlot enum, unified render order
+  lock.rs        — Lock screen state machine (PAM auth, shake animation, random styles)
+  launcher.rs    — Built-in app launcher (XDG .desktop scanning, search filter)
+  scratchpad.rs  — Quake-style dropdown terminal state machine
   xwayland.rs    — XWayland support (X11 app compatibility: spawn, surface tracking, helpers)
-  layout.rs      — Layout engine (slot calculation, headbar, decorations, wallpaper, lock screen)
-  text_render.rs — fontdue-based TTF text rendering
   config.rs      — TOML config parsing (includes GPU config section)
+  text_render.rs — fontdue-based TTF text rendering
   auth.rs        — PAM authentication via FFI (lock screen password verification)
   wallpaper.rs   — Wallpaper loading and caching (gradient, image, random)
   cursor.rs      — XCursor theme loading and rendering
   notify.rs      — DBus notification listener (org.freedesktop.Notifications)
   screenshot.rs  — Screenshot capture (area selection, DRM framebuffer dump)
-  block_linear.rs — Block-linear memory layout helpers
-  font.rs        — Font loading utilities
+  block_linear.rs — Block-linear memory layout helpers (NVIDIA)
+  layout/
+    mod.rs        — Module entry point, re-exports all public API
+    geom.rs       — Layout geometry (LayoutPreset, SplitDir, slot calculation)
+    util.rs       — Shared helpers (opaque, color_hex, rect, spacing constants)
+    wallpaper.rs  — Wallpaper rendering (gradient grid, animated glow spots)
+    decorations.rs — Window border decorations (focused/unfocused)
+    headbar.rs    — Top bar (workspace indicators, clock, date, window info)
+    notifications.rs — Toast notification rendering
+    launcher.rs   — Launcher overlay rendering
+    lock_screen.rs — Lock screen rendering (5 animated styles + dim overlay)
 scripts/
   anchor-session   — DM session wrapper (auto-detects GPU, sets env vars conditionally)
   anchor-launcher  — App launcher script (dmenu/wmenu based)
@@ -187,8 +199,8 @@ For SDDM: Create `/usr/share/wayland-sessions/anchor.desktop` with same content.
 3. **No slot-based clipping.** Drawing slot backgrounds between windows creates
    visible seams. Let natural draw order handle overlap.
 4. **Rendering order matters.** Windows → Decorations → Scratchpad → Headbar → Notifications → Launcher → Cursor → Screenshot overlay.
-5. **Scratchpad must intercept `new_toplevel`.** Use a `scratchpad_pending` flag to
-   divert the next toplevel into `scratchpad_surface` instead of workspace tops.
+5. **Scratchpad must intercept `new_toplevel`.** Use `scratchpad.pending` flag in
+   `ScratchpadState` to divert the next toplevel into `scratchpad.surface` instead of workspace tops.
 6. **Disable foot CSD.** Set `csd.preferred=none` in `~/.config/foot/foot.ini`.
 7. **GPU auto-detect is robust.** Reads vendor ID from sysfs, falls back to first card.
    No NVIDIA-specific code in main path — env vars are only set by `anchor-session`.
@@ -208,9 +220,10 @@ For SDDM: Create `/usr/share/wayland-sessions/anchor.desktop` with same content.
 13. **TTC fonts need `collection_index: 0` in `FontSettings`.** fontdue supports TTC
     (TrueType Collection) but requires explicit `collection_index`. NotoSansCJK is TTC.
     Also set `load_substitutions: false` (required field in fontdue 0.9.3).
-14. **Lock screen intercepts ALL input.** When `locked=true`, keyboard/pointer events
+14. **Lock screen intercepts ALL input.** When `lock_state.locked`, keyboard/pointer events
     are blocked before reaching normal handlers. Lock renders on ALL outputs (full UI
-    on focused, dim overlay on others). Password verified via PAM (`auth.rs` FFI).
+    on focused, dim overlay on others). Password verified via PAM (`auth.rs` FFI),
+    managed by `lock::LockState`.
 15. **Screenshot must run after `f.finish()` but before `drop(target)`.** The framebuffer
     is only complete after finish, and target must still be alive for `copy_framebuffer`.
     Needs `use smithay::backend::renderer::Renderer` in scope for the trait method.
