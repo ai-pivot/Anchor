@@ -165,6 +165,10 @@ struct AnchorOutput {
     buf_surf: GbmBufferedSurface<GbmAllocator<DrmDeviceFd>, ()>,
     pending_flip: bool,
     position: (i32, i32),
+    /// 此 output 上当前活跃的工作区索引
+    active_ws: usize,
+    /// Connector 名称（用于配置匹配）
+    name: String,
 }
 
 // ── App ──────────────────────────────────────────────────
@@ -261,6 +265,24 @@ impl App {
             }
         }
         None
+    }
+
+    /// 根据 pointer_pos 全局坐标判断鼠标在哪个 output 上，返回 output 索引
+    fn output_at_pointer(&self) -> usize {
+        let px = self.pointer_pos.0 as i32;
+        let py = self.pointer_pos.1 as i32;
+        for (i, (ox, oy, ow, oh)) in self.output_sizes.iter().enumerate() {
+            if px >= *ox && px < ox + ow && py >= *oy && py < oy + oh {
+                return i;
+            }
+        }
+        0 // fallback 到主输出
+    }
+
+    /// 获取鼠标所在 output 的活跃工作区索引
+    fn active_ws_for_pointer(&self) -> usize {
+        // 用当前 active_ws（键盘焦点）— 后续会改为按 output 分配
+        self.active_ws
     }
 
     fn pointer_focus(&self) -> Option<(WlSurface, Point<f64, Logical>)> {
@@ -634,9 +656,15 @@ impl App {
         self.dirty = true;
     }
 
-    /// 切换到指定工作区
+    /// 切换到指定工作区（操作鼠标所在的 output）
     fn switch_workspace(&mut self, target: usize) {
-        if target >= NUM_WORKSPACES || target == self.active_ws { return; }
+        if target >= NUM_WORKSPACES { return; }
+        
+        // 找到鼠标所在的 output
+        let out_idx = self.output_at_pointer();
+        
+        // 更新全局 active_ws（兼容现有代码）
+        if target == self.active_ws { return; }
         info!("🔀 工作区 {} → {}", self.active_ws + 1, target + 1);
         
         // 触发切换动画
@@ -1009,24 +1037,33 @@ impl App {
                 self.pointer_pos.0 += event.delta_x();
                 self.pointer_pos.1 += event.delta_y();
 
-                // 跨显示器鼠标穿越
-                let screen_w = self.osize.w as f64;
-                let screen_h = self.osize.h as f64;
-                if self.pointer_pos.0 < 0.0 {
-                    if self.output_sizes.len() > 1 {
-                        self.pointer_pos.0 = 0.0;
-                    } else {
-                        self.pointer_pos.0 = 0.0;
+                // 多显示器鼠标穿越：限制在所有 output 的联合边界内
+                // 全局坐标系，pointer_pos 是所有屏幕合并空间中的坐标
+                if !self.output_sizes.is_empty() {
+                    let px = self.pointer_pos.0 as i32;
+                    let py = self.pointer_pos.1 as i32;
+                    let in_any = self.output_sizes.iter().any(|(ox, oy, ow, oh)| {
+                        px >= *ox && px < ox + ow && py >= *oy && py < oy + oh
+                    });
+                    if !in_any {
+                        // 找最近的 output 边界 clamp 回去
+                        let mut best_x = self.pointer_pos.0;
+                        let mut best_y = self.pointer_pos.1;
+                        let mut best_dist = f64::MAX;
+                        for (ox, oy, ow, oh) in &self.output_sizes {
+                            let cx = (*ox as f64 + *ow as f64 / 2.0) - best_x;
+                            let cy = (*oy as f64 + *oh as f64 / 2.0) - best_y;
+                            let d = cx * cx + cy * cy;
+                            if d < best_dist {
+                                best_dist = d;
+                                best_x = best_x.clamp(*ox as f64, (*ox + *ow - 1) as f64);
+                                best_y = best_y.clamp(*oy as f64, (*oy + *oh - 1) as f64);
+                            }
+                        }
+                        self.pointer_pos.0 = best_x;
+                        self.pointer_pos.1 = best_y;
                     }
                 }
-                if self.pointer_pos.0 > screen_w {
-                    if self.output_sizes.len() > 1 {
-                        self.pointer_pos.0 = screen_w - 1.0;
-                    } else {
-                        self.pointer_pos.0 = screen_w - 1.0;
-                    }
-                }
-                self.pointer_pos.1 = self.pointer_pos.1.clamp(0.0, screen_h - 1.0);
 
                 // 截图区域选择模式：更新选择终点
                 if self.screenshot.selecting {
@@ -1780,7 +1817,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         wl_output.create_global::<App>(&dh);
 
-        output_sizes.push((output_x_offset, 0, mw as i32, mh as i32));
+        // 匹配配置中的 output 设置（工作区、位置）
+        let output_cfg = state.cfg.outputs.iter().find(|oc| {
+            if oc.connector.is_empty() { false } else { ci.name.contains(&oc.connector) }
+        });
+        let default_ws = output_cfg.map(|oc| oc.workspace).unwrap_or(idx);
+        let cfg_x = output_cfg.map(|oc| oc.x).unwrap_or(output_x_offset);
+        let cfg_y = output_cfg.map(|oc| oc.y).unwrap_or(0);
+        let out_x = if output_cfg.map(|oc| oc.x).unwrap_or(0) != 0 || output_cfg.map(|oc| oc.y).unwrap_or(0) != 0 {
+            cfg_x  // 有显式配置位置
+        } else {
+            output_x_offset  // 自动从左到右排列
+        };
+
+        output_sizes.push((out_x, cfg_y, mw as i32, mh as i32));
 
         anchor_outputs.push(AnchorOutput {
             output: wl_output,
@@ -1789,7 +1839,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             connector: ci.connector,
             buf_surf,
             pending_flip: false,
-            position: (output_x_offset, 0),
+            position: (out_x, cfg_y),
+            active_ws: default_ws.min(NUM_WORKSPACES - 1),
+            name: ci.name.clone(),
         });
         output_x_offset += mw as i32;
     }
@@ -1948,13 +2000,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
             let window_title = state.window_titles.get(&focus_idx.unwrap_or(0))
                 .cloned().unwrap_or_default();
-            let primary_crtc = anchor_outputs.first().map(|o| o.crtc);
-            let ws = &state.workspaces[state.active_ws];
-            let n_windows = ws.tops.len();
-            let n_x11 = state.workspaces[state.active_ws].x11_surfaces.len();
-            let n_total = n_windows + n_x11;
-            let fullscreen = ws.fullscreen;
-            
+            let pointer_output_idx = state.output_at_pointer();
+
             let ws_anim_active = state.ws_anim.start.is_some();
             let ws_anim_dir = state.ws_anim.direction;
             let ws_anim_duration = state.ws_anim.duration_ms;
@@ -1964,11 +2011,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let out = &mut anchor_outputs[oi];
                 if out.pending_flip { continue; }
 
+                // 此 output 的工作区
+                let out_ws_idx = out.active_ws;
+                let out_ws = &state.workspaces[out_ws_idx];
+                let n_windows = out_ws.tops.len();
+                let n_x11 = out_ws.x11_surfaces.len();
+                let n_total = n_windows + n_x11;
+                let fullscreen = out_ws.fullscreen;
+                let is_focused_output = oi == pointer_output_idx;
+
                 match out.buf_surf.next_buffer() {
                     Ok((mut dmabuf, _)) => {
                         let ow = out.size.w;
                         let oh = out.size.h;
-                        let is_primary = Some(out.crtc) == primary_crtc;
 
                         // ═══════════════════════════════════════════════
                         // Phase 1: collect surface elements (before bind)
@@ -1982,9 +2037,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let mut ws_offset: i32 = 0;
                         let mut scratchpad_data: Option<(i32, i32, i32, i32)> = None; // (x, y, w, h)
 
-                        if is_primary {
+                        // 每个 output 都渲染自己工作区的窗口（不再限制 is_primary）
+                        {
                             if let Some(fi) = fullscreen {
-                                if let Some(tl) = ws.tops.get(fi) {
+                                if let Some(tl) = out_ws.tops.get(fi) {
                                     let tl_geo = smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
                                         states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
                                     }).unwrap_or_default();
@@ -1992,7 +2048,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     win_elems.push(
                                         render_elements_from_surface_tree(&mut renderer, tl.wl_surface(), tl_render_pos, 1.0, 1.0, Kind::Unspecified)
                                     );
-                                    // Collect XDG popups for fullscreen window
                                     let mut p_elems = Vec::new();
                                     for (popup, popup_offset) in PopupManager::popups_for_surface(tl.wl_surface()) {
                                         let offset = (tl_geo.loc + popup_offset - popup.geometry().loc)
@@ -2005,7 +2060,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     popup_elems.push(p_elems);
                                 }
                             } else {
-                                ws_offset = if ws_anim_active {
+                                // 工作区切换动画只对鼠标所在的 output 生效
+                                ws_offset = if is_focused_output && ws_anim_active {
                                     if let Some(elapsed) = ws_anim_elapsed {
                                         if elapsed < ws_anim_duration {
                                             let t = elapsed as f32 / ws_anim_duration as f32;
@@ -2016,12 +2072,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 } else { 0 };
 
                                 // Unified window rendering using effective_order
-                                let order = ws.effective_order();
+                                let order = out_ws.effective_order();
                                 for (i, slot) in order.iter().enumerate() {
-                                    let (x, y, _w, _h) = layout::slot(i, n_total, ow, oh, bar_h, &state.cfg, state.workspaces[state.active_ws].layout, state.workspaces[state.active_ws].split);
+                                    let (x, y, _w, _h) = layout::slot(i, n_total, ow, oh, bar_h, &state.cfg, state.workspaces[out_ws_idx].layout, state.workspaces[out_ws_idx].split);
                                     match slot {
                                         WindowSlot::Wl(idx) => {
-                                            if let Some(tl) = ws.tops.get(*idx) {
+                                            if let Some(tl) = out_ws.tops.get(*idx) {
                                                 let tl_geo = smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
                                                     states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
                                                 }).unwrap_or_default();
@@ -2042,7 +2098,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                         }
                                         WindowSlot::X11(idx) => {
-                                            if let Some(xs) = ws.x11_surfaces.get(*idx) {
+                                            if let Some(xs) = out_ws.x11_surfaces.get(*idx) {
                                                 if let Some(wl) = xs.wl_surface() {
                                                     let render_pos = Point::<i32, Physical>::from((x + ws_offset, y));
                                                     win_elems.push(
@@ -2075,9 +2131,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     if let Some(parent) = im_popup.get_parent() {
                                         let popup_loc = im_popup.location();
                                         let parent_rect = parent.location;
-                                        for (i, tl) in ws.tops.iter().enumerate() {
+                                        for (i, tl) in out_ws.tops.iter().enumerate() {
                                             if tl.wl_surface() == &parent.surface {
-                                                let (x, y, _, _) = layout::slot(i, ws.tops.len(), ow, oh, bar_h, &state.cfg, ws.layout, ws.split);
+                                                let (x, y, _, _) = layout::slot(i, out_ws.tops.len(), ow, oh, bar_h, &state.cfg, out_ws.layout, out_ws.split);
                                                 popup_pos = (x + popup_loc.x, y + popup_loc.y);
                                                 break;
                                             }
@@ -2163,13 +2219,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             draw_render_elements(&mut f, 1.0, &im_elems, &[dmg])?;
                         }
 
-                        // Step 3: Window decorations
-                        if is_primary && fullscreen.is_none() {
-                            let order = ws.effective_order();
+                        // Step 3: Window decorations — 每个 output 都渲染自己工作区的装饰
+                        if fullscreen.is_none() {
+                            let order = out_ws.effective_order();
                             for (i, _) in order.iter().enumerate() {
                                 layout::render_window_decorations_anim(
                                     &mut f, &state.cfg, i, n_total, focus_idx,
-                                    ow, oh, bar_h, state.workspaces[state.active_ws].layout, state.workspaces[state.active_ws].split, ws_offset
+                                    ow, oh, bar_h, state.workspaces[out_ws_idx].layout, state.workspaces[out_ws_idx].split, ws_offset
                                 );
                             }
                         }
@@ -2199,33 +2255,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             draw_render_elements(&mut f, 1.0, &or_elems, &[dmg])?;
                         }
 
-                        // Step 5: Headbar
-                        let ws_counts: Vec<usize> = state.workspaces.iter().map(|w| w.tops.len() + w.x11_surfaces.len()).collect();
-                        layout::render_headbar(&mut f, &state.cfg, ow, oh, n_windows, focus_idx, time_secs, &window_title, state.active_ws, NUM_WORKSPACES, &ws_counts);
+                        // Step 5: Headbar — 每个 output 显示自己的活跃工作区
+                        {
+                            let ws_counts: Vec<usize> = state.workspaces.iter().map(|w| w.tops.len() + w.x11_surfaces.len()).collect();
+                            layout::render_headbar(&mut f, &state.cfg, ow, oh, n_windows, focus_idx, time_secs, &window_title, out_ws_idx, NUM_WORKSPACES, &ws_counts);
+                        }
 
-                        // Step 6: Notifications
-                        if is_primary && !state.notifications.is_empty() {
+                        // Step 6: Notifications — 只在鼠标所在的 output 上显示
+                        if is_focused_output && !state.notifications.is_empty() {
                             let accent = crate::config::parse_color(&state.cfg.colors.focus_border);
                             let notif_data: Vec<(String, std::time::Instant, std::time::Duration)> = state.notifications.iter()
                                 .map(|n| (n.text.clone(), n.created, n.duration)).collect();
                             layout::render_notifications(&mut f, &notif_data, ow, state.cfg.bar.height, accent);
                         }
 
-                        // Step 7: Launcher
-                        if is_primary && state.launcher_visible {
+                        // Step 7: Launcher — 只在鼠标所在的 output 上显示
+                        if is_focused_output && state.launcher_visible {
                             let filtered = state.launcher_filter();
                             layout::render_launcher(&mut f, &state.cfg, ow, oh, &state.launcher_query, &filtered, state.launcher_selected);
                         }
 
-                        // Step 8: Cursor (ALWAYS on top)
-                        if is_primary {
-                            let cx = state.pointer_pos.0 as i32 - state.cursor_img.hotspot_x as i32;
-                            let cy = state.pointer_pos.1 as i32 - state.cursor_img.hotspot_y as i32;
+                        // Step 8: Cursor — 只在鼠标所在的 output 上渲染（坐标需要转换）
+                        if is_focused_output {
+                            let (ox, _oy, _ow, _oh) = state.output_sizes.get(oi).copied().unwrap_or((0, 0, 0, 0));
+                            let cx = state.pointer_pos.0 as i32 - ox - state.cursor_img.hotspot_x as i32;
+                            let cy = state.pointer_pos.1 as i32 - _oy - state.cursor_img.hotspot_y as i32;
                             state.cursor_img.render_batched(&mut f, cx, cy);
                         }
 
                         // Step 9: Screenshot area selection overlay
-                        if is_primary && state.screenshot.selecting {
+                        if is_focused_output && state.screenshot.selecting {
                             if let Some(rect) = state.screenshot.selection_rect() {
                                 screenshot::render_selection_overlay(&mut f, ow, oh, rect);
                             }

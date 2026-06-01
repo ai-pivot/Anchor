@@ -26,6 +26,8 @@ pub struct Config {
     pub gpu: Gpu,
     #[serde(default)]
     pub cursor: Cursor,
+    #[serde(default)]
+    pub outputs: Vec<OutputConfig>,
 }
 
 /// 窗口规则：根据 app-id 或 title 自动分配工作区/布局
@@ -180,6 +182,33 @@ pub struct Cursor {
     pub size: usize,
 }
 
+/// 显示器配置：控制输出排列和默认工作区
+/// config.toml 中用 [[output]] 数组配置，按定义顺序从左到右排列
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OutputConfig {
+    /// Connector 名称匹配（子串），如 "HDMI-A-1"、"DP-2"
+    /// 空字符串=匹配任意未配置的输出（fallback）
+    #[serde(default)]
+    pub connector: String,
+    /// 屏幕位置 x 坐标（像素），用于手动控制排列
+    /// 默认自动从左到右排列
+    #[serde(default)]
+    pub x: i32,
+    /// 屏幕位置 y 坐标（像素）
+    #[serde(default)]
+    pub y: i32,
+    /// 默认绑定的工作区索引 (0-8)
+    #[serde(default)]
+    pub workspace: usize,
+    /// 缩放因子（未来扩展，目前固定 1.0）
+    #[serde(default = "OutputConfig::default_scale")]
+    pub scale: f64,
+}
+
+impl OutputConfig {
+    fn default_scale() -> f64 { 1.0 }
+}
+
 pub fn parse_color(hex: &str) -> (f32, f32, f32) {
     let hex = hex.trim_start_matches('#');
     if hex.len() < 6 { return (0.0, 0.0, 0.0); }
@@ -245,7 +274,7 @@ fn dirs() -> std::path::PathBuf {
 
 // ── Defaults ────────────────────────────────────────
 
-impl Default for Config { fn default() -> Self { Self { colors: Colors::default(), bar: Bar::default(), wallpaper: Wallpaper::default(), layout: Layout::default(), keybindings: Keybindings::default(), terminal: Terminal::default(), launcher: Launcher::default(), window_rules: Vec::new(), gpu: Gpu::default(), cursor: Cursor::default() } } }
+impl Default for Config { fn default() -> Self { Self { colors: Colors::default(), bar: Bar::default(), wallpaper: Wallpaper::default(), layout: Layout::default(), keybindings: Keybindings::default(), terminal: Terminal::default(), launcher: Launcher::default(), window_rules: Vec::new(), gpu: Gpu::default(), cursor: Cursor::default(), outputs: Vec::new() } } }
 impl Default for Colors { fn default() -> Self { Self {
     background: Colors::default_bg(), focus_border: Colors::default_focus_border(), unfocus_border: Colors::default_unfocus_border(),
     bar_background: Colors::default_bar_bg(), bar_foreground: Colors::default_bar_fg(),
