@@ -1022,6 +1022,7 @@ impl App {
                             let sym = keysym.modified_sym();
                             if sym == Keysym::Escape {
                                 data.screenshot.cancel();
+                                data.record_state.selecting = false;
                                 data.dirty = true;
                                 return FilterResult::Intercept(());
                             }
@@ -1110,39 +1111,11 @@ impl App {
                                     }
                                     return FilterResult::Intercept(());
                                 }
-                                // Super+Shift+R: reload config & restart
+                                // Super+Shift+R: 区域录制（选区模式）
                                 Keysym::r if mods.shift => {
-                                    info!("🔄 Reloading Anchor...");
-                                    std::process::Command::new("kill")
-                                        .arg("-SIGUSR1")
-                                        .arg(std::process::id().to_string())
-                                        .spawn().ok();
-                                    // Just mark dirty to force re-render with fresh state
-                                    data.cfg = Config::load();
-                                    data.wallpaper_cache = wallpaper::WallpaperCache::new();
-                                    data.wallpaper_texture = None;
-                                    {
-                                        let home = std::env::var("HOME").unwrap_or_default();
-                                        let wp_dir = if data.cfg.wallpaper.directory.is_empty() {
-                                            format!("{}/Pictures/wallpapers", home)
-                                        } else {
-                                            data.cfg.wallpaper.directory.clone()
-                                        };
-                                        data.wallpaper_cache.scan_directory(&wp_dir);
-                                        if data.cfg.wallpaper.mode == "image" || data.cfg.wallpaper.mode == "random" {
-                                            let wp_path = if data.cfg.wallpaper.path.is_empty() { String::new() } else { data.cfg.wallpaper.path.clone() };
-                                            data.wallpaper_cache.load(&wp_path, data.osize.w as usize, data.osize.h as usize);
-                                        }
-                                    }
-                                    data.cursor_img = if !data.cfg.cursor.theme.is_empty() {
-                                        cursor::CursorImage::load_from_theme(&data.cfg.cursor.theme, &data.cfg.cursor.name, data.cfg.cursor.size)
-                                            .unwrap_or_else(|| cursor::CursorImage::builtin(data.cfg.cursor.size))
-                                    } else {
-                                        let default_theme = std::env::var("XCURSOR_THEME").unwrap_or_else(|_| "default".into());
-                                        cursor::CursorImage::load_from_theme(&default_theme, &data.cfg.cursor.name, data.cfg.cursor.size)
-                                            .unwrap_or_else(|| cursor::CursorImage::builtin(data.cfg.cursor.size))
-                                    };
-                                    data.notify("Config reloaded ✓");
+                                    data.screenshot.begin_selection();
+                                    data.record_state.selecting = true;
+                                    data.notify("Select area to record (drag, Esc to cancel)");
                                     data.dirty = true;
                                     return FilterResult::Intercept(());
                                 }
@@ -1186,7 +1159,7 @@ impl App {
                                         data.record_state.stop();
                                         data.notify("Recording stopped");
                                     } else {
-                                        data.record_state.start(data.osize.w as u32, (data.osize.h - data.cfg.bar.height) as u32);
+                                        data.record_state.start(data.osize.w as u32, data.osize.h as u32);
                                         if data.record_state.recording {
                                             data.notify("Recording started (Super+R to stop)");
                                         }
@@ -1366,21 +1339,35 @@ impl App {
             InputEvent::PointerButton { event } => {
                 // 锁屏模式：阻止鼠标按钮
                 if self.lock_state.locked { return; }
-                // 截图区域选择模式：按下记录起点，释放完成截图
+                // 截图/录制区域选择模式：按下记录起点，释放完成
                 if self.screenshot.selecting {
                     if event.state() == ButtonState::Pressed {
                         self.screenshot.on_press(self.pointer_pos.0, self.pointer_pos.1);
                         self.dirty = true;
                     } else if event.state() == ButtonState::Released {
                         if let Some((x, y, w, h)) = self.screenshot.on_release() {
-                            self.pending_screenshot = Some(screenshot::ScreenshotRequest::Area(x, y, w, h));
+                            if self.record_state.selecting {
+                                // 区域录制：启动录制
+                                self.record_state.selecting = false;
+                                let area = record::RecordArea {
+                                    x: x as u32, y: y as u32, w: w as u32, h: h as u32
+                                };
+                                self.record_state.start_with_area(self.osize.w as u32, self.osize.h as u32, Some(area));
+                                if self.record_state.recording {
+                                    self.notify(format!("Recording {}x{} area (Super+R to stop)", w, h));
+                                }
+                            } else {
+                                // 区域截图
+                                self.pending_screenshot = Some(screenshot::ScreenshotRequest::Area(x, y, w, h));
+                            }
                             self.dirty = true;
                         } else {
+                            self.record_state.selecting = false;
                             self.notify("Selection too small, cancelled");
                         }
                         self.dirty = true;
                     }
-                    return; // 截图模式中拦截所有鼠标点击
+                    return; // 选区模式中拦截所有鼠标点击
                 }
 
                 // 点击聚焦（仅 Press 时）
@@ -2865,16 +2852,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 Ok(mapping) => {
                                     match renderer.map_texture(&mapping) {
                                         Ok(pixels) => {
-                                            // 取 bar 以下的区域
-                                            let bar_h_usize = bar_h as usize;
-                                            let rec_w = ow as usize;
-                                            let rec_h = (oh - bar_h) as usize;
-                                            let row_len = rec_w * 4;
-                                            let frame_size = rec_w * rec_h * 4;
-                                            let start = bar_h_usize * row_len;
-                                            if start + frame_size <= pixels.len() {
-                                                state.record_state.write_frame(&pixels[start..start + frame_size]);
-                                            }
+                                            state.record_state.write_frame(&pixels, ow as u32, oh as u32);
                                         }
                                         Err(_) => {}
                                     }
