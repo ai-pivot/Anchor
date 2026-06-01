@@ -281,15 +281,17 @@ For SDDM: Create `/usr/share/wayland-sessions/anchor.desktop` with same content.
     clipboard interop with X11 must be done through Smithay's own
     selection APIs (`XwmHandler::send_selection`, `X11Wm::set_selection`),
     NEVER via external CLI tools.
-22. **Session restart MUST restore critical D-Bus daemons.** When anchor
-    dies and is restarted (e.g. after a crash, `kill $(pgrep anchor)`),
-    the GDM login flow does NOT re-run — anchor is restarted in place.
-    But gnome-keyring-daemon, dbus-update-activation-environment state,
-    and any other session-level D-Bus services that were children of
-    anchor (or inherited via login) are now gone. Without restarting
-    them, browsers will see an empty Secret Service (login state
-    appears as a fresh user) and D-Bus auto-launch services won't
-    activate. `scripts/anchor-session` must always run
-    `dbus-update-activation-environment --systemd` and
-    `gnome-keyring-daemon --start --replace` before `exec anchor`
-    to keep the session consistent across compositor restarts.
+22. **电源键物理重启 ≠ session 内重启，处理方式不同。**
+    - **session 内重启** (`kill $(pgrep anchor)` 后再启动 anchor)：
+      GDM session 没死，D-Bus session bus 仍存活。`scripts/anchor-session`
+      中的 `dbus-update-activation-environment` 和 `gnome-keyring-daemon --start`
+      可以恢复这些 session 级守护进程。
+    - **电源键物理重启**：全新 session，D-Bus session bus 全新启动。
+      `gnome-keyring-daemon --start` 启动时**没有解锁密钥**，守护进程
+      处于 locked 状态，Secret Service 不可用。
+    - 物理重启后找回浏览器登录态的**唯一方法**：
+      1. 取消 GDM 自动登录（`/etc/gdm3/custom.conf` 中注释
+         `AutomaticLoginEnable` 和 `AutomaticLogin`）
+      2. 物理重启后 GDM 显示登录页
+      3. 输入密码 → GDM 用密码解锁 GNOME Keyring（密码=keyring 密码）
+      4. 浏览器、TLS 证书、密码管理器全部恢复
