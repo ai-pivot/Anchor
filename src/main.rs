@@ -245,6 +245,7 @@ struct App {
     lock_time: Option<std::time::Instant>,
     lock_shake: Option<std::time::Instant>,
     lock_wrong: bool,
+    lock_style: u8, // 0~4: 随机选择的锁屏风格
 }
 
 /// 工作区切换动画状态
@@ -535,10 +536,6 @@ impl App {
                             tl.with_pending_state(|st| {
                                 st.states.set(xdg_toplevel::State::Activated);
                                 st.size = Some((w, h).into());
-                            });
-                            tl.send_pending_configure();
-                            tl.with_pending_state(|st| {
-                                st.size = None;
                             });
                             tl.send_configure();
                         }
@@ -1080,6 +1077,11 @@ impl App {
                                         data.lock_time = Some(std::time::Instant::now());
                                         data.lock_wrong = false;
                                         data.lock_shake = None;
+                                        // 随机选择锁屏风格 (0~4)
+                                        data.lock_style = (std::time::SystemTime::now()
+                                            .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().subsec_millis() as u64
+                                            ^ std::process::id() as u64
+                                            ^ (data.pointer_pos.0 as u64).wrapping_mul(7919)) as u8 % 5;
                                         data.dirty = true;
                                     }
                                     return FilterResult::Intercept(());
@@ -2009,6 +2011,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         lock_time: None,
         lock_shake: None,
         lock_wrong: false,
+        lock_style: 0,
     };
     let listener = ListeningSocket::bind("wayland-anchor")?;
     std::env::set_var("WAYLAND_DISPLAY", "wayland-anchor");
@@ -2555,13 +2558,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Step 1: Wallpaper
                         // ── Lock screen: skip all normal rendering ──
                         if state.locked {
-                            // Only render wallpaper + lock overlay on the focused output
                             if is_focused_output {
+                                // 焦点屏幕：完整锁屏 UI（时钟 + 密码输入框）
                                 layout::render_lock_screen(
                                     &mut f, &state.cfg, ow, oh,
                                     time_secs, state.frame,
                                     &state.lock_input, state.lock_wrong, state.lock_shake,
+                                    state.lock_style,
                                 );
+                            } else {
+                                // 其他屏幕：暗色覆盖 + 同风格背景
+                                layout::render_lock_screen_dim(&mut f, &state.cfg, ow, oh, state.frame, state.lock_style);
                             }
                             let sync = f.finish()?;
                             drop(target);

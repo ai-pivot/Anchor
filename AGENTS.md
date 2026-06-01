@@ -8,7 +8,7 @@
 - **Language**: Rust
 - **Compositor framework**: Smithay 0.7
 - **GPU**: Auto-detected (NVIDIA / AMD / Intel via `/sys/class/drm/*/device/vendor`)
-- **Renderer**: Pixman (CPU-only; works on all GPUs including NVIDIA proprietary without GBM/EGL)
+- **Renderer**: GlesRenderer (GPU OpenGL ES via Smithay; works on NVIDIA proprietary, AMD, Intel)
 - **Session**: libseat (logind backend) — works with GDM, SDDM, LightDM
 
 ## Project Structure
@@ -17,18 +17,25 @@
 src/
   main.rs        — Main compositor loop, App struct, Workspace, keyboard/mouse handling, GPU auto-detect
   xwayland.rs    — XWayland support (X11 app compatibility: spawn, surface tracking, helpers)
-  layout.rs      — Layout engine (slot calculation, headbar, decorations, wallpaper)
+  layout.rs      — Layout engine (slot calculation, headbar, decorations, wallpaper, lock screen)
   text_render.rs — fontdue-based TTF text rendering
   config.rs      — TOML config parsing (includes GPU config section)
+  auth.rs        — PAM authentication via FFI (lock screen password verification)
+  wallpaper.rs   — Wallpaper loading and caching (gradient, image, random)
+  cursor.rs      — XCursor theme loading and rendering
+  notify.rs      — DBus notification listener (org.freedesktop.Notifications)
+  screenshot.rs  — Screenshot capture (area selection, DRM framebuffer dump)
+  block_linear.rs — Block-linear memory layout helpers
+  font.rs        — Font loading utilities
 scripts/
   anchor-session   — DM session wrapper (auto-detects GPU, sets env vars conditionally)
-  drm-dump-fb.c   — DRM framebuffer dump tool (compiled separately)
   anchor-launcher  — App launcher script (dmenu/wmenu based)
 config.toml       — User configuration
-Cargo.toml        — Dependencies (fontdue, smithay, pixman, etc.)
+Cargo.toml        — Dependencies (smithay, fontdue, libc, chrono, image, zbus, etc.)
+build.rs          — Build script (links libpam)
 ```
 
-## Features (v28)
+## Features (v29)
 
 | Feature | Keybinding | Description |
 |---------|-----------|-------------|
@@ -43,13 +50,14 @@ Cargo.toml        — Dependencies (fontdue, smithay, pixman, etc.)
 | Move window | `Super+Shift+1-9` | Move focused window to workspace |
 | Close | `Super+Q` | Close focused window |
 | XWayland | Auto | X11 app support (Feishu, Chrome, Edge, etc.) |
+| Lock screen | `Super+Esc` | 5 random animated styles, PAM password auth |
 
 ## Rendering Pipeline
 
-8-step layered pipeline, all rendered via Pixman CPU renderer:
+8-step layered pipeline, all rendered via GlesRenderer (GPU OpenGL ES):
 
 ```
-Step 1: Wallpaper (gradient/solid)
+Step 1: Wallpaper (gradient/solid/image texture)
 Step 2: Window content (all elements, single draw call)
 Step 2.5: IM popup (Wayland input method)
 Step 3: Window decorations (border lines)
@@ -58,7 +66,9 @@ Step 4.5: X11 override-redirect windows (input method popups, tooltips)
 Step 5: Headbar (workspace indicators, clock, date, CPU/MEM)
 Step 6: Notifications (toast overlay)
 Step 7: App launcher (search + list)
-Step 8: Cursor (solid triangle, block-linear safe)
+Step 8: Cursor
+Step 9: Screenshot area selection overlay
+Step 10: Screenshot capture (copy_framebuffer after finish, before drop target)
 ```
 
 **Key principle**: Window elements are collected in order (0→N) into a single vec,
@@ -94,8 +104,6 @@ device = ""        # "/dev/dri/card1" or empty for auto
 
 - Only `drmModeAddFB2WithModifiers` works (legacy `drmModeAddFB` unsupported)
 - Dumb buffers: Not supported for scanout
-- Pixman renders in linear layout, NVIDIA scanout expects block-linear.
-  Renders correctly at macro scale (window-sized regions) but small pixels may distort.
 - `anchor-session` auto-sets `GBM_BACKEND=nvidia-drm`, `__GLX_VENDOR_LIBRARY_NAME=nvidia`, etc.
 
 ## Configuration
@@ -178,7 +186,7 @@ For SDDM: Create `/usr/share/wayland-sessions/anchor.desktop` with same content.
 2. **Keep notifier alive.** Dropping it kills the entire session silently.
 3. **No slot-based clipping.** Drawing slot backgrounds between windows creates
    visible seams. Let natural draw order handle overlap.
-4. **Rendering order matters.** Windows → Decorations → Scratchpad → Headbar → Notifications → Launcher → Cursor.
+4. **Rendering order matters.** Windows → Decorations → Scratchpad → Headbar → Notifications → Launcher → Cursor → Screenshot overlay.
 5. **Scratchpad must intercept `new_toplevel`.** Use a `scratchpad_pending` flag to
    divert the next toplevel into `scratchpad_surface` instead of workspace tops.
 6. **Disable foot CSD.** Set `csd.preferred=none` in `~/.config/foot/foot.ini`.
@@ -200,3 +208,9 @@ For SDDM: Create `/usr/share/wayland-sessions/anchor.desktop` with same content.
 13. **TTC fonts need `collection_index: 0` in `FontSettings`.** fontdue supports TTC
     (TrueType Collection) but requires explicit `collection_index`. NotoSansCJK is TTC.
     Also set `load_substitutions: false` (required field in fontdue 0.9.3).
+14. **Lock screen intercepts ALL input.** When `locked=true`, keyboard/pointer events
+    are blocked before reaching normal handlers. Lock renders on ALL outputs (full UI
+    on focused, dim overlay on others). Password verified via PAM (`auth.rs` FFI).
+15. **Screenshot must run after `f.finish()` but before `drop(target)`.** The framebuffer
+    is only complete after finish, and target must still be alive for `copy_framebuffer`.
+    Needs `use smithay::backend::renderer::Renderer` in scope for the trait method.
