@@ -236,3 +236,11 @@ For SDDM: Create `/usr/share/wayland-sessions/anchor.desktop` with same content.
     when entering fullscreen (both Wayland `toggle_fullscreen` and X11 `fullscreen_request`).
     The pointer_focus fullscreen branch must `return None` (not fall through) when the
     fullscreen slot is invalid, to prevent the same leak.
+17. **Screenshot must use `Fourcc::Abgr8888`, not `Xrgb8888`.** In GlesRenderer,
+    `copy_framebuffer` already auto-flips Y (framebuffer Y=0 at bottom → top-down
+    RGBA buffer). `Abgr8888` is little-endian = R,G,B,A byte order, matching
+    PNG natively — no per-pixel BGR↔RGB swap, no manual row reverse needed.
+    Using `Xrgb8888` + manual `(0..h).rev()` row flip + manual BGR→RGB swap
+    produces a 180°-rotated image with R/B channels swapped (Xrgb8888's
+    byte layout is driver-dependent via `GL_IMPLEMENTATION_COLOR_READ_*`,
+    so the BGR→RGB assumption breaks across drivers).
