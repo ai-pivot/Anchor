@@ -438,25 +438,22 @@ impl App {
     fn fullscreen(&self) -> Option<usize> { self.workspaces[self.active_ws].fullscreen }
     fn set_fullscreen(&mut self, v: Option<usize>) { self.workspaces[self.active_ws].fullscreen = v; }
 
-    fn do_layout(&mut self) {
-        let ws_idx = self.active_ws;
+    /// 布局指定工作区的所有窗口
+    fn layout_workspace(&mut self, ws_idx: usize) {
         self.workspaces[ws_idx].rebuild_order();
         let order = self.workspaces[ws_idx].effective_order();
         let n = order.len();
         if n == 0 { return; }
         let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
 
-        // 修正 fullscreen
         if let Some(fi) = self.workspaces[ws_idx].fullscreen {
             if fi >= n { self.workspaces[ws_idx].fullscreen = None; }
         }
         let fullscreen = self.workspaces[ws_idx].fullscreen;
-
         let osize_w = self.osize.w;
         let osize_h = self.osize.h;
 
         if let Some(fi) = fullscreen {
-            // Fullscreen: make the focused window fill the screen, minimize others
             for (i, slot) in order.iter().enumerate() {
                 match slot {
                     WindowSlot::Wl(idx) => {
@@ -489,35 +486,34 @@ impl App {
                 }
             }
         } else {
-            // Normal tiling: layout all windows in order
             for (i, slot) in order.iter().enumerate() {
-                let (x, y, w, h) = layout::slot(i, n, osize_w, osize_h, bar_h, &self.cfg, self.workspaces[self.active_ws].layout, self.workspaces[self.active_ws].split);
+                let (x, y, w, h) = layout::slot(i, n, osize_w, osize_h, bar_h, &self.cfg, self.workspaces[ws_idx].layout, self.workspaces[ws_idx].split);
                 match slot {
                     WindowSlot::Wl(idx) => {
                         if let Some(tl) = self.workspaces[ws_idx].tops.get(*idx) {
-                            info!("📐 layout 窗口 #{}: {}x{}", i, w, h);
                             tl.with_pending_state(|st| {
                                 st.states.set(xdg_toplevel::State::Activated);
-                                st.states.unset(xdg_toplevel::State::Fullscreen);
-                                st.states.set(xdg_toplevel::State::TiledLeft);
-                                st.states.set(xdg_toplevel::State::TiledRight);
-                                st.states.set(xdg_toplevel::State::TiledTop);
-                                st.states.set(xdg_toplevel::State::TiledBottom);
                                 st.size = Some((w, h).into());
+                            });
+                            tl.send_pending_configure();
+                            tl.with_pending_state(|st| {
+                                st.size = None;
                             });
                             tl.send_configure();
                         }
                     }
                     WindowSlot::X11(idx) => {
                         if let Some(xs) = self.workspaces[ws_idx].x11_surfaces.get(*idx) {
-                            let rect = Rectangle::from_loc_and_size((x, y), (w, h));
-                            let _ = xs.configure(Some(rect));
-                            info!("📐 layout X11 #{}: {}x{} at ({},{})", i, w, h, x, y);
+                            let _ = xs.configure(Some(Rectangle::from_loc_and_size((x, y), (w, h))));
                         }
                     }
                 }
             }
         }
+    }
+
+    fn do_layout(&mut self) {
+        self.layout_workspace(self.active_ws);
     }
 
     fn notify(&mut self, text: impl Into<String>) {
@@ -750,10 +746,9 @@ impl App {
         self.dirty = true;
     }
 
-    /// 将当前焦点窗口移动到目标工作区（操作 focused output 的工作区）
+    /// 将当前焦点窗口移动到目标工作区，然后跟随窗口切换到目标工作区
     fn move_window_to_workspace(&mut self, target: usize) {
         if target >= NUM_WORKSPACES { return; }
-        // 只在目标工作区是当前 focused output 正在显示的工作区时跳过
         let out_idx = self.focused_output;
         if target == self.output_active_ws.get(out_idx).copied().unwrap_or(0) { return; }
         let fi = match self.focus_idx() {
@@ -770,11 +765,9 @@ impl App {
         let surf = tl.wl_surface().clone();
 
         info!("📦 移动窗口 #{} → 工作区 {}", fi + 1, target + 1);
-        self.notify(format!("Moved → WS {}", target + 1));
 
         // 从当前工作区移除
         self.workspaces[ws_idx].tops.remove(fi);
-        // 修正 fullscreen
         if let Some(fs) = self.workspaces[ws_idx].fullscreen {
             if fs == fi { self.workspaces[ws_idx].fullscreen = None; }
             else if fs > fi { self.workspaces[ws_idx].fullscreen = Some(fs - 1); }
@@ -784,25 +777,36 @@ impl App {
                 .map(|t| t.wl_surface().clone());
         }
 
-        // 隐藏移动的窗口
-        tl.with_pending_state(|st| {
-            st.states.unset(xdg_toplevel::State::Activated);
-            st.size = Some((1, 1).into());
-        });
-        tl.send_configure();
-
         // 添加到目标工作区
-        self.workspaces[target].tops.push(tl);
+        self.workspaces[target].tops.push(tl.clone());
+        self.workspaces[target].focus = Some(surf.clone());
 
-        // 重新布局当前工作区
+        // 重新布局源工作区（移除窗口后）
         self.active_ws = ws_idx;
         self.do_layout();
-        // 更新焦点
-        if let Some(ref s) = self.workspaces[self.active_ws].focus {
-            let kbd = self.kbd.clone();
-            let serial = SERIAL_COUNTER.next_serial();
-            kbd.set_focus(self, Some(s.clone()), serial);
+
+        // 布局目标工作区（新窗口加入后需要重新计算位置）
+        self.layout_workspace(target);
+
+        // 如果目标工作区已经在某个 output 上显示，把鼠标移过去
+        // 如果不在任何 output 上，切换当前 output 到目标工作区
+        let target_output = self.output_active_ws.iter().position(|&ws| ws == target);
+        if let Some(t_oi) = target_output {
+            // 目标工作区已在 output t_oi 上显示，移鼠标过去
+            let (ox, oy, ow, oh) = self.output_sizes.get(t_oi).copied().unwrap_or_default();
+            self.pointer_pos = (ox as f64 + ow as f64 / 2.0, oy as f64 + oh as f64 / 2.0);
+            self.focused_output = t_oi;
+            self.active_ws = target;
+        } else {
+            // 目标工作区没在任何 output 上，切换当前 output
+            self.switch_workspace(target);
         }
+
+        // 设置焦点
+        let kbd = self.kbd.clone();
+        let serial = SERIAL_COUNTER.next_serial();
+        kbd.set_focus(self, Some(surf), serial);
+        self.notify(format!("Moved → WS {}", target + 1));
         self.dirty = true;
     }
 
@@ -2728,30 +2732,16 @@ impl smithay::xwayland::XwmHandler for App {
     fn new_selection(
         &mut self,
         _xwm: smithay::xwayland::xwm::XwmId,
-        selection: smithay::wayland::selection::SelectionTarget,
-        mime_types: Vec<String>,
+        _selection: smithay::wayland::selection::SelectionTarget,
+        _mime_types: Vec<String>,
     ) {
-        // X11 sets new selection -> XWM becomes owner, registers with Wayland data device
-        // Smithay auto-handles Wayland client paste requests via X11Wm
-        tracing::info!("X11 new selection: {:?} types={:?}", selection, mime_types);
-        if let Some(xwm) = self.xw.xwm.as_mut() {
-            if let Err(e) = xwm.new_selection(selection, Some(mime_types)) {
-                tracing::warn!("X11 new_selection failed: {:?}", e);
-            }
-        }
     }
 
     fn cleared_selection(
         &mut self,
         _xwm: smithay::xwayland::xwm::XwmId,
-        selection: smithay::wayland::selection::SelectionTarget,
+        _selection: smithay::wayland::selection::SelectionTarget,
     ) {
-        tracing::info!("X11 selection cleared: {:?}", selection);
-        if let Some(xwm) = self.xw.xwm.as_mut() {
-            if let Err(e) = xwm.new_selection(selection, None) {
-                tracing::warn!("X11 clear_selection failed: {:?}", e);
-            }
-        }
     }
 
         fn property_notify(
