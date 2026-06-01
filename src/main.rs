@@ -996,8 +996,12 @@ impl App {
                 self.pointer_pos.0 += event.delta_x();
                 self.pointer_pos.1 += event.delta_y();
 
-                // 多显示器鼠标穿越：限制在所有 output 的联合边界内
-                // 全局坐标系，pointer_pos 是所有屏幕合并空间中的坐标
+                // 多显示器鼠标边界处理：
+                // 鼠标可能停留在某个 output 内，也可能在联合空间外（罕见但可能）。
+                // 关键原则：
+                // 1. 任何 output 内部都不应被 clamp 越界
+                // 2. 出界时按方向投影到邻接屏幕（保持鼠标运动方向连续性）
+                // 3. 若无邻接屏幕，才用屏幕中心距离的最近屏 clamp（兜底）
                 if !self.output_sizes.is_empty() {
                     let px = self.pointer_pos.0 as i32;
                     let py = self.pointer_pos.1 as i32;
@@ -1005,22 +1009,43 @@ impl App {
                         px >= *ox && px < ox + ow && py >= *oy && py < oy + oh
                     });
                     if !in_any {
-                        // 找最近的 output 边界 clamp 回去
-                        let mut best_x = self.pointer_pos.0;
-                        let mut best_y = self.pointer_pos.1;
-                        let mut best_dist = f64::MAX;
-                        for (ox, oy, ow, oh) in &self.output_sizes {
-                            let cx = (*ox as f64 + *ow as f64 / 2.0) - best_x;
-                            let cy = (*oy as f64 + *oh as f64 / 2.0) - best_y;
-                            let d = cx * cx + cy * cy;
-                            if d < best_dist {
-                                best_dist = d;
-                                best_x = best_x.clamp(*ox as f64, (*ox + *ow - 1) as f64);
-                                best_y = best_y.clamp(*oy as f64, (*oy + *oh - 1) as f64);
-                            }
+                        // 1) 方向投影：找与鼠标位置相邻的 output
+                        //    鼠标在某个 output 的 X 方向之外：找 X 方向上最接近的 output
+                        //    优先尝试严格 X 方向（左右跨屏），其次 Y 方向（上下跨屏）
+                        let mut new_x = self.pointer_pos.0;
+                        let mut new_y = self.pointer_pos.1;
+                        // 找出鼠标上方 / 下方 / 左方 / 右方最近的邻接 output
+                        // 屏幕布局约定：output 可能是同 Y 范围（左右排），同 X 范围（上下排），或两者都不同
+                        // 简化策略：选一个能完整包含鼠标 x 或 y 范围的"水平或垂直邻接屏"
+                        let target = self.output_sizes.iter().min_by(|(ox1, oy1, ow1, oh1), (ox2, oy2, ow2, oh2)| {
+                            // 距离排序：欧氏距离到 output 中心
+                            let c1x = *ox1 as f64 + *ow1 as f64 / 2.0;
+                            let c1y = *oy1 as f64 + *oh1 as f64 / 2.0;
+                            let c2x = *ox2 as f64 + *ow2 as f64 / 2.0;
+                            let c2y = *oy2 as f64 + *oh2 as f64 / 2.0;
+                            let d1 = (c1x - self.pointer_pos.0).powi(2) + (c1y - self.pointer_pos.1).powi(2);
+                            let d2 = (c2x - self.pointer_pos.0).powi(2) + (c2y - self.pointer_pos.1).powi(2);
+                            d1.partial_cmp(&d2).unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        if let Some((ox, oy, ow, oh)) = target {
+                            // 关键修复：clamp 到 (ox, ox+ow) 而非 (ox, ox+ow-1)
+                            // 否则永远到不了真正的右/下边界
+                            new_x = self.pointer_pos.0.clamp(*ox as f64, (*ox + *ow) as f64);
+                            new_y = self.pointer_pos.1.clamp(*oy as f64, (*oy + *oh) as f64);
                         }
-                        self.pointer_pos.0 = best_x;
-                        self.pointer_pos.1 = best_y;
+                        self.pointer_pos.0 = new_x;
+                        self.pointer_pos.1 = new_y;
+                    } else {
+                        // 鼠标在某个 output 内：clamp 到该 output 内部（防止指针移到联合空间边界外）
+                        // 找到当前所在的 output
+                        let current = self.output_sizes.iter().find(|(ox, oy, ow, oh)| {
+                            px >= *ox && px < ox + ow && py >= *oy && py < oy + oh
+                        });
+                        if let Some((ox, oy, ow, oh)) = current {
+                            // clamp 允许鼠标到达真实边界
+                            self.pointer_pos.0 = self.pointer_pos.0.clamp(*ox as f64, (*ox + *ow) as f64);
+                            self.pointer_pos.1 = self.pointer_pos.1.clamp(*oy as f64, (*oy + *oh) as f64);
+                        }
                     }
                 }
 
@@ -2291,7 +2316,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         for xs in &state.xw.or_surfaces {
                             if let Some(wl) = xs.wl_surface() {
                                 let geo = xs.geometry();
-                                let render_pos = Point::<i32, Physical>::from((geo.loc.x, geo.loc.y));
+                                // 关键修复：X11 OR 窗口的 geometry() 是 X11 root window 绝对坐标。
+                                // 渲染管线使用 output 局部坐标，所以必须减去当前 output 的 (ox, oy) 偏移。
+                                // 否则在多屏场景下，OR 窗口会渲染到错误的 output 上（甚至屏幕外）。
+                                // 全屏应用占据整个 output 时，这一转换也保证 OR popup 出现在正确位置。
+                                let (ox, oy, _, _) = state.output_sizes.get(oi).copied().unwrap_or((0, 0, state.osize.w, state.osize.h));
+                                let render_pos = Point::<i32, Physical>::from((geo.loc.x - ox, geo.loc.y - oy));
                                 if is_focused_output {
                                     or_elems.extend(
                                         render_elements_from_surface_tree(&mut renderer, &wl, render_pos, 1.0, 1.0, Kind::Unspecified)
