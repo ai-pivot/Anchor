@@ -67,12 +67,12 @@ impl ScreenshotState {
     }
 }
 
-// ── DRM ioctl 常量（Linux x86_64） ──────────────────────────────
-const DRM_IOCTL_BASE: u64 = 0x64;
-const DRM_IOCTL_MODE_GETRESOURCES: u64 = 0xA0;
-const DRM_IOCTL_MODE_GETCRTC: u64 = 0xA6;
-const DRM_IOCTL_MODE_GETFB: u64 = 0xAD;
-const DRM_IOCTL_PRIME_HANDLE_TO_FD: u64 = 0x2E;
+// ── DRM ioctl 命令号（x86_64，从 libdrm 头文件获取） ──────────
+const DRM_IOCTL_MODE_GETRESOURCES: u64     = 0xc04064a0;
+const DRM_IOCTL_MODE_GETCRTC: u64          = 0xc06864a1;
+const DRM_IOCTL_MODE_GETFB: u64            = 0xc01c64ad;
+const DRM_IOCTL_PRIME_HANDLE_TO_FD: u64    = 0xc00c642d;
+const DRM_IOCTL_MODE_MAP_DUMB: u64         = 0xc01064b3;
 
 fn drm_ioctl(fd: RawFd, cmd: u64, arg: *mut u8) -> i32 {
     unsafe { libc::ioctl(fd, cmd, arg) }
@@ -89,54 +89,58 @@ fn drm_read_fb(drm_dev: &str) -> Result<(u32, u32, u32, Vec<u8>), String> {
         return Err(format!("无法打开 DRM 设备: {}", drm_dev));
     }
 
-    // 1. 获取 DRM resources（crtc 列表）
-    // drmModeRes: count_fbs, count_crtcs, count_connectors, count_encoders,
-    //             min_width, max_width, min_height, max_height,
-    //             *fbs, *crtcs, *connectors, *encoders
+    // 1. 获取 DRM resources（CRTC 列表）
+    // 必须与内核 struct drm_mode_card_res 精确匹配
     #[repr(C)]
-    struct DrmModeRes {
+    struct DrmModeCardRes {
+        fb_id_ptr: u64,
+        crtc_id_ptr: u64,
+        connector_id_ptr: u64,
+        encoder_id_ptr: u64,
         count_fbs: u32,
         count_crtcs: u32,
         count_connectors: u32,
         count_encoders: u32,
-        min_width: u32, max_width: u32,
-        min_height: u32, max_height: u32,
-        fbs: *mut u32,
-        crtcs: *mut u32,
-        connectors: *mut u32,
-        encoders: *mut u32,
+        min_width: u32,
+        max_width: u32,
+        min_height: u32,
+        max_height: u32,
     }
-    let mut res: DrmModeRes = unsafe { std::mem::zeroed() };
-    if drm_ioctl(fd, DRM_IOCTL_BASE + DRM_IOCTL_MODE_GETRESOURCES, &mut res as *mut _ as *mut u8) < 0 {
+    let mut res: DrmModeCardRes = unsafe { std::mem::zeroed() };
+    if drm_ioctl(fd, DRM_IOCTL_MODE_GETRESOURCES, &mut res as *mut _ as *mut u8) < 0 {
         unsafe { libc::close(fd); }
-        return Err("DRM_IOCTL_MODE_GETRESOURCES 失败".into());
+        return Err(format!("DRM_IOCTL_MODE_GETRESOURCES 失败 (errno={})", unsafe { *libc::__errno_location() }));
     }
 
     // 2. 遍历 CRTC 找第一个有 framebuffer 的
     let mut fb_id: u32 = 0;
     let crtc_count = res.count_crtcs as usize;
-    for i in 0..crtc_count {
-        let crtc_id = unsafe { *res.crtcs.add(i) };
 
-        // drmModeCrtc: header(4+4+4), mode_valid(4), mode(168+8=176),
-        //              x, y, fb_id, gamma_size
-        #[repr(C)]
-        struct DrmModeCrtc {
-            set_connectors_ptr: u64,
-            count_connectors: u32,
-            crtc_id: u32,
-            fb_id: u32,
-            x: u32, y: u32,
-            mode_valid: u32,
-            // mode struct omitted — we only need fb_id
-        }
-        let mut crtc: DrmModeCrtc = unsafe { std::mem::zeroed() };
-        crtc.crtc_id = crtc_id;
-        if drm_ioctl(fd, DRM_IOCTL_BASE + DRM_IOCTL_MODE_GETCRTC, &mut crtc as *mut _ as *mut u8) < 0 {
+    // drm_mode_modeinfo: 4 + 2*5 + 2 + 4*3 + 32 = 4+10+2+12+32 = 60
+    // drm_mode_crtc = 8 + 4 + 4 + 4 + 4*2 + 4 + 4 + 60 = 96
+    // 但实际 sizeof = 104，可能有 padding
+    // 用固定大小的 buffer 来接收 ioctl 数据，避免 struct 布局问题
+    let crtc_buf_size = 104; // sizeof(struct drm_mode_crtc) on x86_64
+    let mut crtc_buf = vec![0u8; crtc_buf_size];
+
+    // struct drm_mode_crtc 偏移（从内核头文件）：
+    // offset 0:  set_connectors_ptr (u64)
+    // offset 8:  count_connectors (u32)
+    // offset 12: crtc_id (u32)
+    // offset 16: fb_id (u32)
+    for i in 0..crtc_count {
+        let crtc_id = unsafe { *(res.crtc_id_ptr as *const u32).add(i) };
+        crtc_buf.fill(0);
+        // 写入 crtc_id（offset 12）
+        crtc_buf[12..16].copy_from_slice(&crtc_id.to_ne_bytes());
+
+        if drm_ioctl(fd, DRM_IOCTL_MODE_GETCRTC, crtc_buf.as_mut_ptr() as *mut u8) < 0 {
             continue;
         }
-        if crtc.fb_id != 0 {
-            fb_id = crtc.fb_id;
+        // 读 fb_id（offset 16）
+        let this_fb = u32::from_ne_bytes(crtc_buf[16..20].try_into().unwrap());
+        if this_fb != 0 {
+            fb_id = this_fb;
             break;
         }
     }
@@ -158,9 +162,9 @@ fn drm_read_fb(drm_dev: &str) -> Result<(u32, u32, u32, Vec<u8>), String> {
     }
     let mut fb_cmd: DrmModeFbCmd = unsafe { std::mem::zeroed() };
     fb_cmd.fb_id = fb_id;
-    if drm_ioctl(fd, DRM_IOCTL_BASE + DRM_IOCTL_MODE_GETFB, &mut fb_cmd as *mut _ as *mut u8) < 0 {
+    if drm_ioctl(fd, DRM_IOCTL_MODE_GETFB, &mut fb_cmd as *mut _ as *mut u8) < 0 {
         unsafe { libc::close(fd); }
-        return Err("DRM_IOCTL_MODE_GETFB 失败".into());
+        return Err(format!("DRM_IOCTL_MODE_GETFB 失败 (errno={})", unsafe { *libc::__errno_location() }));
     }
 
     let width = fb_cmd.width;
@@ -178,8 +182,8 @@ fn drm_read_fb(drm_dev: &str) -> Result<(u32, u32, u32, Vec<u8>), String> {
         flags: u32,
         fd: i32,
     }
-    let mut prime: DrmPrimeHandle = DrmPrimeHandle { handle, flags: libc::O_RDONLY as u32, fd: -1 };
-    let prime_ok = drm_ioctl(fd, DRM_IOCTL_BASE + DRM_IOCTL_PRIME_HANDLE_TO_FD,
+    let mut prime: DrmPrimeHandle = DrmPrimeHandle { handle, flags: 0, fd: -1 };
+    let prime_ok = drm_ioctl(fd, DRM_IOCTL_PRIME_HANDLE_TO_FD,
         &mut prime as *mut _ as *mut u8) >= 0;
 
     let size = pitch as usize * height as usize;
@@ -206,7 +210,7 @@ fn drm_read_fb(drm_dev: &str) -> Result<(u32, u32, u32, Vec<u8>), String> {
             offset: u64,
         }
         let mut map_req: DrmModeMapDumb = DrmModeMapDumb { handle, pad: 0, offset: 0 };
-        if drm_ioctl(fd, 0xB3 /* DRM_IOCTL_MODE_MAP_DUMB */, &mut map_req as *mut _ as *mut u8) >= 0 {
+        if drm_ioctl(fd, DRM_IOCTL_MODE_MAP_DUMB, &mut map_req as *mut _ as *mut u8) >= 0 {
             let mapped = unsafe {
                 libc::mmap(std::ptr::null_mut(), size, libc::PROT_READ, libc::MAP_SHARED, fd, map_req.offset as i64)
             };
