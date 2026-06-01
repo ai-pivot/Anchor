@@ -1579,7 +1579,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("✅ GbmDevice");
 
     // ─── EGL + GLES 渲染器 ───
-    let egl_display = unsafe { smithay::backend::egl::EGLDisplay::new(gbm.clone())? };
+    // NVIDIA 上 EGL 初始化需要 DRM master，GDM 切换 session 时可能有延迟，加重试
+    let egl_display = {
+        let mut egl = None;
+        for attempt in 0..30 {
+            match unsafe { smithay::backend::egl::EGLDisplay::new(gbm.clone()) } {
+                Ok(d) => { egl = Some(d); break; }
+                Err(e) if attempt < 29 => {
+                    if attempt == 0 { info!("⏳ EGL 初始化等待 DRM master..."); }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(e) => { return Err(e.into()); }
+            }
+        }
+        egl.unwrap()
+    };
     info!("✅ EGLDisplay");
     let egl_context = smithay::backend::egl::EGLContext::new(&egl_display)?;
     info!("✅ EGLContext");
