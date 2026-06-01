@@ -222,6 +222,10 @@ struct App {
     ws_anim: WsAnimation,
     // 多显示器尺寸信息（用于鼠标穿越）
     output_sizes: Vec<(i32, i32, i32, i32)>, // (x, y, w, h) per output
+    /// 每个 output 当前活跃的工作区索引（独立切换）
+    output_active_ws: Vec<usize>,
+    /// 鼠标/键盘焦点所在的 output 索引
+    focused_output: usize,
     // XWayland (X11 app support)
     xw: xwayland::XWaylandState,
     /// XWayland display number (e.g. 1 for :1), set when XWayland becomes ready
@@ -675,31 +679,55 @@ impl App {
         self.dirty = true;
     }
 
-    /// 切换到指定工作区（操作鼠标所在的 output）
+    /// 切换到指定工作区（只替换鼠标所在 output 的工作区）
     fn switch_workspace(&mut self, target: usize) {
         if target >= NUM_WORKSPACES { return; }
-        
-        // 找到鼠标所在的 output
-        let out_idx = self.output_at_pointer();
-        
-        // 更新全局 active_ws（兼容现有代码）
-        if target == self.active_ws { return; }
-        info!("🔀 工作区 {} → {}", self.active_ws + 1, target + 1);
-        
+
+        let out_idx = self.focused_output;
+
+        // 检查目标工作区是否已经在某个 output 上显示
+        // 如果是，把鼠标移到那个 output 即可
+        for (oi, ws) in self.output_active_ws.iter().enumerate() {
+            if *ws == target {
+                if oi != out_idx {
+                    // 目标工作区在另一个屏幕上，移鼠标过去
+                    let (ox, oy, ow, oh) = self.output_sizes.get(oi).copied().unwrap_or_default();
+                    self.pointer_pos = (ox as f64 + ow as f64 / 2.0, oy as f64 + oh as f64 / 2.0);
+                    self.focused_output = oi;
+                    self.active_ws = target;
+                    self.notify(format!("Workspace {} (screen {})", target + 1, oi + 1));
+                    self.dirty = true;
+                    // 设置焦点
+                    let ws_ref = &self.workspaces[target];
+                    if let Some(ref surf) = ws_ref.focus {
+                        if ws_ref.tops.iter().any(|tl| tl.wl_surface() == surf) {
+                            let kbd = self.kbd.clone();
+                            let serial = SERIAL_COUNTER.next_serial();
+                            kbd.set_focus(self, Some(surf.clone()), serial);
+                        }
+                    }
+                }
+                return; // 已在某个屏幕上显示
+            }
+        }
+
+        // 目标工作区不在任何屏幕上 → 替换当前 focused output 的工作区
+        let old_ws = self.output_active_ws[out_idx];
+        if target == old_ws { return; }
+        info!("🔀 屏幕 {} 工作区 {} → {}", out_idx + 1, old_ws + 1, target + 1);
+
         // 触发切换动画
-        let dir = if target > self.active_ws { 1 } else { -1 };
+        let dir = if target > old_ws { 1 } else { -1 };
         self.ws_anim = WsAnimation {
             start: Some(std::time::Instant::now()),
-            from_ws: self.active_ws,
+            from_ws: old_ws,
             to_ws: target,
             duration_ms: 200,
             direction: dir,
         };
 
-        // 隐藏当前工作区的窗口（最小化到 1x1）
-        let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
-        let _bar_h = bar_h;
-        for tl in &self.workspaces[self.active_ws].tops {
+        // 隐藏旧工作区的窗口（最小化到 1x1）
+        for tl in &self.workspaces[old_ws].tops {
             tl.with_pending_state(|st| {
                 st.states.unset(xdg_toplevel::State::Activated);
                 st.states.unset(xdg_toplevel::State::Fullscreen);
@@ -708,8 +736,10 @@ impl App {
             tl.send_configure();
         }
 
+        // 更新 per-output 和全局工作区
+        self.output_active_ws[out_idx] = target;
         self.active_ws = target;
-        self.notify(format!("Workspace {}", target + 1));
+        self.notify(format!("Workspace {} (screen {})", target + 1, out_idx + 1));
 
         // 布局新工作区的窗口
         self.do_layout();
@@ -1082,6 +1112,15 @@ impl App {
                         self.pointer_pos.0 = best_x;
                         self.pointer_pos.1 = best_y;
                     }
+                }
+
+                // 同步 focused_output：鼠标移动到另一个 output 时更新
+                let new_focused = self.output_at_pointer();
+                if new_focused != self.focused_output {
+                    self.focused_output = new_focused;
+                    // 全局 active_ws 跟踪当前鼠标所在 output 的工作区
+                    self.active_ws = self.output_active_ws.get(new_focused).copied().unwrap_or(0);
+                    self.dirty = true;
                 }
 
                 // 截图区域选择模式：更新选择终点
@@ -1708,6 +1747,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         launcher_selected: 0,
         ws_anim: WsAnimation { start: None, from_ws: 0, to_ws: 0, duration_ms: 200, direction: 0 },
         output_sizes: vec![],
+        output_active_ws: vec![],
+        focused_output: 0,
         xw: xwayland::XWaylandState::new::<App>(&dh),
         xdisplay: None,
         screenshot: screenshot::ScreenshotState::new(),
@@ -1883,6 +1924,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 更新 App 的显示相关字段（之前用 dummy 值创建）
     state.osize = primary_size;
     state.output_sizes = output_sizes;
+    // 初始化每个 output 的活跃工作区（从 anchor_outputs 读取）
+    state.output_active_ws = anchor_outputs.iter().map(|o| o.active_ws).collect();
+    // 初始全局 active_ws 跟踪第一个 output 的工作区
+    state.active_ws = state.output_active_ws.first().copied().unwrap_or(0);
 
     {
         struct SessionInputInterface { session: Arc<std::sync::Mutex<LibSeatSession>> }
@@ -2026,12 +2071,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             state.workspaces[state.active_ws].tops.retain(|tl| tl.alive());
             let bar_h = if state.cfg.bar.enabled { state.cfg.bar.height } else { 0 };
-            let focus_idx = state.focus_idx();
             let time_secs = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-            let window_title = state.window_titles.get(&focus_idx.unwrap_or(0))
-                .cloned().unwrap_or_default();
-            let pointer_output_idx = state.output_at_pointer();
 
             let ws_anim_active = state.ws_anim.start.is_some();
             let ws_anim_dir = state.ws_anim.direction;
@@ -2042,14 +2083,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let out = &mut anchor_outputs[oi];
                 if out.pending_flip { continue; }
 
-                // 此 output 的工作区
-                let out_ws_idx = out.active_ws;
+                // 此 output 的工作区（从 App 的 output_active_ws 读取，确保与 switch_workspace 同步）
+                let out_ws_idx = state.output_active_ws.get(oi).copied().unwrap_or(0);
                 let out_ws = &state.workspaces[out_ws_idx];
                 let n_windows = out_ws.tops.len();
                 let n_x11 = out_ws.x11_surfaces.len();
                 let n_total = n_windows + n_x11;
                 let fullscreen = out_ws.fullscreen;
-                let is_focused_output = oi == pointer_output_idx;
+                let is_focused_output = oi == state.focused_output;
+
+                // Per-output 的焦点和标题
+                let out_ws_focus_idx = {
+                    let ws = &state.workspaces[out_ws_idx];
+                    let order = ws.effective_order();
+                    ws.focus.as_ref().and_then(|surf| {
+                        order.iter().enumerate().find(|(_, slot)| match slot {
+                            WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| tl.wl_surface() == surf).unwrap_or(false),
+                            WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()).map(|s| &s == surf).unwrap_or(false),
+                        }).map(|(i, _)| i)
+                    })
+                };
+                let out_window_title = state.window_titles.get(&out_ws_focus_idx.unwrap_or(0))
+                    .cloned().unwrap_or_default();
 
                 match out.buf_surf.next_buffer() {
                     Ok((mut dmabuf, _)) => {
@@ -2218,7 +2273,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         // Step 2: Window surfaces + XDG popups — render per-window, painter's algorithm
                         // Background windows first, focused window last. Popups rendered on top of their parent window.
-                        let fi = focus_idx.unwrap_or(0);
+                        let fi = out_ws_focus_idx.unwrap_or(0);
                         for (i, elems) in win_elems.iter().enumerate() {
                             if i != fi {
                                 if !elems.is_empty() {
@@ -2255,7 +2310,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let order = out_ws.effective_order();
                             for (i, _) in order.iter().enumerate() {
                                 layout::render_window_decorations_anim(
-                                    &mut f, &state.cfg, i, n_total, focus_idx,
+                                    &mut f, &state.cfg, i, n_total, out_ws_focus_idx,
                                     ow, oh, bar_h, state.workspaces[out_ws_idx].layout, state.workspaces[out_ws_idx].split, ws_offset
                                 );
                             }
@@ -2289,7 +2344,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Step 5: Headbar — 每个 output 显示自己的活跃工作区
                         {
                             let ws_counts: Vec<usize> = state.workspaces.iter().map(|w| w.tops.len() + w.x11_surfaces.len()).collect();
-                            layout::render_headbar(&mut f, &state.cfg, ow, oh, n_windows, focus_idx, time_secs, &window_title, out_ws_idx, NUM_WORKSPACES, &ws_counts);
+                            layout::render_headbar(&mut f, &state.cfg, ow, oh, n_windows, out_ws_focus_idx, time_secs, &out_window_title, out_ws_idx, NUM_WORKSPACES, &ws_counts);
                         }
 
                         // Step 6: Notifications — 只在鼠标所在的 output 上显示
@@ -2655,8 +2710,9 @@ impl smithay::xwayland::XwmHandler for App {
     fn unminimize_request(&mut self, _xwm: smithay::xwayland::xwm::XwmId, _window: smithay::xwayland::X11Surface) {}
 
     fn allow_selection_access(&mut self, _xwm: smithay::xwayland::xwm::XwmId, _selection: smithay::wayland::selection::SelectionTarget) -> bool {
-        // 允许 X11 客户端访问 Wayland 选区
-        true
+        // TODO: 需要 SelectionUserData 存储选区数据才能实现 Wayland→X11 转发
+        // 暂时返回 false 避免飞书等 X11 应用启动时 panic
+        false
     }
 
     fn new_selection(
