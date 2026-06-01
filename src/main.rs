@@ -1494,50 +1494,81 @@ impl XdgShellHandler for App {
 impl SelectionHandler for App {
     type SelectionUserData = Arc<[u8]>;
 
-    /// Wayland 客户端设了新选区 → 通过 xclip 代理到 X11（Wayland→X11 方向）
-    /// 绝不调 X11Wm::new_selection()——它会抢 X11 选区 owner，导致 X11→Wayland 的 Xfixes 事件被干扰
+    /// Wayland 客户端设了新选区 → 通过 Smithay 内建机制代理到 X11
+    /// 调 X11Wm::new_selection() 让 XWM 窗口成为 X11 CLIPBOARD owner，
+    /// X11 客户端粘贴时 XwmHandler::send_selection 会把 Wayland 数据写入 fd
     fn new_selection(
         &mut self,
         _ty: smithay::wayland::selection::SelectionTarget,
-        _source: Option<smithay::wayland::selection::SelectionSource>,
+        source: Option<smithay::wayland::selection::SelectionSource>,
         _seat: Seat<Self>,
     ) {
-        // Wayland→X11: 用 wl-paste|xclip 桥接，不干预 X11 选区 owner
-        let display = self.xdisplay.map(|d| format!(":{}", d)).unwrap_or_else(|| ":0".into());
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_millis(50));
-            let result = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(format!(
-                    "wl-paste 2>/dev/null | DISPLAY={} xclip -selection clipboard -i 2>/dev/null",
-                    display
-                ))
-                .output();
-            match result {
-                Ok(out) if out.status.success() => tracing::info!("Wayland→X11 clipboard bridged"),
-                _ => {}
+        if let Some(ref mut xwm) = self.xw.xwm {
+            if let Some(src) = source {
+                let mime_types = src.mime_types();
+                if !mime_types.is_empty() {
+                    if let Err(e) = xwm.new_selection(
+                        smithay::wayland::selection::SelectionTarget::Clipboard,
+                        Some(mime_types),
+                    ) {
+                        tracing::warn!("Wayland→X11: X11Wm::new_selection failed: {:?}", e);
+                    } else {
+                        tracing::info!("Wayland→X11: XWM is now X11 clipboard owner");
+                    }
+                }
+            } else {
+                // 选区被清空 → 清除 X11 选区
+                if let Err(e) = xwm.new_selection(
+                    smithay::wayland::selection::SelectionTarget::Clipboard,
+                    None,
+                ) {
+                    tracing::warn!("Wayland→X11: clear selection failed: {:?}", e);
+                }
             }
-        });
+        }
     }
 
     fn send_selection(
         &mut self,
-        _ty: smithay::wayland::selection::SelectionTarget,
-        _mime_type: String,
+        ty: smithay::wayland::selection::SelectionTarget,
+        mime_type: String,
         fd: std::os::unix::io::OwnedFd,
         _seat: Seat<Self>,
         user_data: &Self::SelectionUserData,
     ) {
-        let buf = user_data.clone();
-        std::thread::spawn(move || {
-            use std::io::Write;
-            if let Err(err) = smithay::reexports::rustix::fs::fcntl_setfl(&fd, smithay::reexports::rustix::fs::OFlags::empty()) {
-                tracing::warn!("error clearing flags on selection fd: {:?}", err);
+        // X11 代理选区标记：user_data 以 "X11_PROXY" 开头（10 bytes magic）
+        // 这不可能是正常剪贴板内容
+        const X11_PROXY_MAGIC: &[u8] = b"X11_PROXY\x00";
+        let is_x11_proxy = user_data.starts_with(X11_PROXY_MAGIC) && user_data.len() == X11_PROXY_MAGIC.len();
+
+        if is_x11_proxy {
+            // X11→Wayland 方向：Wayland 客户端请求粘贴 X11 的数据
+            // 通过 X11Wm::send_selection 从 X11 客户端获取数据直接写入 fd
+            if let Some(ref mut xwm) = self.xw.xwm {
+                if let Some(ref lh) = self.loop_handle {
+                    match xwm.send_selection::<App>(ty, mime_type, fd, lh.clone()) {
+                        Ok(()) => tracing::info!("X11→Wayland: send_selection forwarded to X11"),
+                        Err(e) => tracing::warn!("X11→Wayland: send_selection failed: {:?}", e),
+                    }
+                } else {
+                    tracing::warn!("X11→Wayland: no loop_handle available");
+                }
+            } else {
+                tracing::warn!("X11→Wayland: no XWM available");
             }
-            if let Err(err) = std::fs::File::from(fd).write_all(&buf) {
-                tracing::warn!("error writing selection: {:?}", err);
-            }
-        });
+        } else {
+            // Wayland 本地选区：直接把 user_data 写入 fd
+            let buf = user_data.clone();
+            std::thread::spawn(move || {
+                use std::io::Write;
+                if let Err(err) = smithay::reexports::rustix::fs::fcntl_setfl(&fd, smithay::reexports::rustix::fs::OFlags::empty()) {
+                    tracing::warn!("error clearing flags on selection fd: {:?}", err);
+                }
+                if let Err(err) = std::fs::File::from(fd).write_all(&buf) {
+                    tracing::warn!("error writing selection: {:?}", err);
+                }
+            });
+        }
     }
 }
 impl DataDeviceHandler for App { fn data_device_state(&self) -> &DataDeviceState { &self.dd } }
@@ -2735,7 +2766,7 @@ impl smithay::xwayland::XwmHandler for App {
     ) {
         // X11 客户端请求 Wayland 选区 → 通过 DataDevice 获取数据写入 fd
         use smithay::wayland::selection::data_device::request_data_device_client_selection;
-        request_data_device_client_selection::<App>(
+        let _ = request_data_device_client_selection::<App>(
             &self.seat,
             mime_type,
             fd,
@@ -2805,26 +2836,23 @@ impl smithay::xwayland::XwmHandler for App {
         &mut self,
         _xwm: smithay::xwayland::xwm::XwmId,
         selection: smithay::wayland::selection::SelectionTarget,
-        _mime_types: Vec<String>,
+        mime_types: Vec<String>,
     ) {
-        // X11->Wayland: X11 client set new selection, bridge via xclip+wl-copy
-        // NEVER call X11Wm::new_selection() here - that is Wayland->X11 direction only
-        if selection == smithay::wayland::selection::SelectionTarget::Clipboard {
-            let display = self.xdisplay.map(|d| format!(":{}", d)).unwrap_or_else(|| ":0".into());
-            std::thread::spawn(move || {
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                let result = std::process::Command::new("sh")
-                    .arg("-c")
-                    .arg(format!(
-                        "DISPLAY={} xclip -selection clipboard -o 2>/dev/null | wl-copy 2>/dev/null",
-                        display
-                    ))
-                    .output();
-                match result {
-                    Ok(out) if out.status.success() => tracing::info!("X11->Wayland clipboard bridged"),
-                    _ => {}
-                }
-            });
+        // X11→Wayland: X11 客户端设了新选区 → 在 Wayland 端注册为 compositor 选区
+        // 使用 set_data_device_selection 让 Anchor 成为 Wayland data device selection owner
+        // Wayland 客户端粘贴时 SelectionHandler::send_selection 会被调，通过 X11Wm::send_selection 获取 X11 数据
+        if selection == smithay::wayland::selection::SelectionTarget::Clipboard && !mime_types.is_empty() {
+            use smithay::wayland::selection::data_device::set_data_device_selection;
+            // 使用 magic bytes 标记这是 X11 代理选区
+            // SelectionHandler::send_selection 检测到这个标记会用 X11Wm::send_selection 获取实际数据
+            let user_data: Arc<[u8]> = Arc::from(&b"X11_PROXY\x00"[..]);
+            set_data_device_selection::<App>(
+                &self.dh,
+                &self.seat,
+                mime_types,
+                user_data,
+            );
+            tracing::info!("X11→Wayland: registered X11 selection as compositor selection");
         }
     }
 
