@@ -2038,6 +2038,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    // ─── X11→Wayland 剪贴板轮询 ───
+    // Smithay 的 XwmHandler::new_selection 不被触发（XWM selection owner 机制问题）
+    // 用定时器轮询 X11 剪贴板变化并桥接到 Wayland
+    {
+        use smithay::reexports::calloop::timer::{Timer, TimeoutAction};
+        let mut last_clipboard_hash: u64 = 0;
+        let timer = Timer::from_duration(std::time::Duration::from_millis(500));
+        eloop.handle().insert_source(timer, move |_deadline, _metadata, state: &mut App| {
+            if let Some(xd) = state.xdisplay {
+                let display = format!(":{}", xd);
+                let result = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(format!(
+                        "DISPLAY={} xclip -selection clipboard -o -t text/plain 2>/dev/null | md5sum",
+                        display
+                    ))
+                    .output();
+                if let Ok(output) = result {
+                    if output.status.success() {
+                        let hash_str = String::from_utf8_lossy(&output.stdout);
+                        let new_hash = hash_str.trim().split_whitespace().next().unwrap_or("");
+                        let new_hash_u64 = new_hash.chars().take(16).map(|c| c as u64).fold(0u64, |a, c| a.wrapping_mul(31).wrapping_add(c));
+                        if new_hash_u64 != last_clipboard_hash && !new_hash.is_empty() {
+                            last_clipboard_hash = new_hash_u64;
+                            let bridge = std::process::Command::new("sh")
+                                .arg("-c")
+                                .arg(format!(
+                                    "DISPLAY={} xclip -selection clipboard -o -t text/plain 2>/dev/null | wl-copy -t text/plain 2>/dev/null",
+                                    display
+                                ))
+                                .output();
+                            if let Ok(out) = bridge {
+                                if out.status.success() {
+                                    tracing::info!("X11→Wayland clipboard synced");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            TimeoutAction::ToDuration(std::time::Duration::from_millis(500))
+        })?;
+    }
+
     let mut dev_active = state.active;
     let start = Instant::now();
 
