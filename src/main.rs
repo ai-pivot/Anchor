@@ -764,7 +764,7 @@ impl App {
             None => return,
         };
 
-        // 1. 先 clone 窗口（在 remove 之前）
+        // 1. 先 clone 窗口和 wl_surface（在 remove 之前）
         let surf = match &slot {
             WindowSlot::Wl(idx) => self.workspaces[ws_idx].tops.get(*idx).map(|tl| tl.wl_surface().clone()),
             WindowSlot::X11(idx) => self.workspaces[ws_idx].x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()),
@@ -776,24 +776,39 @@ impl App {
 
         info!("📦 移动窗口 slot {:?} (order #{}) → 工作区 {}", slot, fi, target + 1);
 
-        // 2. 从源工作区移除窗口
-        match &slot {
-            WindowSlot::Wl(idx) => { self.workspaces[ws_idx].tops.remove(*idx); }
-            WindowSlot::X11(idx) => { self.workspaces[ws_idx].x11_surfaces.remove(*idx); }
-        }
-        self.workspaces[ws_idx].rebuild_order();
-        self.workspaces[ws_idx].fullscreen = None;
+        // 2. 从源工作区移除，添加到目标工作区
+        match slot {
+            WindowSlot::Wl(idx) => {
+                let tl = match self.workspaces[ws_idx].tops.get(idx).cloned() {
+                    Some(tl) => tl,
+                    None => return,
+                };
+                self.workspaces[ws_idx].tops.remove(idx);
+                self.workspaces[ws_idx].rebuild_order();
+                self.workspaces[ws_idx].fullscreen = None;
+                self.workspaces[ws_idx].focus = self.workspaces[ws_idx].tops.last().map(|t| t.wl_surface().clone());
 
-        // 更新源工作区焦点
-        {
-            let src_order = self.workspaces[ws_idx].effective_order();
-            self.workspaces[ws_idx].focus = src_order.last().and_then(|s| match s {
-                WindowSlot::Wl(idx) => self.workspaces[ws_idx].tops.get(*idx).map(|tl| tl.wl_surface().clone()),
-                WindowSlot::X11(idx) => self.workspaces[ws_idx].x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()),
-            });
-        }
+                self.workspaces[target].tops.push(tl);
+            }
+            WindowSlot::X11(idx) => {
+                let xs = match self.workspaces[ws_idx].x11_surfaces.get(idx).cloned() {
+                    Some(xs) => xs,
+                    None => return,
+                };
+                self.workspaces[ws_idx].x11_surfaces.remove(idx);
+                self.workspaces[ws_idx].rebuild_order();
+                self.workspaces[ws_idx].fullscreen = None;
+                {
+                    let src_order = self.workspaces[ws_idx].effective_order();
+                    self.workspaces[ws_idx].focus = src_order.last().and_then(|s| match s {
+                        WindowSlot::Wl(i) => self.workspaces[ws_idx].tops.get(*i).map(|tl| tl.wl_surface().clone()),
+                        WindowSlot::X11(i) => self.workspaces[ws_idx].x11_surfaces.get(*i).and_then(|x| x.wl_surface()),
+                    });
+                }
 
-        // 3. 添加到目标工作区
+                self.workspaces[target].x11_surfaces.push(xs);
+            }
+        }
         self.workspaces[target].focus = Some(surf.clone());
         self.workspaces[target].rebuild_order();
 
