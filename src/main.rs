@@ -2718,30 +2718,20 @@ impl smithay::xwayland::XwmHandler for App {
     fn new_selection(
         &mut self,
         _xwm: smithay::xwayland::xwm::XwmId,
-        selection: smithay::wayland::selection::SelectionTarget,
-        mime_types: Vec<String>,
+        _selection: smithay::wayland::selection::SelectionTarget,
+        _mime_types: Vec<String>,
     ) {
-        // X11 客户端设置了新选区 → 通知 Wayland 端
-        tracing::info!("📋 X11 new {} selection: {:?}", if selection == smithay::wayland::selection::SelectionTarget::Primary { "primary" } else { "clipboard" }, mime_types);
-        if let Some(xwm) = self.xw.xwm.as_mut() {
-            if let Err(e) = xwm.new_selection(selection, Some(mime_types)) {
-                tracing::warn!("Failed to forward X11 selection to Wayland: {:?}", e);
-            }
-        }
+        // X11 客户端设置了新选区
+        // TODO: 正确的 X11→Wayland 转发需要创建 SelectionSource 通过 Wayland data device 广播
+        // 不能调 xwm.new_selection()，那是 Wayland→X11 方向（会让 XWM 抢占选区 owner）
     }
 
     fn cleared_selection(
         &mut self,
         _xwm: smithay::xwayland::xwm::XwmId,
-        selection: smithay::wayland::selection::SelectionTarget,
+        _selection: smithay::wayland::selection::SelectionTarget,
     ) {
         // X11 选区被清除
-        tracing::info!("📋 X11 {} selection cleared", if selection == smithay::wayland::selection::SelectionTarget::Primary { "primary" } else { "clipboard" });
-        if let Some(xwm) = self.xw.xwm.as_mut() {
-            if let Err(e) = xwm.new_selection(selection, None) {
-                tracing::warn!("Failed to clear X11 selection: {:?}", e);
-            }
-        }
     }
 
     fn property_notify(
