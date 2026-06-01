@@ -2776,11 +2776,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             layout::render_notifications(&mut f, &notif_data, ow, state.cfg.bar.height, accent);
                         }
 
-                        // Step 7: Launcher — 毛玻璃全屏覆盖 + 面板 UI
+                        // Step 7: Launcher — 面板外毛玻璃 + 面板 UI
                         if is_focused_output && state.launcher.visible {
-                            // 毛玻璃全屏覆盖（包括面板 + 外部区域）
+                            // 面板外区域：毛玻璃模糊（有纹理时才渲染，第一帧直接透出桌面）
                             if let Some(ref blur_tex) = state.launcher_blur_tex {
-                                // 全屏模糊背景（与壁纸相同的坐标方式）
                                 let _ = f.render_texture_from_to(
                                     blur_tex,
                                     Rectangle::from_size(Size::from((state.launcher_blur_size.0 as f64, state.launcher_blur_size.1 as f64))),
@@ -2792,13 +2791,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     None,
                                     &[],
                                 );
-                            } else {
-                                // 第一帧 fallback: 全屏深色覆盖
-                                f.clear(layout::opaque(0.06, 0.06, 0.10),
-                                    &[layout::rect(0, 0, ow, oh)]).ok();
                             }
+                            // 第一帧无纹理时不做任何覆盖 → 桌面直接透过来（自然）
 
-                            // 面板本体: 深色半透明背景（比毛玻璃稍暗，文字可读）
+                            // 面板本体: 深色纯色背景（文字可读）
                             let filtered = state.launcher.filtered();
                             let lw = ow * 3 / 4;
                             let max_items = 12usize;
