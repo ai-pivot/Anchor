@@ -2713,17 +2713,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             Ok(pixels) => {
                                                 let w = ow as u32;
                                                 let h = oh as u32;
-                                                // OpenGL ReadPixels bottom-up → 翻转为 top-down
                                                 let row_len = w as usize * 4;
-                                                let mut flipped = Vec::with_capacity(pixels.len());
+                                                // OpenGL ReadPixels bottom-up → 翻转为 top-down
+                                                // XRGB8888 内存布局: B,G,R,X → 转 RGBA
+                                                let mut rgba = Vec::with_capacity(pixels.len());
                                                 for row in (0..h as usize).rev() {
                                                     let start = row * row_len;
                                                     let end = start + row_len;
                                                     if end <= pixels.len() {
-                                                        flipped.extend_from_slice(&pixels[start..end]);
+                                                        for px in (start..end).step_by(4) {
+                                                            let b = pixels[px];
+                                                            let g = pixels[px + 1];
+                                                            let r = pixels[px + 2];
+                                                            rgba.push(r);
+                                                            rgba.push(g);
+                                                            rgba.push(b);
+                                                            rgba.push(255); // alpha
+                                                        }
                                                     }
                                                 }
-                                                let result = screenshot::save_screenshot(&flipped, w, h, area);
+                                                let result = screenshot::save_screenshot(&rgba, w, h, area);
                                                 state.screenshot_result = Some(result);
                                             }
                                             Err(e) => {
