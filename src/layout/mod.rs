@@ -13,44 +13,73 @@
 //! - `launcher`     — 启动器（dmenu 风格）
 //! - `lock_screen`  — 锁屏 UI（5 种背景风格）
 
-pub mod util;
-pub mod geom;
-pub mod wallpaper;
 pub mod decorations;
+pub mod geom;
 pub mod headbar;
-pub mod notifications;
 pub mod launcher;
 pub mod lock_screen;
+pub mod notifications;
+pub mod util;
+pub mod wallpaper;
 
 // 重新导出：让 `crate::layout::slot()`、`crate::layout::LayoutPreset` 等
 // 写法与原 `layout.rs` 完全一致，调用方（main.rs、workspace.rs 等）零修改。
 
-pub use util::*;
-pub use geom::*;
-pub use wallpaper::*;
 pub use decorations::*;
+pub use geom::*;
 pub use headbar::*;
-pub use notifications::*;
 pub use launcher::*;
 pub use lock_screen::*;
+pub use notifications::*;
+pub use util::*;
+pub use wallpaper::*;
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::Config;
-    fn test_cfg() -> Config { Config::default() }
+    fn test_cfg() -> Config {
+        Config::default()
+    }
 
     #[test]
     fn test_slot_one() {
         let cfg = test_cfg();
-        let (_x, y, w, h) = slot(0, 1, 2560, 1440, 42, &cfg, LayoutPreset::MasterStack, SplitDir::Horizontal);
+        let (_x, y, w, h) = slot(
+            0,
+            1,
+            2560,
+            1440,
+            42,
+            &cfg,
+            LayoutPreset::MasterStack,
+            SplitDir::Horizontal,
+        );
         assert!(y >= 42 && w > 0 && h > 0);
     }
     #[test]
     fn test_slot_two() {
         let cfg = test_cfg();
-        let a = slot(0, 2, 2560, 1440, 42, &cfg, LayoutPreset::MasterStack, SplitDir::Horizontal);
-        let b = slot(1, 2, 2560, 1440, 42, &cfg, LayoutPreset::MasterStack, SplitDir::Horizontal);
+        let a = slot(
+            0,
+            2,
+            2560,
+            1440,
+            42,
+            &cfg,
+            LayoutPreset::MasterStack,
+            SplitDir::Horizontal,
+        );
+        let b = slot(
+            1,
+            2,
+            2560,
+            1440,
+            42,
+            &cfg,
+            LayoutPreset::MasterStack,
+            SplitDir::Horizontal,
+        );
         assert!(a.0 + a.2 <= b.0);
     }
     #[test]
@@ -58,11 +87,14 @@ mod tests {
         let cfg = test_cfg();
         for layout in LayoutPreset::ALL {
             for n in 1..=6usize {
-                let mut rects: Vec<(i32,i32,i32,i32)> = vec![];
+                let mut rects: Vec<(i32, i32, i32, i32)> = vec![];
                 for i in 0..n {
                     let r = slot(i, n, 2560, 1440, 42, &cfg, layout, SplitDir::Horizontal);
                     for (j, p) in rects.iter().enumerate() {
-                        let overlap = r.0 < p.0+p.2 && r.0+r.2>p.0 && r.1<p.1+p.3 && r.1+r.3>p.1;
+                        let overlap = r.0 < p.0 + p.2
+                            && r.0 + r.2 > p.0
+                            && r.1 < p.1 + p.3
+                            && r.1 + r.3 > p.1;
                         assert!(!overlap, "{:?} n={n}: {j} overlaps {}", layout, i);
                     }
                     rects.push(r);

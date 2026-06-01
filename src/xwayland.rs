@@ -32,17 +32,14 @@
 use std::os::unix::io::OwnedFd;
 
 use smithay::{
-    reexports::wayland_server::{
-        Client, DisplayHandle,
-        protocol::wl_surface::WlSurface,
-    },
+    reexports::wayland_server::{protocol::wl_surface::WlSurface, Client, DisplayHandle},
     utils::{Logical, Rectangle},
     wayland::selection::SelectionTarget,
-    xwayland::{
-        X11Surface, X11Wm, XWayland, XWaylandEvent,
-        xwm::{Reorder, ResizeEdge, WmWindowProperty, X11Window, XwmId},
-    },
     wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState},
+    xwayland::{
+        xwm::{Reorder, ResizeEdge, WmWindowProperty, X11Window, XwmId},
+        X11Surface, X11Wm, XWayland, XWaylandEvent,
+    },
 };
 
 // ── XWaylandState ───────────────────────────────────────────
@@ -99,14 +96,17 @@ impl XWaylandState {
 
     /// Find a tiled X11 surface by its wl_surface.
     pub fn find_surface(&self, wl: &WlSurface) -> Option<(usize, &X11Surface)> {
-        self.surfaces.iter().enumerate()
+        self.surfaces
+            .iter()
+            .enumerate()
             .find(|(_, s)| s.wl_surface().as_ref() == Some(wl))
     }
 
     /// Remove an X11 surface by its wl_surface. Returns true if removed.
     pub fn remove_surface(&mut self, wl: &WlSurface) -> bool {
         let before = self.surfaces.len();
-        self.surfaces.retain(|s| s.wl_surface().as_ref() != Some(wl));
+        self.surfaces
+            .retain(|s| s.wl_surface().as_ref() != Some(wl));
         self.surfaces.len() < before
     }
 
@@ -114,7 +114,9 @@ impl XWaylandState {
     pub fn remove_by_wid(&mut self, wid: X11Window) -> bool {
         let before = self.surfaces.len();
         self.surfaces.retain(|s| s.window_id() != wid);
-        if self.surfaces.len() < before { return true; }
+        if self.surfaces.len() < before {
+            return true;
+        }
         let before = self.or_surfaces.len();
         self.or_surfaces.retain(|s| s.window_id() != wid);
         self.or_surfaces.len() < before
@@ -122,7 +124,9 @@ impl XWaylandState {
 
     /// Iterate tiled X11 surfaces that have a wl_surface (ready for rendering).
     pub fn renderable_surfaces(&self) -> impl Iterator<Item = (usize, &X11Surface)> {
-        self.surfaces.iter().enumerate()
+        self.surfaces
+            .iter()
+            .enumerate()
             .filter(|(_, s)| s.wl_surface().is_some())
     }
 
@@ -185,10 +189,20 @@ impl XWaylandState {
     /// Handle `configure_request`. Acknowledges with current or default geometry.
     /// Does NOT change tiled layout — do_layout() controls positions.
     /// For OR windows (input method popups), accepts the client's requested position.
-    pub fn on_configure_request(&self, window: &X11Surface, x: Option<i32>, y: Option<i32>, w: Option<u32>, h: Option<u32>) {
+    pub fn on_configure_request(
+        &self,
+        window: &X11Surface,
+        x: Option<i32>,
+        y: Option<i32>,
+        w: Option<u32>,
+        h: Option<u32>,
+    ) {
         // Check if this is an override-redirect window
-        let is_or = self.or_surfaces.iter().any(|s| s.window_id() == window.window_id());
-        
+        let is_or = self
+            .or_surfaces
+            .iter()
+            .any(|s| s.window_id() == window.window_id());
+
         if window.wl_surface().is_some() {
             if is_or {
                 // OR windows: accept client's requested position and size
@@ -238,9 +252,9 @@ pub fn spawn_xwayland(
 ) -> Result<(XWayland, Client), Box<dyn std::error::Error>> {
     let (xwayland, client) = XWayland::spawn(
         dh,
-        None,                                              // auto display number
+        None, // auto display number
         std::iter::empty::<(String, String)>(),
-        true,                                              // open abstract socket
+        true, // open abstract socket
         std::process::Stdio::null(),
         std::process::Stdio::null(),
         |_| (),
@@ -267,7 +281,10 @@ pub fn handle_xwayland_event<D>(
     D: smithay::xwayland::XwmHandler,
 {
     match event {
-        XWaylandEvent::Ready { x11_socket, display_number } => {
+        XWaylandEvent::Ready {
+            x11_socket,
+            display_number,
+        } => {
             tracing::info!("🖥️  XWayland ready (display :{})", display_number);
 
             // Set DISPLAY so child processes (Feishu, Chrome, etc.) find X11

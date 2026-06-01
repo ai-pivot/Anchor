@@ -4,13 +4,15 @@
 
 use crate::config::Config;
 use smithay::{
-    backend::renderer::{Frame, Color32F},
+    backend::renderer::{Color32F, Frame},
     utils::{Point, Rectangle, Size},
 };
 use std::path::{Path, PathBuf};
 
 #[inline(always)]
-fn opaque(r: f32, g: f32, b: f32) -> Color32F { Color32F::new(r, g, b, 1.0) }
+fn opaque(r: f32, g: f32, b: f32) -> Color32F {
+    Color32F::new(r, g, b, 1.0)
+}
 
 /// 壁纸缓存
 pub struct WallpaperCache {
@@ -42,7 +44,9 @@ impl WallpaperCache {
 
     /// 扫描目录中的图片文件
     pub fn scan_directory(&mut self, dir: &str) {
-        if dir.is_empty() { return; }
+        if dir.is_empty() {
+            return;
+        }
         let path = Path::new(dir);
         if !path.exists() {
             let home = std::env::var("HOME").unwrap_or_default();
@@ -92,7 +96,9 @@ impl WallpaperCache {
 
     /// 检查是否需要切换到下一张壁纸
     pub fn check_rotation(&mut self, interval_secs: u64) {
-        if interval_secs == 0 || self.directory_images.len() <= 1 { return; }
+        if interval_secs == 0 || self.directory_images.len() <= 1 {
+            return;
+        }
         if self.last_change.elapsed().as_secs() >= interval_secs {
             self.current_index = (self.current_index + 1) % self.directory_images.len();
             self.pixels = None;
@@ -107,11 +113,17 @@ impl WallpaperCache {
     pub fn render(&self, f: &mut impl Frame, cfg: &Config, ow: i32, oh: i32) -> bool {
         if let Some(ref pixels) = self.pixels {
             let (w, h) = self.size;
-            if w == 0 || h == 0 || w != ow as usize || h != oh as usize { return false; }
+            if w == 0 || h == 0 || w != ow as usize || h != oh as usize {
+                return false;
+            }
 
             // 先画纯色背景
             let bg = crate::config::parse_color(&cfg.wallpaper.color);
-            f.clear(opaque(bg.0, bg.1, bg.2), &[Rectangle::from_size(Size::new(ow, oh))]).ok();
+            f.clear(
+                opaque(bg.0, bg.1, bg.2),
+                &[Rectangle::from_size(Size::new(ow, oh))],
+            )
+            .ok();
 
             // 8x8 块渲染（平衡质量和性能）
             let block = 8;
@@ -126,10 +138,14 @@ impl WallpaperCache {
                     // 采样块中心像素
                     let cx = dst_x + block / 2;
                     let cy = dst_y + block / 2;
-                    if cx >= w || cy >= h { continue; }
+                    if cx >= w || cy >= h {
+                        continue;
+                    }
 
                     let idx = (cy * w + cx) * 4;
-                    if idx + 3 >= pixels.len() { continue; }
+                    if idx + 3 >= pixels.len() {
+                        continue;
+                    }
 
                     let r = pixels[idx] as f32 / 255.0;
                     let g = pixels[idx + 1] as f32 / 255.0;
@@ -137,10 +153,18 @@ impl WallpaperCache {
 
                     let bw = block.min(ow as usize - dst_x) as i32;
                     let bh = block.min(oh as usize - dst_y) as i32;
-                    if bw <= 0 || bh <= 0 { continue; }
+                    if bw <= 0 || bh <= 0 {
+                        continue;
+                    }
 
-                    f.clear(opaque(r, g, b),
-                        &[Rectangle::new(Point::new(dst_x as i32, dst_y as i32), Size::new(bw, bh))]).ok();
+                    f.clear(
+                        opaque(r, g, b),
+                        &[Rectangle::new(
+                            Point::new(dst_x as i32, dst_y as i32),
+                            Size::new(bw, bh),
+                        )],
+                    )
+                    .ok();
                 }
             }
             return true;
@@ -157,7 +181,8 @@ fn scan_image_files(dir: &Path) -> Vec<PathBuf> {
             entries
                 .filter_map(|e| e.ok())
                 .filter(|e| {
-                    e.path().extension()
+                    e.path()
+                        .extension()
                         .and_then(|ext| ext.to_str())
                         .map(|ext| exts.contains(&ext.to_lowercase().as_str()))
                         .unwrap_or(false)
@@ -170,7 +195,11 @@ fn scan_image_files(dir: &Path) -> Vec<PathBuf> {
     files
 }
 
-fn load_and_scale(path: &Path, target_w: usize, target_h: usize) -> Result<(Vec<u8>, usize, usize), String> {
+fn load_and_scale(
+    path: &Path,
+    target_w: usize,
+    target_h: usize,
+) -> Result<(Vec<u8>, usize, usize), String> {
     let img = image::io::Reader::open(path)
         .map_err(|e| format!("打开失败: {}", e))?
         .decode()
@@ -178,11 +207,13 @@ fn load_and_scale(path: &Path, target_w: usize, target_h: usize) -> Result<(Vec<
 
     eprintln!("🖼️  原始尺寸: {}x{}", img.width(), img.height());
 
-    let rgba = img.resize_exact(
-        target_w as u32,
-        target_h as u32,
-        image::imageops::FilterType::Triangle,
-    ).to_rgba8();
+    let rgba = img
+        .resize_exact(
+            target_w as u32,
+            target_h as u32,
+            image::imageops::FilterType::Triangle,
+        )
+        .to_rgba8();
 
     let (fw, fh) = (rgba.width() as usize, rgba.height() as usize);
     Ok((rgba.into_raw(), fw, fh))

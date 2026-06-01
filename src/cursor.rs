@@ -43,22 +43,22 @@ impl CursorImage {
     /// Same as the CURSOR_MAP in main.rs but as RGBA pixel data
     pub fn builtin(pixel_size: usize) -> Self {
         const MAP: [[u8; 16]; 16] = [
-            [2,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-            [2,2,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
-            [2,1,2,0,0,0,0,0,0,0,0,0,0,0,0,0],
-            [2,1,1,2,0,0,0,0,0,0,0,0,0,0,0,0],
-            [2,1,1,1,2,0,0,0,0,0,0,0,0,0,0,0],
-            [2,1,1,1,1,2,0,0,0,0,0,0,0,0,0,0],
-            [2,1,1,1,1,1,2,0,0,0,0,0,0,0,0,0],
-            [2,1,1,1,1,1,1,2,0,0,0,0,0,0,0,0],
-            [2,1,1,1,1,1,1,1,2,0,0,0,0,0,0,0],
-            [2,1,1,1,1,1,1,1,1,2,2,0,0,0,0,0],
-            [2,1,1,1,1,1,1,2,1,2,1,2,0,0,0,0],
-            [2,1,1,1,1,1,2,0,1,1,2,1,2,0,0,0],
-            [2,1,1,2,1,2,0,0,0,1,1,2,0,0,0,0],
-            [2,1,2,0,2,0,0,0,0,0,1,2,0,0,0,0],
-            [2,2,0,0,0,0,0,0,0,0,1,1,2,0,0,0],
-            [2,0,0,0,0,0,0,0,0,0,0,1,2,0,0,0],
+            [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [2, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [2, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [2, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [2, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [2, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            [2, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0],
+            [2, 1, 1, 1, 1, 1, 1, 1, 2, 0, 0, 0, 0, 0, 0, 0],
+            [2, 1, 1, 1, 1, 1, 1, 1, 1, 2, 2, 0, 0, 0, 0, 0],
+            [2, 1, 1, 1, 1, 1, 1, 2, 1, 2, 1, 2, 0, 0, 0, 0],
+            [2, 1, 1, 1, 1, 1, 2, 0, 1, 1, 2, 1, 2, 0, 0, 0],
+            [2, 1, 1, 2, 1, 2, 0, 0, 0, 1, 1, 2, 0, 0, 0, 0],
+            [2, 1, 2, 0, 2, 0, 0, 0, 0, 0, 1, 2, 0, 0, 0, 0],
+            [2, 2, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 2, 0, 0, 0],
+            [2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 0, 0, 0],
         ];
         let size = 16 * pixel_size;
         let mut pixels = vec![0u8; size * size * 4];
@@ -66,8 +66,8 @@ impl CursorImage {
             for (x, &v) in row.iter().enumerate() {
                 let (r, g, b, a) = match v {
                     1 => (0, 0, 0, 255),       // black outline
-                    2 => (255, 255, 255, 255),   // white fill
-                    _ => (0, 0, 0, 0),           // transparent
+                    2 => (255, 255, 255, 255), // white fill
+                    _ => (0, 0, 0, 0),         // transparent
                 };
                 // Fill pixel_size x pixel_size block
                 for dy in 0..pixel_size {
@@ -83,7 +83,13 @@ impl CursorImage {
                 }
             }
         }
-        CursorImage { width: size, height: size, hotspot_x: 0, hotspot_y: 0, pixels }
+        CursorImage {
+            width: size,
+            height: size,
+            hotspot_x: 0,
+            hotspot_y: 0,
+            pixels,
+        }
     }
 
     /// Render the cursor into a Pixman framebuffer at (cx, cy)
@@ -95,15 +101,20 @@ impl CursorImage {
             for x in 0..self.width {
                 let idx = (y * self.width + x) * 4;
                 let a = self.pixels[idx + 3];
-                if a == 0 { continue; }
+                if a == 0 {
+                    continue;
+                }
                 let r = self.pixels[idx] as f32 / 255.0;
                 let g = self.pixels[idx + 1] as f32 / 255.0;
                 let b = self.pixels[idx + 2] as f32 / 255.0;
                 let color = Color32F::new(r, g, b, 1.0);
-                let _ = f.clear(color, &[Rectangle::new(
-                    Point::new(cx + x as i32, cy + y as i32),
-                    Size::new(1, 1),
-                )]);
+                let _ = f.clear(
+                    color,
+                    &[Rectangle::new(
+                        Point::new(cx + x as i32, cy + y as i32),
+                        Size::new(1, 1),
+                    )],
+                );
             }
         }
     }
@@ -126,7 +137,9 @@ impl CursorImage {
                     self.pixels[idx + 2],
                     self.pixels[idx + 3],
                 ];
-                if rgba[3] == 0 { continue; }
+                if rgba[3] == 0 {
+                    continue;
+                }
                 color_groups.entry(rgba).or_default().push(Rectangle::new(
                     Point::new(cx + x as i32, cy + y as i32),
                     Size::new(1, 1),
@@ -149,25 +162,35 @@ impl CursorImage {
 /// XCursor format: https://www.x.org/releases/X11R7.7/doc/xcursor/specs/Xcursor.html
 fn parse_xcursor_file(path: &std::path::Path, target_size: usize) -> Option<CursorImage> {
     let data = std::fs::read(path).ok()?;
-    if data.len() < 16 { return None; }
+    if data.len() < 16 {
+        return None;
+    }
 
     // Header: magic (4 bytes), header_size (4), version (4), ntoc (4)
     let magic = u32::from_le_bytes(data[0..4].try_into().ok()?);
-    if magic != 0x72756358 { return None; } // "Xcur"
+    if magic != 0x72756358 {
+        return None;
+    } // "Xcur"
     let _header_size = u32::from_le_bytes(data[4..8].try_into().ok()?) as usize;
     let version = u32::from_le_bytes(data[8..12].try_into().ok()?);
-    if version > 1 { return None; }
+    if version > 1 {
+        return None;
+    }
     let ntoc = u32::from_le_bytes(data[12..16].try_into().ok()?) as usize;
 
     // Read TOC entries: find the image closest to target_size
     let mut best_entry: Option<(usize, usize)> = None; // (offset, size_diff)
     for i in 0..ntoc {
         let off = 16 + i * 12;
-        if off + 12 > data.len() { break; }
-        let _type = u32::from_le_bytes(data[off..off+4].try_into().ok()?);
-        let _subtype = u32::from_le_bytes(data[off+4..off+8].try_into().ok()?);
-        let entry_offset = u32::from_le_bytes(data[off+8..off+12].try_into().ok()?) as usize;
-        if _type != 0xFFFD0002 { continue; } // IMAGE type
+        if off + 12 > data.len() {
+            break;
+        }
+        let _type = u32::from_le_bytes(data[off..off + 4].try_into().ok()?);
+        let _subtype = u32::from_le_bytes(data[off + 4..off + 8].try_into().ok()?);
+        let entry_offset = u32::from_le_bytes(data[off + 8..off + 12].try_into().ok()?) as usize;
+        if _type != 0xFFFD0002 {
+            continue;
+        } // IMAGE type
         let diff = if _subtype as usize >= target_size {
             _subtype as usize - target_size
         } else {
@@ -180,25 +203,36 @@ fn parse_xcursor_file(path: &std::path::Path, target_size: usize) -> Option<Curs
     let entry_offset = best_entry?.0;
 
     // Parse image chunk
-    if entry_offset + 36 > data.len() { return None; }
-    let chunk_header = u32::from_le_bytes(data[entry_offset..entry_offset+4].try_into().ok()?);
-    if chunk_header != 0xFFFD0002 { return None; }
-    let chunk_size = u32::from_le_bytes(data[entry_offset+8..entry_offset+12].try_into().ok()?) as usize;
-    let width = u32::from_le_bytes(data[entry_offset+12..entry_offset+16].try_into().ok()?) as usize;
-    let height = u32::from_le_bytes(data[entry_offset+16..entry_offset+20].try_into().ok()?) as usize;
-    let hotspot_x = u32::from_le_bytes(data[entry_offset+20..entry_offset+24].try_into().ok()?) as usize;
-    let hotspot_y = u32::from_le_bytes(data[entry_offset+24..entry_offset+28].try_into().ok()?) as usize;
-    let _delay = u32::from_le_bytes(data[entry_offset+28..entry_offset+32].try_into().ok()?);
+    if entry_offset + 36 > data.len() {
+        return None;
+    }
+    let chunk_header = u32::from_le_bytes(data[entry_offset..entry_offset + 4].try_into().ok()?);
+    if chunk_header != 0xFFFD0002 {
+        return None;
+    }
+    let chunk_size =
+        u32::from_le_bytes(data[entry_offset + 8..entry_offset + 12].try_into().ok()?) as usize;
+    let width =
+        u32::from_le_bytes(data[entry_offset + 12..entry_offset + 16].try_into().ok()?) as usize;
+    let height =
+        u32::from_le_bytes(data[entry_offset + 16..entry_offset + 20].try_into().ok()?) as usize;
+    let hotspot_x =
+        u32::from_le_bytes(data[entry_offset + 20..entry_offset + 24].try_into().ok()?) as usize;
+    let hotspot_y =
+        u32::from_le_bytes(data[entry_offset + 24..entry_offset + 28].try_into().ok()?) as usize;
+    let _delay = u32::from_le_bytes(data[entry_offset + 28..entry_offset + 32].try_into().ok()?);
 
     // Pixels start at entry_offset + 36 (8 bytes chunk header + 4 * 7 fields = 36? No.)
     // Actually: chunk_header(4) + subtype(4) + chunk_size(4) + width(4) + height(4) + xhot(4) + yhot(4) + delay(4) = 32
-    // But the standard says: header is 4 (type) + 4 (subtype) + 4 (version?) ... 
+    // But the standard says: header is 4 (type) + 4 (subtype) + 4 (version?) ...
     // Let me re-read: the chunk starts with: type(4), subtype(4), length(4), then the image fields
     // After the 3 header u32s: width(4), height(4), xhot(4), yhot(4), delay(4), then pixels
     // So pixels start at entry_offset + 12 + 20 = entry_offset + 32
     let pixel_data_offset = entry_offset + 32;
     let expected_len = width * height * 4;
-    if pixel_data_offset + expected_len > data.len() { return None; }
+    if pixel_data_offset + expected_len > data.len() {
+        return None;
+    }
 
     // Convert ARGB32 to RGBA
     let mut pixels = vec![0u8; expected_len];
@@ -223,5 +257,11 @@ fn parse_xcursor_file(path: &std::path::Path, target_size: usize) -> Option<Curs
         }
     }
 
-    Some(CursorImage { width, height, hotspot_x, hotspot_y, pixels })
+    Some(CursorImage {
+        width,
+        height,
+        hotspot_x,
+        hotspot_y,
+        pixels,
+    })
 }

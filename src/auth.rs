@@ -12,7 +12,14 @@ const PAM_SUCCESS: c_int = 0;
 
 #[repr(C)]
 struct PamConv {
-    conv: Option<unsafe extern "C" fn(c_int, *mut *mut PamMessage, *mut *mut PamResponse, *mut c_void) -> c_int>,
+    conv: Option<
+        unsafe extern "C" fn(
+            c_int,
+            *mut *mut PamMessage,
+            *mut *mut PamResponse,
+            *mut c_void,
+        ) -> c_int,
+    >,
     appdata_ptr: *mut c_void,
 }
 
@@ -42,7 +49,8 @@ unsafe extern "C" fn pam_conv_callback(
         return 2; // PAM_BUF_ERR
     }
 
-    let responses = libc::calloc(num_msg as usize, std::mem::size_of::<PamResponse>()) as *mut PamResponse;
+    let responses =
+        libc::calloc(num_msg as usize, std::mem::size_of::<PamResponse>()) as *mut PamResponse;
     if responses.is_null() {
         return 2;
     }

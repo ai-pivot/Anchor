@@ -1,8 +1,8 @@
 //! TTF 字体渲染（fontdue）— 正常文字
 
-use fontdue::layout::{Layout, TextStyle, CoordinateSystem};
+use fontdue::layout::{CoordinateSystem, Layout, TextStyle};
 use fontdue::Font;
-use smithay::backend::renderer::{Frame, Color32F};
+use smithay::backend::renderer::{Color32F, Frame};
 use smithay::utils::{Physical, Point, Rectangle, Size};
 use std::sync::OnceLock;
 
@@ -19,7 +19,14 @@ fn get_font() -> &'static Font {
         for path in &cjk_candidates {
             if let Ok(data) = std::fs::read(path) {
                 // TTC files need collection_index = 0
-                if let Ok(font) = Font::from_bytes(data, fontdue::FontSettings { collection_index: 0, scale: 40.0, load_substitutions: false }) {
+                if let Ok(font) = Font::from_bytes(
+                    data,
+                    fontdue::FontSettings {
+                        collection_index: 0,
+                        scale: 40.0,
+                        load_substitutions: false,
+                    },
+                ) {
                     tracing::info!("🔤 字体(CJK): {}", path);
                     return font;
                 }
@@ -51,7 +58,8 @@ fn get_font() -> &'static Font {
 
         // Fallback: fontconfig
         if let Ok(output) = std::process::Command::new("fc-match")
-            .arg("-f").arg("%{file}")
+            .arg("-f")
+            .arg("%{file}")
             .arg("sans-serif")
             .output()
         {
@@ -83,7 +91,8 @@ fn rect(x: i32, y: i32, w: i32, h: i32) -> Rectangle<i32, Physical> {
 pub fn draw_text(
     f: &mut impl Frame,
     text: &str,
-    x: i32, y: i32,
+    x: i32,
+    y: i32,
     size: f32,
     color: (f32, f32, f32),
 ) -> i32 {
@@ -98,7 +107,9 @@ pub fn draw_text(
         let gx = x + glyph.x as i32;
         let gy = y + glyph.y as i32;
         let (w, h) = (glyph.width, glyph.height);
-        if w == 0 || h == 0 { continue; }
+        if w == 0 || h == 0 {
+            continue;
+        }
 
         let (_metrics, bitmap) = font.rasterize_config(glyph.key);
 
@@ -107,9 +118,15 @@ pub fn draw_text(
         for row in 0..h {
             let mut run_start: Option<usize> = None;
             for col in 0..=w {
-                let alpha = if col < w { bitmap.get(row * w + col).copied().unwrap_or(0) } else { 0 };
+                let alpha = if col < w {
+                    bitmap.get(row * w + col).copied().unwrap_or(0)
+                } else {
+                    0
+                };
                 if alpha > 30 {
-                    if run_start.is_none() { run_start = Some(col); }
+                    if run_start.is_none() {
+                        run_start = Some(col);
+                    }
                 } else if let Some(cs) = run_start.take() {
                     glyph_rects.push(rect(gx + cs as i32, gy + row as i32, (col - cs) as i32, 1));
                 }
@@ -119,7 +136,9 @@ pub fn draw_text(
             let _ = f.clear(fg, &glyph_rects);
         }
         let glyph_right = gx + w as i32;
-        if glyph_right > max_right { max_right = glyph_right; }
+        if glyph_right > max_right {
+            max_right = glyph_right;
+        }
     }
     max_right - x
 }
@@ -130,7 +149,9 @@ pub fn text_width(text: &str, size: f32) -> i32 {
     let mut layout = Layout::new(CoordinateSystem::PositiveYDown);
     layout.append(&[font], &TextStyle::new(text, size, 0));
     let glyphs = layout.glyphs();
-    if glyphs.is_empty() { return 0; }
+    if glyphs.is_empty() {
+        return 0;
+    }
     let last = glyphs.last().unwrap();
     (last.x as i32 + last.width as i32).max(0)
 }

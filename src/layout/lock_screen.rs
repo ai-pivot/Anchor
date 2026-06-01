@@ -1,27 +1,39 @@
 //! 锁屏渲染（5 种背景风格 + dim overlay + 时钟/密码输入框）
 
+use super::util::{opaque, rect};
 use crate::config::{parse_color, Config};
 use crate::text_render;
 use smithay::{
     backend::renderer::Frame,
     utils::{Physical, Rectangle},
 };
-use super::util::{opaque, rect};
 
 /// 渲染锁屏覆盖层 — 非焦点屏幕（暗色覆盖 + 同风格背景）
 pub fn render_lock_screen_dim(
-    f: &mut impl Frame, cfg: &Config, ow: i32, oh: i32, elapsed: f32, style: u8,
+    f: &mut impl Frame,
+    cfg: &Config,
+    ow: i32,
+    oh: i32,
+    elapsed: f32,
+    style: u8,
 ) {
     let accent = parse_color(&cfg.colors.focus_border);
-    f.clear(opaque(0.02, 0.02, 0.04), &[rect(0, 0, ow, oh)]).ok();
+    f.clear(opaque(0.02, 0.02, 0.04), &[rect(0, 0, ow, oh)])
+        .ok();
 
     // 渲染对应风格的暗色版背景
     render_lock_bg(f, accent, ow, oh, elapsed, style, 0.25);
 
     let lock_str = "LOCKED";
     let lock_w = text_render::text_width(lock_str, 18.0);
-    text_render::draw_text(f, lock_str, ow / 2 - lock_w / 2, oh / 2 - 9, 18.0,
-        (accent.0 * 0.25, accent.1 * 0.25, accent.2 * 0.25));
+    text_render::draw_text(
+        f,
+        lock_str,
+        ow / 2 - lock_w / 2,
+        oh / 2 - 9,
+        18.0,
+        (accent.0 * 0.25, accent.1 * 0.25, accent.2 * 0.25),
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -45,8 +57,13 @@ fn hash_rand(seed: u32, i: u32) -> u32 {
 /// 渲染锁屏背景（可缩放亮度用于非焦点屏幕）
 /// `elapsed` = 锁屏激活以来的秒数（基于 Instant，与帧率无关）
 fn render_lock_bg(
-    f: &mut impl Frame, accent: (f32, f32, f32), ow: i32, oh: i32,
-    elapsed: f32, style: u8, brightness_scale: f32,
+    f: &mut impl Frame,
+    accent: (f32, f32, f32),
+    ow: i32,
+    oh: i32,
+    elapsed: f32,
+    style: u8,
+    brightness_scale: f32,
 ) {
     // 基于 elapsed 的动画时间，使用整数帧计数保持 hash_rand 确定性
     // 速度系数 0.7：旧代码 t = frame * 0.012，60fps 时 t 每秒增加 0.72
@@ -69,12 +86,18 @@ fn render_lock_bg(
                 let b = brightness * brightness_scale;
                 let px = (sx * 250.0 + ow as f32 * cx) as i32;
                 let py = (sy * 180.0 + oh as f32 * 0.5) as i32;
-                f.clear(opaque(accent.0 * b, accent.1 * b, accent.2 * b),
-                    &[rect(px - size / 2, py - size / 2, size, size)]).ok();
+                f.clear(
+                    opaque(accent.0 * b, accent.1 * b, accent.2 * b),
+                    &[rect(px - size / 2, py - size / 2, size, size)],
+                )
+                .ok();
                 // 内核
                 let inner = size / 3;
-                f.clear(opaque(accent.0 * b * 2.5, accent.1 * b * 2.5, accent.2 * b * 2.5),
-                    &[rect(px - inner / 2, py - inner / 2, inner, inner)]).ok();
+                f.clear(
+                    opaque(accent.0 * b * 2.5, accent.1 * b * 2.5, accent.2 * b * 2.5),
+                    &[rect(px - inner / 2, py - inner / 2, inner, inner)],
+                )
+                .ok();
             }
             // 闪烁星点
             let seed = frame / 3; // 每3帧变一次
@@ -90,7 +113,15 @@ fn render_lock_bg(
             }
             if !star_rects.is_empty() {
                 let b = 0.6 * brightness_scale;
-                f.clear(opaque(accent.0 * b + 0.35 * brightness_scale, accent.1 * b + 0.35 * brightness_scale, accent.2 * b + 0.4 * brightness_scale), &star_rects).ok();
+                f.clear(
+                    opaque(
+                        accent.0 * b + 0.35 * brightness_scale,
+                        accent.1 * b + 0.35 * brightness_scale,
+                        accent.2 * b + 0.4 * brightness_scale,
+                    ),
+                    &star_rects,
+                )
+                .ok();
             }
         }
 
@@ -98,7 +129,7 @@ fn render_lock_bg(
         1 => {
             // 多层水平正弦波
             let layers: [(f32, f32, f32, f32); 5] = [
-                (0.015, 0.3, 0.008, 0.25),   // freq, amp, speed, brightness
+                (0.015, 0.3, 0.008, 0.25), // freq, amp, speed, brightness
                 (0.020, 0.2, 0.012, 0.20),
                 (0.010, 0.4, 0.006, 0.16),
                 (0.025, 0.15, 0.015, 0.22),
@@ -114,19 +145,32 @@ fn render_lock_bg(
                     wave_rects.push(rect(x, yo, 3, 4));
                 }
                 if !wave_rects.is_empty() {
-                    f.clear(opaque(accent.0 * b, accent.1 * b, accent.2 * b), &wave_rects).ok();
+                    f.clear(
+                        opaque(accent.0 * b, accent.1 * b, accent.2 * b),
+                        &wave_rects,
+                    )
+                    .ok();
                 }
             }
             // 扫描线（基于时间的平滑移动）
             let scan_y = (elapsed * 84.0) as i32 % oh;
             let b = 0.30 * brightness_scale;
-            f.clear(opaque(accent.0 * b, accent.1 * b, accent.2 * b),
-                &[rect(0, scan_y, ow, 3)]).ok();
+            f.clear(
+                opaque(accent.0 * b, accent.1 * b, accent.2 * b),
+                &[rect(0, scan_y, ow, 3)],
+            )
+            .ok();
             // 扫描线光晕
-            f.clear(opaque(accent.0 * b * 0.3, accent.1 * b * 0.3, accent.2 * b * 0.3),
-                &[rect(0, scan_y - 6, ow, 6)]).ok();
-            f.clear(opaque(accent.0 * b * 0.3, accent.1 * b * 0.3, accent.2 * b * 0.3),
-                &[rect(0, scan_y + 3, ow, 6)]).ok();
+            f.clear(
+                opaque(accent.0 * b * 0.3, accent.1 * b * 0.3, accent.2 * b * 0.3),
+                &[rect(0, scan_y - 6, ow, 6)],
+            )
+            .ok();
+            f.clear(
+                opaque(accent.0 * b * 0.3, accent.1 * b * 0.3, accent.2 * b * 0.3),
+                &[rect(0, scan_y + 3, ow, 6)],
+            )
+            .ok();
         }
 
         // ── Style 2: Grid 赛博网格 ──
@@ -140,7 +184,11 @@ fn render_lock_bg(
                 v_lines.push(rect(x, 0, 1, oh));
             }
             if !v_lines.is_empty() {
-                f.clear(opaque(accent.0 * b1, accent.1 * b1, accent.2 * b1), &v_lines).ok();
+                f.clear(
+                    opaque(accent.0 * b1, accent.1 * b1, accent.2 * b1),
+                    &v_lines,
+                )
+                .ok();
             }
             // 横线
             let mut h_lines: Vec<Rectangle<i32, Physical>> = Vec::new();
@@ -148,7 +196,11 @@ fn render_lock_bg(
                 h_lines.push(rect(0, y, ow, 1));
             }
             if !h_lines.is_empty() {
-                f.clear(opaque(accent.0 * b1, accent.1 * b1, accent.2 * b1), &h_lines).ok();
+                f.clear(
+                    opaque(accent.0 * b1, accent.1 * b1, accent.2 * b1),
+                    &h_lines,
+                )
+                .ok();
             }
             // 交叉点高亮
             let mut dots: Vec<Rectangle<i32, Physical>> = Vec::new();
@@ -158,21 +210,36 @@ fn render_lock_bg(
                 }
             }
             if !dots.is_empty() {
-                f.clear(opaque(accent.0 * b2, accent.1 * b2, accent.2 * b2), &dots).ok();
+                f.clear(opaque(accent.0 * b2, accent.1 * b2, accent.2 * b2), &dots)
+                    .ok();
             }
             // 垂直扫描线（来回，基于时间）
             let scan_raw = (elapsed * 126.0) as i32 % (ow * 2);
-            let scan_x = if scan_raw > ow { ow * 2 - scan_raw } else { scan_raw };
+            let scan_x = if scan_raw > ow {
+                ow * 2 - scan_raw
+            } else {
+                scan_raw
+            };
             let sb = 0.40 * brightness_scale;
             // 扫描线本体
-            f.clear(opaque(accent.0 * sb, accent.1 * sb, accent.2 * sb),
-                &[rect(scan_x, 0, 4, oh)]).ok();
+            f.clear(
+                opaque(accent.0 * sb, accent.1 * sb, accent.2 * sb),
+                &[rect(scan_x, 0, 4, oh)],
+            )
+            .ok();
             // 扫描线光晕
             for (dx, glow_b) in [(-12i32, 0.06f32), (-6, 0.12), (6, 0.12), (12, 0.06)] {
                 let gx = scan_x + dx;
                 if gx >= 0 && gx < ow {
-                    f.clear(opaque(accent.0 * glow_b * brightness_scale, accent.1 * glow_b * brightness_scale, accent.2 * glow_b * brightness_scale),
-                        &[rect(gx, 0, 2, oh)]).ok();
+                    f.clear(
+                        opaque(
+                            accent.0 * glow_b * brightness_scale,
+                            accent.1 * glow_b * brightness_scale,
+                            accent.2 * glow_b * brightness_scale,
+                        ),
+                        &[rect(gx, 0, 2, oh)],
+                    )
+                    .ok();
                 }
             }
         }
@@ -186,7 +253,9 @@ fn render_lock_bg(
             for i in 0..n_rings {
                 let phase = (t * 0.5 + i as f32 * 0.8) % (n_rings as f32 * 0.8);
                 let radius = (phase / (n_rings as f32 * 0.8) * max_radius as f32) as i32;
-                if radius < 4 { continue; }
+                if radius < 4 {
+                    continue;
+                }
                 let fade = 1.0 - phase / (n_rings as f32 * 0.8);
                 let b = fade * 0.28 * brightness_scale;
                 let thickness = 2 + (fade * 4.0) as i32;
@@ -196,20 +265,36 @@ fn render_lock_bg(
                     let angle = angle_step as f32 * std::f32::consts::PI * 2.0 / 90.0;
                     let px = cx + (r as f32 * angle.cos()) as i32;
                     let py = cy + (r as f32 * angle.sin()) as i32;
-                    arc.push(rect(px - thickness / 2, py - thickness / 2, thickness, thickness));
+                    arc.push(rect(
+                        px - thickness / 2,
+                        py - thickness / 2,
+                        thickness,
+                        thickness,
+                    ));
                 }
                 if !arc.is_empty() {
-                    f.clear(opaque(accent.0 * b, accent.1 * b, accent.2 * b), &arc).ok();
+                    f.clear(opaque(accent.0 * b, accent.1 * b, accent.2 * b), &arc)
+                        .ok();
                 }
             }
             // 中心发光点（脉冲呼吸）
             let pulse = 0.5 + 0.5 * (t * 2.0).sin();
             let b = pulse * 0.5 * brightness_scale;
-            f.clear(opaque(accent.0 * b + 0.15 * brightness_scale, accent.1 * b + 0.15 * brightness_scale, accent.2 * b + 0.18 * brightness_scale),
-                &[rect(cx - 6, cy - 6, 12, 12)]).ok();
+            f.clear(
+                opaque(
+                    accent.0 * b + 0.15 * brightness_scale,
+                    accent.1 * b + 0.15 * brightness_scale,
+                    accent.2 * b + 0.18 * brightness_scale,
+                ),
+                &[rect(cx - 6, cy - 6, 12, 12)],
+            )
+            .ok();
             // 中心光晕
-            f.clear(opaque(accent.0 * b * 0.3, accent.1 * b * 0.3, accent.2 * b * 0.3),
-                &[rect(cx - 20, cy - 20, 40, 40)]).ok();
+            f.clear(
+                opaque(accent.0 * b * 0.3, accent.1 * b * 0.3, accent.2 * b * 0.3),
+                &[rect(cx - 20, cy - 20, 40, 40)],
+            )
+            .ok();
         }
 
         // ── Style 4: Aurora 极光 ──
@@ -245,8 +330,11 @@ fn render_lock_bg(
             let grad_h = oh / 4;
             for i in 0..6 {
                 let fade = (i as f32 / 6.0) * 0.08 * brightness_scale;
-                f.clear(opaque(accent.0 * fade, accent.1 * fade, accent.2 * fade),
-                    &[rect(0, oh - grad_h + i * grad_h / 5, ow, grad_h / 5)]).ok();
+                f.clear(
+                    opaque(accent.0 * fade, accent.1 * fade, accent.2 * fade),
+                    &[rect(0, oh - grad_h + i * grad_h / 5, ow, grad_h / 5)],
+                )
+                .ok();
             }
         }
     }
@@ -254,15 +342,23 @@ fn render_lock_bg(
 
 /// 渲染锁屏覆盖层（全屏暗色覆盖 + 居中密码输入框 + 大时钟）
 pub fn render_lock_screen(
-    f: &mut impl Frame, cfg: &Config, ow: i32, oh: i32,
-    time_secs: u64, elapsed: f32,
-    password: &str, wrong: bool, shake: Option<std::time::Instant>,
-    style: u8, authenticating: bool,
+    f: &mut impl Frame,
+    cfg: &Config,
+    ow: i32,
+    oh: i32,
+    time_secs: u64,
+    elapsed: f32,
+    password: &str,
+    wrong: bool,
+    shake: Option<std::time::Instant>,
+    style: u8,
+    authenticating: bool,
 ) {
     let accent = parse_color(&cfg.colors.focus_border);
 
     // ── 全屏暗色覆盖 ──
-    f.clear(opaque(0.03, 0.03, 0.06), &[rect(0, 0, ow, oh)]).ok();
+    f.clear(opaque(0.03, 0.03, 0.06), &[rect(0, 0, ow, oh)])
+        .ok();
 
     // ── 背景动画效果 ──
     render_lock_bg(f, accent, ow, oh, elapsed, style, 1.0);
@@ -291,26 +387,50 @@ pub fn render_lock_screen(
     let clock_size = 72.0;
     let clock_w = text_render::text_width(&clock_str, clock_size);
     let clock_y = oh / 2 - 160;
-    text_render::draw_text(f, &clock_str, cx - clock_w / 2, clock_y, clock_size,
-        (accent.0 * 0.9, accent.1 * 0.9, accent.2 * 0.9));
+    text_render::draw_text(
+        f,
+        &clock_str,
+        cx - clock_w / 2,
+        clock_y,
+        clock_size,
+        (accent.0 * 0.9, accent.1 * 0.9, accent.2 * 0.9),
+    );
 
     // ── 日期 ──
     let month = (tm.tm_mon + 1) as u8;
     let day = tm.tm_mday as u8;
     let weekday = match tm.tm_wday {
-        0 => "Sunday", 1 => "Monday", 2 => "Tuesday", 3 => "Wednesday",
-        4 => "Thursday", 5 => "Friday", 6 => "Saturday", _ => "",
+        0 => "Sunday",
+        1 => "Monday",
+        2 => "Tuesday",
+        3 => "Wednesday",
+        4 => "Thursday",
+        5 => "Friday",
+        6 => "Saturday",
+        _ => "",
     };
     let date_str = format!("{}, {}-{:02}-{:02}", weekday, tm.tm_year + 1900, month, day);
     let date_w = text_render::text_width(&date_str, 20.0);
-    text_render::draw_text(f, &date_str, cx - date_w / 2, clock_y + 82, 20.0,
-        (0.4, 0.4, 0.5));
+    text_render::draw_text(
+        f,
+        &date_str,
+        cx - date_w / 2,
+        clock_y + 82,
+        20.0,
+        (0.4, 0.4, 0.5),
+    );
 
     // ── 用户名 ──
     let username = std::env::var("USER").unwrap_or_else(|_| "user".into());
     let user_w = text_render::text_width(&username, 24.0);
-    text_render::draw_text(f, &username, cx - user_w / 2, oh / 2 - 50, 24.0,
-        (0.6, 0.6, 0.65));
+    text_render::draw_text(
+        f,
+        &username,
+        cx - user_w / 2,
+        oh / 2 - 50,
+        24.0,
+        (0.6, 0.6, 0.65),
+    );
 
     // ── 锁图标（用方块手绘） ──
     {
@@ -318,8 +438,11 @@ pub fn render_lock_screen(
         let ly = oh / 2 - 20;
         let accent_c = opaque(accent.0, accent.1, accent.2);
         // 锁身（方形）
-        f.clear(opaque(accent.0 * 0.15, accent.1 * 0.15, accent.2 * 0.15),
-            &[rect(lx - 12, ly, 24, 20)]).ok();
+        f.clear(
+            opaque(accent.0 * 0.15, accent.1 * 0.15, accent.2 * 0.15),
+            &[rect(lx - 12, ly, 24, 20)],
+        )
+        .ok();
         f.clear(accent_c, &[rect(lx - 12, ly, 24, 2)]).ok();
         f.clear(accent_c, &[rect(lx - 12, ly + 18, 24, 2)]).ok();
         f.clear(accent_c, &[rect(lx - 12, ly, 2, 20)]).ok();
@@ -348,19 +471,41 @@ pub fn render_lock_screen(
     f.clear(input_bg, &[rect(box_x, box_y, box_w, box_h)]).ok();
 
     // 发光边框效果（多层渐变）
-    let glow_layers: [(i32, f32); 5] = [
-        (6, 0.04), (4, 0.08), (3, 0.15), (2, 0.3), (1, 0.6),
-    ];
+    let glow_layers: [(i32, f32); 5] = [(6, 0.04), (4, 0.08), (3, 0.15), (2, 0.3), (1, 0.6)];
     for (expand, brightness) in glow_layers {
         let glow = if wrong {
             opaque(0.6 * brightness, 0.1 * brightness, 0.1 * brightness)
         } else {
-            opaque(accent.0 * brightness, accent.1 * brightness, accent.2 * brightness)
+            opaque(
+                accent.0 * brightness,
+                accent.1 * brightness,
+                accent.2 * brightness,
+            )
         };
-        f.clear(glow, &[rect(box_x - expand, box_y - expand, box_w + 2 * expand, expand)]).ok(); // top
-        f.clear(glow, &[rect(box_x - expand, box_y + box_h, box_w + 2 * expand, expand)]).ok(); // bottom
-        f.clear(glow, &[rect(box_x - expand, box_y, expand, box_h)]).ok(); // left
-        f.clear(glow, &[rect(box_x + box_w, box_y, expand, box_h)]).ok(); // right
+        f.clear(
+            glow,
+            &[rect(
+                box_x - expand,
+                box_y - expand,
+                box_w + 2 * expand,
+                expand,
+            )],
+        )
+        .ok(); // top
+        f.clear(
+            glow,
+            &[rect(
+                box_x - expand,
+                box_y + box_h,
+                box_w + 2 * expand,
+                expand,
+            )],
+        )
+        .ok(); // bottom
+        f.clear(glow, &[rect(box_x - expand, box_y, expand, box_h)])
+            .ok(); // left
+        f.clear(glow, &[rect(box_x + box_w, box_y, expand, box_h)])
+            .ok(); // right
     }
 
     // ── 密码圆点 ──
@@ -374,20 +519,26 @@ pub fn render_lock_screen(
     let dot_color = if wrong {
         opaque(0.9, 0.3, 0.3)
     } else {
-        opaque(accent.0 * 0.9 + 0.1, accent.1 * 0.9 + 0.1, accent.2 * 0.9 + 0.1)
+        opaque(
+            accent.0 * 0.9 + 0.1,
+            accent.1 * 0.9 + 0.1,
+            accent.2 * 0.9 + 0.1,
+        )
     };
 
     for i in 0..n_dots {
         let dx = dots_start + i as i32 * dot_gap - dot_radius;
         let dy = box_y + box_h / 2 - dot_radius;
-        f.clear(dot_color, &[rect(dx, dy, dot_radius * 2, dot_radius * 2)]).ok();
+        f.clear(dot_color, &[rect(dx, dy, dot_radius * 2, dot_radius * 2)])
+            .ok();
     }
 
     // ── 闪烁光标（基于时间的 ~1Hz 闪烁） ──
     let cursor_visible = (elapsed * 1.0).sin() > 0.0;
     if cursor_visible {
         let cursor_x = dots_start + n_dots as i32 * dot_gap + 4;
-        f.clear(dot_color, &[rect(cursor_x, box_y + 10, 2, box_h - 20)]).ok();
+        f.clear(dot_color, &[rect(cursor_x, box_y + 10, 2, box_h - 20)])
+            .ok();
     }
 
     // ── 提示文字 ──
@@ -400,35 +551,68 @@ pub fn render_lock_screen(
             _ => "Verifying...",
         };
         let hw = text_render::text_width(dots, 14.0);
-        text_render::draw_text(f, dots, cx - hw / 2, box_y + box_h + 14, 14.0,
-            (accent.0 * 0.7, accent.1 * 0.7, accent.2 * 0.7));
+        text_render::draw_text(
+            f,
+            dots,
+            cx - hw / 2,
+            box_y + box_h + 14,
+            14.0,
+            (accent.0 * 0.7, accent.1 * 0.7, accent.2 * 0.7),
+        );
     } else if wrong {
         let hint = "Authentication failed";
         let hw = text_render::text_width(hint, 14.0);
-        text_render::draw_text(f, hint, cx - hw / 2, box_y + box_h + 14, 14.0,
-            (0.9, 0.3, 0.3));
+        text_render::draw_text(
+            f,
+            hint,
+            cx - hw / 2,
+            box_y + box_h + 14,
+            14.0,
+            (0.9, 0.3, 0.3),
+        );
     } else if password.is_empty() {
         let hint = "Enter password to unlock";
         let hw = text_render::text_width(hint, 14.0);
-        text_render::draw_text(f, hint, cx - hw / 2, box_y + box_h + 14, 14.0,
-            (0.3, 0.3, 0.4));
+        text_render::draw_text(
+            f,
+            hint,
+            cx - hw / 2,
+            box_y + box_h + 14,
+            14.0,
+            (0.3, 0.3, 0.4),
+        );
     }
 
     // ── 底部装饰线 ──
     let line_w = 120;
     let line_y = oh / 2 + 120;
-    f.clear(opaque(accent.0 * 0.15, accent.1 * 0.15, accent.2 * 0.15),
-        &[rect(cx - line_w, line_y, line_w * 2, 1)]).ok();
+    f.clear(
+        opaque(accent.0 * 0.15, accent.1 * 0.15, accent.2 * 0.15),
+        &[rect(cx - line_w, line_y, line_w * 2, 1)],
+    )
+    .ok();
     // 两端小方块
-    f.clear(opaque(accent.0 * 0.3, accent.1 * 0.3, accent.2 * 0.3),
-        &[rect(cx - line_w - 2, line_y - 2, 4, 4)]).ok();
-    f.clear(opaque(accent.0 * 0.3, accent.1 * 0.3, accent.2 * 0.3),
-        &[rect(cx + line_w - 2, line_y - 2, 4, 4)]).ok();
+    f.clear(
+        opaque(accent.0 * 0.3, accent.1 * 0.3, accent.2 * 0.3),
+        &[rect(cx - line_w - 2, line_y - 2, 4, 4)],
+    )
+    .ok();
+    f.clear(
+        opaque(accent.0 * 0.3, accent.1 * 0.3, accent.2 * 0.3),
+        &[rect(cx + line_w - 2, line_y - 2, 4, 4)],
+    )
+    .ok();
 
     // ── 风格标签（右下角小字） ──
     let style_names = ["NEBULA", "WAVE", "CYBER", "RINGS", "AURORA"];
     let style_label = style_names.get(style as usize).unwrap_or(&"UNKNOWN");
     let label_w = text_render::text_width(style_label, 11.0);
-    text_render::draw_text(f, style_label, ow - label_w - 16, oh - 20, 11.0,
-        (accent.0 * 0.15, accent.1 * 0.15, accent.2 * 0.15));
+    text_render::draw_text(
+        f,
+        style_label,
+        ow - label_w - 16,
+        oh - 20,
+        11.0,
+        (accent.0 * 0.15, accent.1 * 0.15, accent.2 * 0.15),
+    );
 }

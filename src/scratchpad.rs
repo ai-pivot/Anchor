@@ -29,11 +29,7 @@ impl ScratchpadState {
 
     /// Toggle scratchpad visibility. On first toggle, launches the terminal.
     /// Returns a notification message to display.
-    pub fn toggle(
-        &mut self,
-        terminal_cmd: &str,
-        xdisplay: Option<u32>,
-    ) -> &'static str {
+    pub fn toggle(&mut self, terminal_cmd: &str, xdisplay: Option<u32>) -> &'static str {
         if self.visible {
             // Hide: keep the terminal running, just stop rendering
             self.visible = false;

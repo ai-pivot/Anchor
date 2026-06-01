@@ -44,7 +44,7 @@ jobs:
           cp scripts/anchor-session anchor-${{ github.ref_name }}/usr/bin/
           cp scripts/anchor.desktop anchor-${{ github.ref_name }}/usr/share/wayland-sessions/
           cp config.toml anchor-${{ github.ref_name }}/usr/share/doc/anchor/config.toml.example
-          cp -r scripts/install.sh anchor-${{ github.ref_name}/
+          cp scripts/install.sh anchor-${{ github.ref_name }}/
 
           # Create install/uninstall scripts
           cat > anchor-${{ github.ref_name }}/install.sh << 'INSTALL_EOF'

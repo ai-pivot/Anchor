@@ -5,17 +5,17 @@
 mod config;
 mod layout;
 use layout::LayoutPreset;
-mod text_render;
+mod auth;
 mod block_linear;
-mod wallpaper;
 mod cursor;
 mod notify;
-mod xwayland;
-mod screenshot;
 mod record;
-mod auth;
+mod screenshot;
+mod text_render;
+mod wallpaper;
 mod workspace;
-use workspace::{Workspace, WindowSlot, NUM_WORKSPACES};
+mod xwayland;
+use workspace::{WindowSlot, Workspace, NUM_WORKSPACES};
 mod lock;
 use lock::LockState;
 mod launcher;
@@ -24,8 +24,8 @@ mod scratchpad;
 use scratchpad::ScratchpadState;
 
 use std::{
-    os::unix::io::OwnedFd,
     os::fd::AsRawFd,
+    os::unix::io::OwnedFd,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
@@ -33,56 +33,76 @@ use std::{
 use config::Config;
 use smithay::{
     backend::{
-        allocator::{Format, Fourcc, Modifier,
-            gbm::{GbmAllocator, GbmBufferFlags, GbmDevice}},
+        allocator::{
+            gbm::{GbmAllocator, GbmBufferFlags, GbmDevice},
+            Format, Fourcc, Modifier,
+        },
         drm::{DrmDevice, DrmDeviceFd, DrmEvent, GbmBufferedSurface},
         input::{Axis, ButtonState, InputEvent, KeyState, PointerAxisEvent},
         libinput::LibinputInputBackend,
-        renderer::{ImportDma, ImportMem, ExportMem, Bind, Frame, Renderer,
+        renderer::{
+            element::{
+                surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement},
+                Kind, RenderElement,
+            },
             gles::GlesRenderer,
-            element::{RenderElement, surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement}, Kind},
-            utils::{draw_render_elements, on_commit_buffer_handler}, Color32F},
-        session::{Session, Event as SessionEvent, libseat::LibSeatSession},
+            utils::{draw_render_elements, on_commit_buffer_handler},
+            Bind, Color32F, ExportMem, Frame, ImportDma, ImportMem, Renderer,
+        },
+        session::{libseat::LibSeatSession, Event as SessionEvent, Session},
     },
-    desktop::{PopupManager, PopupKind},    delegate_compositor, delegate_data_device, delegate_input_method_manager,
-    delegate_output, delegate_primary_selection, delegate_seat, delegate_shm, delegate_text_input_manager,
+    delegate_compositor, delegate_data_device, delegate_input_method_manager, delegate_output,
+    delegate_primary_selection, delegate_seat, delegate_shm, delegate_text_input_manager,
     delegate_virtual_keyboard_manager, delegate_xdg_decoration, delegate_xdg_shell,
+    desktop::{PopupKind, PopupManager},
     input::{
         keyboard::{FilterResult, Keysym, ModifiersState, XkbConfig},
-        pointer::{AxisFrame, CursorImageStatus, MotionEvent, PointerHandle}, Seat, SeatHandler, SeatState,
+        pointer::{AxisFrame, CursorImageStatus, MotionEvent, PointerHandle},
+        Seat, SeatHandler, SeatState,
     },
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
         calloop::EventLoop,
         drm::control::{connector, crtc, Device as _},
-        wayland_server::{Display, DisplayHandle,
-            protocol::{wl_seat, wl_surface::WlSurface}},
+        wayland_server::{
+            protocol::{wl_seat, wl_surface::WlSurface},
+            Display, DisplayHandle,
+        },
     },
-    utils::{DeviceFd, Logical, Physical, Point, Rectangle, SERIAL_COUNTER,
-        Size, Transform},
+    utils::{DeviceFd, Logical, Physical, Point, Rectangle, Size, Transform, SERIAL_COUNTER},
     wayland::{
         buffer::BufferHandler,
-        compositor::{with_surface_tree_downward, CompositorClientState, CompositorHandler,
-            CompositorState, SurfaceAttributes, TraversalAction},
-        input_method::{InputMethodHandler, InputMethodManagerState, PopupSurface as ImPopupSurface},
+        compositor::{
+            with_surface_tree_downward, CompositorClientState, CompositorHandler, CompositorState,
+            SurfaceAttributes, TraversalAction,
+        },
+        input_method::{
+            InputMethodHandler, InputMethodManagerState, PopupSurface as ImPopupSurface,
+        },
         output::OutputManagerState,
         selection::{
-            SelectionHandler,
-            data_device::{ClientDndGrabHandler, DataDeviceHandler, DataDeviceState,
-                ServerDndGrabHandler},
+            data_device::{
+                ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
+            },
             primary_selection::{PrimarySelectionHandler, PrimarySelectionState},
+            SelectionHandler,
         },
-        shell::xdg::{PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
-            decoration::{XdgDecorationState, XdgDecorationHandler}},
+        shell::xdg::{
+            decoration::{XdgDecorationHandler, XdgDecorationState},
+            PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+        },
         shm::{ShmHandler, ShmState},
         text_input::TextInputManagerState,
         virtual_keyboard::VirtualKeyboardManagerState,
     },
 };
-use wayland_protocols::xdg::shell::server::xdg_toplevel;
-use wayland_server::{Client, ListeningSocket, Resource,
-    backend::{ClientData, ClientId, DisconnectReason}, protocol::wl_buffer};
 use tracing::{error, info, warn};
+use wayland_protocols::xdg::shell::server::xdg_toplevel;
+use wayland_server::{
+    backend::{ClientData, ClientId, DisconnectReason},
+    protocol::wl_buffer,
+    Client, ListeningSocket, Resource,
+};
 
 // ── Workspace (see workspace.rs) ─────────────────────────────
 
@@ -111,15 +131,22 @@ struct Notification {
 }
 
 struct App {
-    comp: CompositorState, xdg: XdgShellState, shm: ShmState, seat_state: SeatState<Self>,
-    dd: DataDeviceState, primary_sel: PrimarySelectionState, seat: Seat<Self>,
+    comp: CompositorState,
+    xdg: XdgShellState,
+    shm: ShmState,
+    seat_state: SeatState<Self>,
+    dd: DataDeviceState,
+    primary_sel: PrimarySelectionState,
+    seat: Seat<Self>,
     deco: XdgDecorationState,
     popup_manager: PopupManager,
     osize: Size<i32, Logical>,
     workspaces: Vec<Workspace>,
     active_ws: usize,
-    run: bool, frame: u32,
-    dh: DisplayHandle, active: bool,
+    run: bool,
+    frame: u32,
+    dh: DisplayHandle,
+    active: bool,
     dirty: bool,
     kbd: smithay::input::keyboard::KeyboardHandle<Self>,
     pointer: PointerHandle<Self>,
@@ -173,8 +200,8 @@ struct App {
     // 锁屏状态
     lock_state: LockState,
     // CPU/MEM 统计（headbar 显示用）
-    cpu_usage: f32,        // 0.0 ~ 1.0
-    mem_usage: f32,        // 0.0 ~ 1.0
+    cpu_usage: f32, // 0.0 ~ 1.0
+    mem_usage: f32, // 0.0 ~ 1.0
     cpu_prev_idle: u64,
     cpu_prev_total: u64,
 }
@@ -203,7 +230,11 @@ struct LayoutAnimation {
 
 impl LayoutAnimation {
     fn new() -> Self {
-        Self { start: None, duration_ms: 350, old_positions: Vec::new() }
+        Self {
+            start: None,
+            duration_ms: 350,
+            old_positions: Vec::new(),
+        }
     }
 
     fn begin(&mut self, positions: &[(crate::workspace::WindowSlot, (i32, i32))]) {
@@ -211,17 +242,29 @@ impl LayoutAnimation {
         self.start = Some(std::time::Instant::now());
     }
 
-    fn offset_for(&self, slot: &crate::workspace::WindowSlot, target: (i32, i32)) -> Option<(i32, i32)> {
+    fn offset_for(
+        &self,
+        slot: &crate::workspace::WindowSlot,
+        target: (i32, i32),
+    ) -> Option<(i32, i32)> {
         let start = self.start?;
         let elapsed = start.elapsed().as_millis() as u64;
-        if elapsed >= self.duration_ms { return None; }
-        let old = self.old_positions.iter().find(|(s, _)| {
-            match (s, slot) {
-                (crate::workspace::WindowSlot::Wl(a), crate::workspace::WindowSlot::Wl(b)) => a == b,
-                (crate::workspace::WindowSlot::X11(a), crate::workspace::WindowSlot::X11(b)) => a == b,
+        if elapsed >= self.duration_ms {
+            return None;
+        }
+        let old = self
+            .old_positions
+            .iter()
+            .find(|(s, _)| match (s, slot) {
+                (crate::workspace::WindowSlot::Wl(a), crate::workspace::WindowSlot::Wl(b)) => {
+                    a == b
+                }
+                (crate::workspace::WindowSlot::X11(a), crate::workspace::WindowSlot::X11(b)) => {
+                    a == b
+                }
                 _ => false,
-            }
-        })?.1;
+            })?
+            .1;
         let t = elapsed as f32 / self.duration_ms as f32;
         let t_ease = 1.0 - (1.0 - t).powi(3);
         let dx = (old.0 - target.0) as f32 * (1.0 - t_ease);
@@ -230,16 +273,28 @@ impl LayoutAnimation {
     }
 
     fn is_active(&self) -> bool {
-        match self.start { Some(s) => { let ms: u64 = s.elapsed().as_millis() as u64; ms < self.duration_ms }, None => false }
+        match self.start {
+            Some(s) => {
+                let ms: u64 = s.elapsed().as_millis() as u64;
+                ms < self.duration_ms
+            }
+            None => false,
+        }
     }
 }
 
-impl BufferHandler for App { fn buffer_destroyed(&mut self, _: &wl_buffer::WlBuffer) {} }
+impl BufferHandler for App {
+    fn buffer_destroyed(&mut self, _: &wl_buffer::WlBuffer) {}
+}
 
 impl App {
     /// 当前工作区的窗口列表
-    fn tops(&self) -> &Vec<ToplevelSurface> { &self.workspaces[self.active_ws].tops }
-    fn tops_mut(&mut self) -> &mut Vec<ToplevelSurface> { &mut self.workspaces[self.active_ws].tops }
+    fn tops(&self) -> &Vec<ToplevelSurface> {
+        &self.workspaces[self.active_ws].tops
+    }
+    fn tops_mut(&mut self) -> &mut Vec<ToplevelSurface> {
+        &mut self.workspaces[self.active_ws].tops
+    }
 
     fn focus_idx(&self) -> Option<usize> {
         let ws = &self.workspaces[self.active_ws];
@@ -248,7 +303,10 @@ impl App {
         for (i, slot) in order.iter().enumerate() {
             let matches = match slot {
                 WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| tl.wl_surface() == focus),
-                WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface().map(|wl| &wl == focus)),
+                WindowSlot::X11(idx) => ws
+                    .x11_surfaces
+                    .get(*idx)
+                    .and_then(|xs| xs.wl_surface().map(|wl| &wl == focus)),
             };
             if matches == Some(true) {
                 return Some(i);
@@ -278,15 +336,29 @@ impl App {
     fn pointer_focus(&self) -> Option<(WlSurface, Point<f64, Logical>)> {
         // 找到鼠标所在的 output，将全局坐标转为 output 局部坐标
         let oi = self.output_at_pointer();
-        let (ox, oy, ow, oh) = self.output_sizes.get(oi).copied().unwrap_or((0, 0, self.osize.w, self.osize.h));
+        let (ox, oy, ow, oh) =
+            self.output_sizes
+                .get(oi)
+                .copied()
+                .unwrap_or((0, 0, self.osize.w, self.osize.h));
         let px = self.pointer_pos.0 - ox as f64;
         let py = self.pointer_pos.1 - oy as f64;
 
-        let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
-        if py < bar_h as f64 { return None; }
+        let bar_h = if self.cfg.bar.enabled {
+            self.cfg.bar.height
+        } else {
+            0
+        };
+        if py < bar_h as f64 {
+            return None;
+        }
 
         // 使用此 output 的 active_ws（不是全局的）
-        let out_ws_idx = self.output_active_ws.get(oi).copied().unwrap_or(self.active_ws);
+        let out_ws_idx = self
+            .output_active_ws
+            .get(oi)
+            .copied()
+            .unwrap_or(self.active_ws);
         let ws = &self.workspaces[out_ws_idx];
 
         // Fullscreen: 整个 output 区域（除 headbar 外）都属于全屏窗口
@@ -300,7 +372,9 @@ impl App {
                         if let Some(tl) = ws.tops.get(*idx) {
                             // 先检查 toplevel 的 XDG popup（候选词、菜单等）
                             let tl_pos = Point::from((0.0_f64, bar_h as f64));
-                            if let Some(r) = self.popup_at_pointer(tl, tl_pos) { return Some(r); }
+                            if let Some(r) = self.popup_at_pointer(tl, tl_pos) {
+                                return Some(r);
+                            }
                             return Some((tl.wl_surface().clone(), tl_pos));
                         }
                     }
@@ -326,11 +400,29 @@ impl App {
         for (i, slot) in order.iter().enumerate() {
             if let WindowSlot::Wl(idx) = slot {
                 if let Some(tl) = ws.tops.get(*idx) {
-                    let (x, y, _, _) = layout::slot(i, order.len(), ow, oh, bar_h, &self.cfg, ws.layout, ws.split);
-                    let tl_geo = smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
-                        states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
-                    }).unwrap_or_default();
-                    let tl_pos = Point::from((x as f64 - tl_geo.loc.x as f64, y as f64 - tl_geo.loc.y as f64));
+                    let (x, y, _, _) = layout::slot(
+                        i,
+                        order.len(),
+                        ow,
+                        oh,
+                        bar_h,
+                        &self.cfg,
+                        ws.layout,
+                        ws.split,
+                    );
+                    let tl_geo =
+                        smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
+                            states
+                                .cached_state
+                                .get::<smithay::wayland::shell::xdg::SurfaceCachedState>()
+                                .current()
+                                .geometry
+                        })
+                        .unwrap_or_default();
+                    let tl_pos = Point::from((
+                        x as f64 - tl_geo.loc.x as f64,
+                        y as f64 - tl_geo.loc.y as f64,
+                    ));
                     if let Some(r) = self.popup_at_pointer(tl, tl_pos) {
                         return Some(r);
                     }
@@ -341,7 +433,8 @@ impl App {
         // Hit-test window slots using unified order
         let n_all = order.len();
         for (i, slot) in order.iter().enumerate() {
-            let (x, y, w, h) = layout::slot(i, n_all, ow, oh, bar_h, &self.cfg, ws.layout, ws.split);
+            let (x, y, w, h) =
+                layout::slot(i, n_all, ow, oh, bar_h, &self.cfg, ws.layout, ws.split);
             if px >= x as f64 && px < (x + w) as f64 && py >= y as f64 && py < (y + h) as f64 {
                 match slot {
                     WindowSlot::Wl(idx) => {
@@ -349,18 +442,26 @@ impl App {
                             let s = tl.wl_surface().clone();
                             // 获取 geometry 偏移（CSD 阴影/边框），渲染位置需减去它
                             let tl_geo = smithay::wayland::compositor::with_states(&s, |states| {
-                                states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
-                            }).unwrap_or_default();
+                                states
+                                    .cached_state
+                                    .get::<smithay::wayland::shell::xdg::SurfaceCachedState>()
+                                    .current()
+                                    .geometry
+                            })
+                            .unwrap_or_default();
                             let bx = x as f64 - tl_geo.loc.x as f64;
                             let by = y as f64 - tl_geo.loc.y as f64;
                             let local_pos = Point::from((px - bx, py - by));
-                            if let Some((sub, sub_loc)) = smithay::desktop::utils::under_from_surface_tree(
-                                &s,
-                                local_pos,
-                                (0, 0),
-                                smithay::desktop::WindowSurfaceType::ALL,
-                            ) {
-                                let offset = Point::from((bx + sub_loc.x as f64, by + sub_loc.y as f64));
+                            if let Some((sub, sub_loc)) =
+                                smithay::desktop::utils::under_from_surface_tree(
+                                    &s,
+                                    local_pos,
+                                    (0, 0),
+                                    smithay::desktop::WindowSurfaceType::ALL,
+                                )
+                            {
+                                let offset =
+                                    Point::from((bx + sub_loc.x as f64, by + sub_loc.y as f64));
                                 return Some((sub, offset));
                             }
                             return Some((s, Point::from((bx, by))));
@@ -377,15 +478,32 @@ impl App {
 
         // Last resort: last window in order
         if let Some((i, slot)) = order.iter().enumerate().last() {
-            let (x, y, _w, _h) = layout::slot(i, order.len(), self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
+            let (x, y, _w, _h) = layout::slot(
+                i,
+                order.len(),
+                self.osize.w,
+                self.osize.h,
+                bar_h,
+                &self.cfg,
+                ws.layout,
+                ws.split,
+            );
             match slot {
                 WindowSlot::Wl(idx) => {
                     if let Some(tl) = ws.tops.get(*idx) {
                         let s = tl.wl_surface().clone();
                         let geo = smithay::wayland::compositor::with_states(&s, |states| {
-                            states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
-                        }).unwrap_or_default();
-                        return Some((s, Point::from((x as f64 - geo.loc.x as f64, y as f64 - geo.loc.y as f64))));
+                            states
+                                .cached_state
+                                .get::<smithay::wayland::shell::xdg::SurfaceCachedState>()
+                                .current()
+                                .geometry
+                        })
+                        .unwrap_or_default();
+                        return Some((
+                            s,
+                            Point::from((x as f64 - geo.loc.x as f64, y as f64 - geo.loc.y as f64)),
+                        ));
                     }
                 }
                 WindowSlot::X11(idx) => {
@@ -401,17 +519,28 @@ impl App {
 
     /// Check if the pointer is over any XDG popup of the given toplevel.
     /// Returns (popup_wl_surface, popup_global_position) if found.
-    fn popup_at_pointer(&self, tl: &ToplevelSurface, tl_pos: Point<f64, Logical>) -> Option<(WlSurface, Point<f64, Logical>)> {
+    fn popup_at_pointer(
+        &self,
+        tl: &ToplevelSurface,
+        tl_pos: Point<f64, Logical>,
+    ) -> Option<(WlSurface, Point<f64, Logical>)> {
         let px = self.pointer_pos.0;
         let py = self.pointer_pos.1;
 
         let tl_geo_loc = smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
-            states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
+            states
+                .cached_state
+                .get::<smithay::wayland::shell::xdg::SurfaceCachedState>()
+                .current()
+                .geometry
                 .map(|g| g.loc)
-        }).unwrap_or_default();
+        })
+        .unwrap_or_default();
 
         let popups: Vec<_> = PopupManager::popups_for_surface(tl.wl_surface()).collect();
-        if popups.is_empty() { return None; }
+        if popups.is_empty() {
+            return None;
+        }
         for (popup, popup_offset) in popups {
             let popup_geo = popup.geometry();
             let offset_x = (tl_geo_loc.x + popup_offset.x - popup_geo.loc.x) as f64;
@@ -428,19 +557,31 @@ impl App {
         None
     }
 
-    fn fullscreen(&self) -> Option<usize> { self.workspaces[self.active_ws].fullscreen }
-    fn set_fullscreen(&mut self, v: Option<usize>) { self.workspaces[self.active_ws].fullscreen = v; }
+    fn fullscreen(&self) -> Option<usize> {
+        self.workspaces[self.active_ws].fullscreen
+    }
+    fn set_fullscreen(&mut self, v: Option<usize>) {
+        self.workspaces[self.active_ws].fullscreen = v;
+    }
 
     /// 布局指定工作区的所有窗口
     fn layout_workspace(&mut self, ws_idx: usize) {
         self.workspaces[ws_idx].rebuild_order();
         let order = self.workspaces[ws_idx].effective_order();
         let n = order.len();
-        if n == 0 { return; }
-        let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
+        if n == 0 {
+            return;
+        }
+        let bar_h = if self.cfg.bar.enabled {
+            self.cfg.bar.height
+        } else {
+            0
+        };
 
         if let Some(fi) = self.workspaces[ws_idx].fullscreen {
-            if fi >= n { self.workspaces[ws_idx].fullscreen = None; }
+            if fi >= n {
+                self.workspaces[ws_idx].fullscreen = None;
+            }
         }
         let fullscreen = self.workspaces[ws_idx].fullscreen;
         let osize_w = self.osize.w;
@@ -470,9 +611,13 @@ impl App {
                     WindowSlot::X11(idx) => {
                         if let Some(xs) = self.workspaces[ws_idx].x11_surfaces.get(*idx) {
                             if i == fi {
-                                let _ = xs.configure(Some(Rectangle::from_loc_and_size((0, bar_h), (osize_w, osize_h - bar_h))));
+                                let _ = xs.configure(Some(Rectangle::from_loc_and_size(
+                                    (0, bar_h),
+                                    (osize_w, osize_h - bar_h),
+                                )));
                             } else {
-                                let _ = xs.configure(Some(Rectangle::from_loc_and_size((0, 0), (1, 1))));
+                                let _ = xs
+                                    .configure(Some(Rectangle::from_loc_and_size((0, 0), (1, 1))));
                             }
                         }
                     }
@@ -480,7 +625,16 @@ impl App {
             }
         } else {
             for (i, slot) in order.iter().enumerate() {
-                let (x, y, w, h) = layout::slot(i, n, osize_w, osize_h, bar_h, &self.cfg, self.workspaces[ws_idx].layout, self.workspaces[ws_idx].split);
+                let (x, y, w, h) = layout::slot(
+                    i,
+                    n,
+                    osize_w,
+                    osize_h,
+                    bar_h,
+                    &self.cfg,
+                    self.workspaces[ws_idx].layout,
+                    self.workspaces[ws_idx].split,
+                );
                 match slot {
                     WindowSlot::Wl(idx) => {
                         if let Some(tl) = self.workspaces[ws_idx].tops.get(*idx) {
@@ -494,7 +648,8 @@ impl App {
                     }
                     WindowSlot::X11(idx) => {
                         if let Some(xs) = self.workspaces[ws_idx].x11_surfaces.get(*idx) {
-                            let _ = xs.configure(Some(Rectangle::from_loc_and_size((x, y), (w, h))));
+                            let _ =
+                                xs.configure(Some(Rectangle::from_loc_and_size((x, y), (w, h))));
                         }
                     }
                 }
@@ -503,12 +658,27 @@ impl App {
 
         // 保存每个窗口的身份 + 位置（供下次动画使用）
         if ws_idx == self.active_ws {
-            let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
+            let bar_h = if self.cfg.bar.enabled {
+                self.cfg.bar.height
+            } else {
+                0
+            };
             let order = self.workspaces[ws_idx].effective_order();
-            self.prev_positions = (0..n).map(|i| {
-                let (x, y, _, _) = layout::slot(i, n, self.osize.w, self.osize.h, bar_h, &self.cfg, self.workspaces[ws_idx].layout, self.workspaces[ws_idx].split);
-                (order[i].clone(), (x, y))
-            }).collect();
+            self.prev_positions = (0..n)
+                .map(|i| {
+                    let (x, y, _, _) = layout::slot(
+                        i,
+                        n,
+                        self.osize.w,
+                        self.osize.h,
+                        bar_h,
+                        &self.cfg,
+                        self.workspaces[ws_idx].layout,
+                        self.workspaces[ws_idx].split,
+                    );
+                    (order[i].clone(), (x, y))
+                })
+                .collect();
         }
     }
 
@@ -520,25 +690,28 @@ impl App {
     /// 因为 remove 导致索引移位: Wl(1) 变成 Wl(0), 但 prev_positions 还映射旧索引
     fn remap_prev_after_remove(&mut self, removed: &WindowSlot) {
         let removed_clone = removed.clone();
-        self.prev_positions.retain(|(slot, _)| {
-            match (slot, &removed_clone) {
+        self.prev_positions
+            .retain(|(slot, _)| match (slot, &removed_clone) {
                 (WindowSlot::Wl(a), WindowSlot::Wl(b)) => a != b,
                 (WindowSlot::X11(a), WindowSlot::X11(b)) => a != b,
                 _ => true,
-            }
-        });
+            });
         match removed {
             WindowSlot::Wl(removed_idx) => {
                 for (slot, _) in &mut self.prev_positions {
                     if let WindowSlot::Wl(ref mut idx) = slot {
-                        if *idx > *removed_idx { *idx -= 1; }
+                        if *idx > *removed_idx {
+                            *idx -= 1;
+                        }
                     }
                 }
             }
             WindowSlot::X11(removed_idx) => {
                 for (slot, _) in &mut self.prev_positions {
                     if let WindowSlot::X11(ref mut idx) = slot {
-                        if *idx > *removed_idx { *idx -= 1; }
+                        if *idx > *removed_idx {
+                            *idx -= 1;
+                        }
                     }
                 }
             }
@@ -554,19 +727,21 @@ impl App {
         self.layout_workspace(self.active_ws);
 
         // 为新窗口（在 prev_positions 中没有记录的）填充假的旧位置
-        let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
+        let bar_h = if self.cfg.bar.enabled {
+            self.cfg.bar.height
+        } else {
+            0
+        };
         let split = self.workspaces[self.active_ws].split;
         let new_positions = self.prev_positions.clone(); // layout_workspace 刚更新
         let mut anim_positions = old_positions;
 
         // 为新增的窗口添加假旧位置（从 split 方向滑入）
         for (slot, new_pos) in &new_positions {
-            let already_tracked = anim_positions.iter().any(|(s, _)| {
-                match (s, slot) {
-                    (WindowSlot::Wl(a), WindowSlot::Wl(b)) => a == b,
-                    (WindowSlot::X11(a), WindowSlot::X11(b)) => a == b,
-                    _ => false,
-                }
+            let already_tracked = anim_positions.iter().any(|(s, _)| match (s, slot) {
+                (WindowSlot::Wl(a), WindowSlot::Wl(b)) => a == b,
+                (WindowSlot::X11(a), WindowSlot::X11(b)) => a == b,
+                _ => false,
             });
             if !already_tracked {
                 let fake_pos = match split {
@@ -603,12 +778,7 @@ impl App {
         tracing::info!("📋 设置截图剪贴板: {} bytes", png_data.len());
         let user_data: Arc<[u8]> = Arc::from(png_data);
         let mime_types = vec!["image/png".into()];
-        set_data_device_selection::<App>(
-            &self.dh,
-            &self.seat,
-            mime_types.clone(),
-            user_data,
-        );
+        set_data_device_selection::<App>(&self.dh, &self.seat, mime_types.clone(), user_data);
         // 合成器 set_data_device_selection 不会触发 SelectionHandler::new_selection，
         // 需要手动通知 X11 端让 XWM 成为 X11 CLIPBOARD owner
         if let Some(ref mut xwm) = self.xw.xwm {
@@ -627,14 +797,16 @@ impl App {
 
     fn drain_notifications(&mut self) {
         let now = std::time::Instant::now();
-        self.notifications.retain(|n| now.duration_since(n.created) < n.duration);
+        self.notifications
+            .retain(|n| now.duration_since(n.created) < n.duration);
     }
 
     /// Read CPU usage from /proc/stat (delta-based)
     fn update_cpu_usage(&mut self) {
         if let Ok(data) = std::fs::read_to_string("/proc/stat") {
             if let Some(line) = data.lines().next() {
-                let fields: Vec<u64> = line.split_whitespace()
+                let fields: Vec<u64> = line
+                    .split_whitespace()
                     .skip(1) // skip "cpu"
                     .filter_map(|s| s.parse().ok())
                     .collect();
@@ -660,13 +832,21 @@ impl App {
             let mut mem_available: u64 = 0;
             for line in data.lines() {
                 if line.starts_with("MemTotal:") {
-                    mem_total = line.split_whitespace()
-                        .nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                    mem_total = line
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
                 } else if line.starts_with("MemAvailable:") {
-                    mem_available = line.split_whitespace()
-                        .nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+                    mem_available = line
+                        .split_whitespace()
+                        .nth(1)
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(0);
                 }
-                if mem_total > 0 && mem_available > 0 { break; }
+                if mem_total > 0 && mem_available > 0 {
+                    break;
+                }
             }
             if mem_total > 0 {
                 self.mem_usage = 1.0 - mem_available as f32 / mem_total as f32;
@@ -692,7 +872,9 @@ impl App {
                     let order = ws.effective_order();
                     order.get(idx).and_then(|slot| match slot {
                         WindowSlot::Wl(i) => ws.tops.get(*i).map(|tl| tl.wl_surface().clone()),
-                        WindowSlot::X11(i) => ws.x11_surfaces.get(*i).and_then(|xs| xs.wl_surface()),
+                        WindowSlot::X11(i) => {
+                            ws.x11_surfaces.get(*i).and_then(|xs| xs.wl_surface())
+                        }
                     })
                 };
                 if let Some(surf) = focus_surf {
@@ -707,7 +889,9 @@ impl App {
 
     /// 切换到指定工作区（只替换鼠标所在 output 的工作区）
     fn switch_workspace(&mut self, target: usize) {
-        if target >= NUM_WORKSPACES { return; }
+        if target >= NUM_WORKSPACES {
+            return;
+        }
 
         let out_idx = self.focused_output;
 
@@ -739,8 +923,15 @@ impl App {
 
         // 目标工作区不在任何屏幕上 → 替换当前 focused output 的工作区
         let old_ws = self.output_active_ws[out_idx];
-        if target == old_ws { return; }
-        info!("🔀 屏幕 {} 工作区 {} → {}", out_idx + 1, old_ws + 1, target + 1);
+        if target == old_ws {
+            return;
+        }
+        info!(
+            "🔀 屏幕 {} 工作区 {} → {}",
+            out_idx + 1,
+            old_ws + 1,
+            target + 1
+        );
 
         // 触发切换动画
         let dir = if target > old_ws { 1 } else { -1 };
@@ -785,10 +976,14 @@ impl App {
     /// 将当前焦点窗口移动到目标工作区，然后跟随窗口切换到目标工作区
     /// 支持 Wayland (tops) 和 X11 (x11_surfaces) 窗口
     fn move_window_to_workspace(&mut self, target: usize) {
-        if target >= NUM_WORKSPACES { return; }
+        if target >= NUM_WORKSPACES {
+            return;
+        }
         let out_idx = self.focused_output;
         let ws_idx = self.output_active_ws.get(out_idx).copied().unwrap_or(0);
-        if target == ws_idx { return; }
+        if target == ws_idx {
+            return;
+        }
         let fi = match self.focus_idx() {
             Some(i) => i,
             None => return,
@@ -802,15 +997,26 @@ impl App {
 
         // 1. 先 clone 窗口和 wl_surface（在 remove 之前）
         let surf = match &slot {
-            WindowSlot::Wl(idx) => self.workspaces[ws_idx].tops.get(*idx).map(|tl| tl.wl_surface().clone()),
-            WindowSlot::X11(idx) => self.workspaces[ws_idx].x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()),
+            WindowSlot::Wl(idx) => self.workspaces[ws_idx]
+                .tops
+                .get(*idx)
+                .map(|tl| tl.wl_surface().clone()),
+            WindowSlot::X11(idx) => self.workspaces[ws_idx]
+                .x11_surfaces
+                .get(*idx)
+                .and_then(|xs| xs.wl_surface()),
         };
         let surf = match surf {
             Some(s) => s,
             None => return,
         };
 
-        info!("📦 移动窗口 slot {:?} (order #{}) → 工作区 {}", slot, fi, target + 1);
+        info!(
+            "📦 移动窗口 slot {:?} (order #{}) → 工作区 {}",
+            slot,
+            fi,
+            target + 1
+        );
 
         // 2. 从源工作区移除，添加到目标工作区
         match slot {
@@ -823,7 +1029,10 @@ impl App {
                 self.remap_prev_after_remove(&WindowSlot::Wl(idx));
                 self.workspaces[ws_idx].rebuild_order();
                 self.workspaces[ws_idx].fullscreen = None;
-                self.workspaces[ws_idx].focus = self.workspaces[ws_idx].tops.last().map(|t| t.wl_surface().clone());
+                self.workspaces[ws_idx].focus = self.workspaces[ws_idx]
+                    .tops
+                    .last()
+                    .map(|t| t.wl_surface().clone());
 
                 self.workspaces[target].tops.push(tl);
             }
@@ -839,8 +1048,14 @@ impl App {
                 {
                     let src_order = self.workspaces[ws_idx].effective_order();
                     self.workspaces[ws_idx].focus = src_order.last().and_then(|s| match s {
-                        WindowSlot::Wl(i) => self.workspaces[ws_idx].tops.get(*i).map(|tl| tl.wl_surface().clone()),
-                        WindowSlot::X11(i) => self.workspaces[ws_idx].x11_surfaces.get(*i).and_then(|x| x.wl_surface()),
+                        WindowSlot::Wl(i) => self.workspaces[ws_idx]
+                            .tops
+                            .get(*i)
+                            .map(|tl| tl.wl_surface().clone()),
+                        WindowSlot::X11(i) => self.workspaces[ws_idx]
+                            .x11_surfaces
+                            .get(*i)
+                            .and_then(|x| x.wl_surface()),
                     });
                 }
 
@@ -876,22 +1091,38 @@ impl App {
         self.dirty = true;
     }
 
-
     /// 用方向键切换焦点窗口（Super+方向键）
     /// 按屏幕真实几何位置：找到当前焦点窗口在指定方向上最近的邻居
     fn focus_direction(&mut self, direction: Keysym) {
         let order = self.workspaces[self.active_ws].effective_order();
         let n = order.len();
-        if n == 0 { return; }
+        if n == 0 {
+            return;
+        }
 
         let fi = match self.focus_idx() {
             Some(i) => i,
             None => 0,
         };
 
-        let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
+        let bar_h = if self.cfg.bar.enabled {
+            self.cfg.bar.height
+        } else {
+            0
+        };
         let slots: Vec<(i32, i32, i32, i32)> = (0..n)
-            .map(|i| layout::slot(i, n, self.osize.w, self.osize.h, bar_h, &self.cfg, self.workspaces[self.active_ws].layout, self.workspaces[self.active_ws].split))
+            .map(|i| {
+                layout::slot(
+                    i,
+                    n,
+                    self.osize.w,
+                    self.osize.h,
+                    bar_h,
+                    &self.cfg,
+                    self.workspaces[self.active_ws].layout,
+                    self.workspaces[self.active_ws].split,
+                )
+            })
             .collect();
 
         let (fx, fy, fw, fh) = slots[fi];
@@ -902,7 +1133,9 @@ impl App {
         let mut best_dist: i32 = i32::MAX;
 
         for (i, &(sx, sy, sw, sh)) in slots.iter().enumerate() {
-            if i == fi { continue; }
+            if i == fi {
+                continue;
+            }
             let scx = sx + sw / 2;
             let scy = sy + sh / 2;
 
@@ -951,12 +1184,29 @@ impl App {
         ws.rebuild_order();
         let order = ws.effective_order();
         let n = order.len();
-        if n <= 1 { return; }
+        if n <= 1 {
+            return;
+        }
 
-        let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
+        let bar_h = if self.cfg.bar.enabled {
+            self.cfg.bar.height
+        } else {
+            0
+        };
         // 计算所有窗口的 slot 位置
         let slots: Vec<(i32, i32, i32, i32)> = (0..n)
-            .map(|i| layout::slot(i, n, self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split))
+            .map(|i| {
+                layout::slot(
+                    i,
+                    n,
+                    self.osize.w,
+                    self.osize.h,
+                    bar_h,
+                    &self.cfg,
+                    ws.layout,
+                    ws.split,
+                )
+            })
             .collect();
 
         let (fx, fy, fw, fh) = slots[fi];
@@ -969,7 +1219,9 @@ impl App {
         let mut best_dist: i32 = i32::MAX;
 
         for (i, &(sx, sy, sw, sh)) in slots.iter().enumerate() {
-            if i == fi { continue; }
+            if i == fi {
+                continue;
+            }
             let scx = sx + sw / 2;
             let scy = sy + sh / 2;
 
@@ -996,8 +1248,11 @@ impl App {
         ws.window_order.swap(fi, target);
 
         if let Some(fs) = ws.fullscreen {
-            if fs == fi { ws.fullscreen = Some(target); }
-            else if fs == target { ws.fullscreen = Some(fi); }
+            if fs == fi {
+                ws.fullscreen = Some(target);
+            } else if fs == target {
+                ws.fullscreen = Some(fi);
+            }
         }
 
         drop(ws);
@@ -1006,7 +1261,9 @@ impl App {
     }
 
     fn handle_input_event(&mut self, event: InputEvent<LibinputInputBackend>) {
-        use smithay::backend::input::{KeyboardKeyEvent as _, PointerButtonEvent as _, PointerMotionEvent as _, Event as _};
+        use smithay::backend::input::{
+            Event as _, KeyboardKeyEvent as _, PointerButtonEvent as _, PointerMotionEvent as _,
+        };
         match event {
             InputEvent::Keyboard { event } => {
                 let keycode = event.key_code();
@@ -1015,8 +1272,15 @@ impl App {
                 let serial = SERIAL_COUNTER.next_serial();
                 let kbd = self.kbd.clone();
                 let _ = smithay::input::keyboard::KeyboardHandle::<Self>::input(
-                    &kbd, self, keycode, state, serial, time,
-                    |data: &mut App, mods: &ModifiersState, keysym: smithay::input::keyboard::KeysymHandle<'_>| {
+                    &kbd,
+                    self,
+                    keycode,
+                    state,
+                    serial,
+                    time,
+                    |data: &mut App,
+                     mods: &ModifiersState,
+                     keysym: smithay::input::keyboard::KeysymHandle<'_>| {
                         // ── 截图区域选择模式键盘处理 ──
                         if data.screenshot.selecting && state == KeyState::Pressed {
                             let sym = keysym.modified_sym();
@@ -1031,13 +1295,21 @@ impl App {
                         if data.lock_state.locked && state == KeyState::Pressed {
                             let sym = keysym.modified_sym();
                             match sym {
-                                Keysym::Escape => { data.lock_state.clear(); data.dirty = true; return FilterResult::Intercept(()); }
+                                Keysym::Escape => {
+                                    data.lock_state.clear();
+                                    data.dirty = true;
+                                    return FilterResult::Intercept(());
+                                }
                                 Keysym::Return => {
                                     data.lock_state.try_unlock();
                                     data.dirty = true;
                                     return FilterResult::Intercept(());
                                 }
-                                Keysym::BackSpace => { data.lock_state.backspace(); data.dirty = true; return FilterResult::Intercept(()); }
+                                Keysym::BackSpace => {
+                                    data.lock_state.backspace();
+                                    data.dirty = true;
+                                    return FilterResult::Intercept(());
+                                }
                                 _ => {
                                     // Printable characters → append to password
                                     let ch = match sym.raw() {
@@ -1056,16 +1328,38 @@ impl App {
                             // Intercept all other keys when locked
                             return FilterResult::Intercept(());
                         }
-                        if data.lock_state.locked { return FilterResult::Intercept(()); }
+                        if data.lock_state.locked {
+                            return FilterResult::Intercept(());
+                        }
                         // ── 启动器模式键盘处理 ──
                         if data.launcher.visible && state == KeyState::Pressed {
                             let sym = keysym.modified_sym();
                             match sym {
-                                Keysym::Escape => { data.launcher.close(); data.dirty = true; return FilterResult::Intercept(()); }
-                                Keysym::Return => { data.launcher.select_and_launch(data.xdisplay); data.dirty = true; return FilterResult::Intercept(()); }
-                                Keysym::Up => { data.launcher.select_up(); data.dirty = true; return FilterResult::Intercept(()); }
-                                Keysym::Down => { data.launcher.select_down(); data.dirty = true; return FilterResult::Intercept(()); }
-                                Keysym::BackSpace => { data.launcher.backspace(); data.dirty = true; return FilterResult::Intercept(()); }
+                                Keysym::Escape => {
+                                    data.launcher.close();
+                                    data.dirty = true;
+                                    return FilterResult::Intercept(());
+                                }
+                                Keysym::Return => {
+                                    data.launcher.select_and_launch(data.xdisplay);
+                                    data.dirty = true;
+                                    return FilterResult::Intercept(());
+                                }
+                                Keysym::Up => {
+                                    data.launcher.select_up();
+                                    data.dirty = true;
+                                    return FilterResult::Intercept(());
+                                }
+                                Keysym::Down => {
+                                    data.launcher.select_down();
+                                    data.dirty = true;
+                                    return FilterResult::Intercept(());
+                                }
+                                Keysym::BackSpace => {
+                                    data.launcher.backspace();
+                                    data.dirty = true;
+                                    return FilterResult::Intercept(());
+                                }
                                 _ => {
                                     // 处理可打印字符
                                     let sym = keysym.modified_sym();
@@ -1086,16 +1380,19 @@ impl App {
                                 }
                             }
                         }
-                        
+
                         if state == KeyState::Pressed && mods.logo {
                             let uid = unsafe { libc::getuid() };
                             match keysym.modified_sym() {
                                 Keysym::Return => {
                                     info!("⌨️  启动终端");
-                                    let mut cmd = std::process::Command::new(&data.cfg.terminal.command);
+                                    let mut cmd =
+                                        std::process::Command::new(&data.cfg.terminal.command);
                                     cmd.env("WAYLAND_DISPLAY", "wayland-anchor")
                                         .env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"))
-                                        .env("XMODIFIERS", "@im=fcitx").env("QT_IM_MODULE", "fcitx").env("GTK_IM_MODULE", "fcitx");
+                                        .env("XMODIFIERS", "@im=fcitx")
+                                        .env("QT_IM_MODULE", "fcitx")
+                                        .env("GTK_IM_MODULE", "fcitx");
                                     if let Some(d) = data.xdisplay {
                                         cmd.env("DISPLAY", format!(":{}", d));
                                     }
@@ -1120,14 +1417,22 @@ impl App {
                                     return FilterResult::Intercept(());
                                 }
                                 Keysym::q => {
-                                    if let Some(ref surf) = data.workspaces[data.active_ws].focus.clone() {
+                                    if let Some(ref surf) =
+                                        data.workspaces[data.active_ws].focus.clone()
+                                    {
                                         let ws = &data.workspaces[data.active_ws];
                                         // Try Wayland toplevel first
-                                        if let Some(tl) = ws.tops.iter().find(|tl| tl.wl_surface() == surf) {
+                                        if let Some(tl) =
+                                            ws.tops.iter().find(|tl| tl.wl_surface() == surf)
+                                        {
                                             tl.send_close();
                                         }
                                         // Try X11 surface
-                                        if let Some(xs) = ws.x11_surfaces.iter().find(|xs| xs.wl_surface().as_ref() == Some(surf)) {
+                                        if let Some(xs) = ws
+                                            .x11_surfaces
+                                            .iter()
+                                            .find(|xs| xs.wl_surface().as_ref() == Some(surf))
+                                        {
                                             let _ = xs.close();
                                         }
                                     }
@@ -1138,12 +1443,16 @@ impl App {
                                     data.dirty = true;
                                     return FilterResult::Intercept(());
                                 }
-                                Keysym::f => { data.toggle_fullscreen(); return FilterResult::Intercept(()); }
+                                Keysym::f => {
+                                    data.toggle_fullscreen();
+                                    return FilterResult::Intercept(());
+                                }
                                 Keysym::p => {
                                     // Super+Shift+P: 全屏截图直接保存+剪贴板
                                     // Super+P: 区域选择截图
                                     if mods.shift {
-                                        data.pending_screenshot = Some(screenshot::ScreenshotRequest::Full);
+                                        data.pending_screenshot =
+                                            Some(screenshot::ScreenshotRequest::Full);
                                         data.dirty = true;
                                     } else {
                                         // 进入区域选择模式
@@ -1159,7 +1468,8 @@ impl App {
                                         data.record_state.stop();
                                         data.notify("Recording stopped");
                                     } else {
-                                        data.record_state.start(data.osize.w as u32, data.osize.h as u32);
+                                        data.record_state
+                                            .start(data.osize.w as u32, data.osize.h as u32);
                                         if data.record_state.recording {
                                             data.notify("Recording started (Super+R to stop)");
                                         }
@@ -1169,7 +1479,9 @@ impl App {
                                 }
                                 Keysym::grave => {
                                     // Scratchpad: 切换下拉终端
-                                    let msg = data.scratchpad.toggle(&data.cfg.terminal.command, data.xdisplay);
+                                    let msg = data
+                                        .scratchpad
+                                        .toggle(&data.cfg.terminal.command, data.xdisplay);
                                     data.notify(msg);
                                     data.dirty = true;
                                     return FilterResult::Intercept(());
@@ -1184,15 +1496,42 @@ impl App {
                                     return FilterResult::Intercept(());
                                 }
                                 // Super+1-9：切换工作区
-                                Keysym::_1 => { data.switch_workspace(0); return FilterResult::Intercept(()); }
-                                Keysym::_2 => { data.switch_workspace(1); return FilterResult::Intercept(()); }
-                                Keysym::_3 => { data.switch_workspace(2); return FilterResult::Intercept(()); }
-                                Keysym::_4 => { data.switch_workspace(3); return FilterResult::Intercept(()); }
-                                Keysym::_5 => { data.switch_workspace(4); return FilterResult::Intercept(()); }
-                                Keysym::_6 => { data.switch_workspace(5); return FilterResult::Intercept(()); }
-                                Keysym::_7 => { data.switch_workspace(6); return FilterResult::Intercept(()); }
-                                Keysym::_8 => { data.switch_workspace(7); return FilterResult::Intercept(()); }
-                                Keysym::_9 => { data.switch_workspace(8); return FilterResult::Intercept(()); }
+                                Keysym::_1 => {
+                                    data.switch_workspace(0);
+                                    return FilterResult::Intercept(());
+                                }
+                                Keysym::_2 => {
+                                    data.switch_workspace(1);
+                                    return FilterResult::Intercept(());
+                                }
+                                Keysym::_3 => {
+                                    data.switch_workspace(2);
+                                    return FilterResult::Intercept(());
+                                }
+                                Keysym::_4 => {
+                                    data.switch_workspace(3);
+                                    return FilterResult::Intercept(());
+                                }
+                                Keysym::_5 => {
+                                    data.switch_workspace(4);
+                                    return FilterResult::Intercept(());
+                                }
+                                Keysym::_6 => {
+                                    data.switch_workspace(5);
+                                    return FilterResult::Intercept(());
+                                }
+                                Keysym::_7 => {
+                                    data.switch_workspace(6);
+                                    return FilterResult::Intercept(());
+                                }
+                                Keysym::_8 => {
+                                    data.switch_workspace(7);
+                                    return FilterResult::Intercept(());
+                                }
+                                Keysym::_9 => {
+                                    data.switch_workspace(8);
+                                    return FilterResult::Intercept(());
+                                }
                                 // Super+方向键 / Super+Shift+方向键
                                 Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down => {
                                     if mods.shift {
@@ -1204,14 +1543,16 @@ impl App {
                                 }
                                 // Super+V: 下一个新窗口纵向分割（类似 sway split v）
                                 Keysym::v => {
-                                    data.workspaces[data.active_ws].pending_split = Some(layout::SplitDir::Vertical);
+                                    data.workspaces[data.active_ws].pending_split =
+                                        Some(layout::SplitDir::Vertical);
                                     info!("📐 下一个窗口 → 纵向 (Vertical)");
                                     data.notify("Next split: Vertical ↕");
                                     return FilterResult::Intercept(());
                                 }
                                 // Super+B: 下一个新窗口横向分割（类似 sway split h）
                                 Keysym::b => {
-                                    data.workspaces[data.active_ws].pending_split = Some(layout::SplitDir::Horizontal);
+                                    data.workspaces[data.active_ws].pending_split =
+                                        Some(layout::SplitDir::Horizontal);
                                     info!("📐 下一个窗口 → 横向 (Horizontal)");
                                     data.notify("Next split: Horizontal ↔");
                                     return FilterResult::Intercept(());
@@ -1222,15 +1563,42 @@ impl App {
                             if mods.shift {
                                 if let Some(raw) = keysym.raw_syms().first() {
                                     match *raw {
-                                        Keysym::_1 => { data.move_window_to_workspace(0); return FilterResult::Intercept(()); }
-                                        Keysym::_2 => { data.move_window_to_workspace(1); return FilterResult::Intercept(()); }
-                                        Keysym::_3 => { data.move_window_to_workspace(2); return FilterResult::Intercept(()); }
-                                        Keysym::_4 => { data.move_window_to_workspace(3); return FilterResult::Intercept(()); }
-                                        Keysym::_5 => { data.move_window_to_workspace(4); return FilterResult::Intercept(()); }
-                                        Keysym::_6 => { data.move_window_to_workspace(5); return FilterResult::Intercept(()); }
-                                        Keysym::_7 => { data.move_window_to_workspace(6); return FilterResult::Intercept(()); }
-                                        Keysym::_8 => { data.move_window_to_workspace(7); return FilterResult::Intercept(()); }
-                                        Keysym::_9 => { data.move_window_to_workspace(8); return FilterResult::Intercept(()); }
+                                        Keysym::_1 => {
+                                            data.move_window_to_workspace(0);
+                                            return FilterResult::Intercept(());
+                                        }
+                                        Keysym::_2 => {
+                                            data.move_window_to_workspace(1);
+                                            return FilterResult::Intercept(());
+                                        }
+                                        Keysym::_3 => {
+                                            data.move_window_to_workspace(2);
+                                            return FilterResult::Intercept(());
+                                        }
+                                        Keysym::_4 => {
+                                            data.move_window_to_workspace(3);
+                                            return FilterResult::Intercept(());
+                                        }
+                                        Keysym::_5 => {
+                                            data.move_window_to_workspace(4);
+                                            return FilterResult::Intercept(());
+                                        }
+                                        Keysym::_6 => {
+                                            data.move_window_to_workspace(5);
+                                            return FilterResult::Intercept(());
+                                        }
+                                        Keysym::_7 => {
+                                            data.move_window_to_workspace(6);
+                                            return FilterResult::Intercept(());
+                                        }
+                                        Keysym::_8 => {
+                                            data.move_window_to_workspace(7);
+                                            return FilterResult::Intercept(());
+                                        }
+                                        Keysym::_9 => {
+                                            data.move_window_to_workspace(8);
+                                            return FilterResult::Intercept(());
+                                        }
                                         _ => {}
                                     }
                                 }
@@ -1265,16 +1633,20 @@ impl App {
                         // 找出鼠标上方 / 下方 / 左方 / 右方最近的邻接 output
                         // 屏幕布局约定：output 可能是同 Y 范围（左右排），同 X 范围（上下排），或两者都不同
                         // 简化策略：选一个能完整包含鼠标 x 或 y 范围的"水平或垂直邻接屏"
-                        let target = self.output_sizes.iter().min_by(|(ox1, oy1, ow1, oh1), (ox2, oy2, ow2, oh2)| {
-                            // 距离排序：欧氏距离到 output 中心
-                            let c1x = *ox1 as f64 + *ow1 as f64 / 2.0;
-                            let c1y = *oy1 as f64 + *oh1 as f64 / 2.0;
-                            let c2x = *ox2 as f64 + *ow2 as f64 / 2.0;
-                            let c2y = *oy2 as f64 + *oh2 as f64 / 2.0;
-                            let d1 = (c1x - self.pointer_pos.0).powi(2) + (c1y - self.pointer_pos.1).powi(2);
-                            let d2 = (c2x - self.pointer_pos.0).powi(2) + (c2y - self.pointer_pos.1).powi(2);
-                            d1.partial_cmp(&d2).unwrap_or(std::cmp::Ordering::Equal)
-                        });
+                        let target = self.output_sizes.iter().min_by(
+                            |(ox1, oy1, ow1, oh1), (ox2, oy2, ow2, oh2)| {
+                                // 距离排序：欧氏距离到 output 中心
+                                let c1x = *ox1 as f64 + *ow1 as f64 / 2.0;
+                                let c1y = *oy1 as f64 + *oh1 as f64 / 2.0;
+                                let c2x = *ox2 as f64 + *ow2 as f64 / 2.0;
+                                let c2y = *oy2 as f64 + *oh2 as f64 / 2.0;
+                                let d1 = (c1x - self.pointer_pos.0).powi(2)
+                                    + (c1y - self.pointer_pos.1).powi(2);
+                                let d2 = (c2x - self.pointer_pos.0).powi(2)
+                                    + (c2y - self.pointer_pos.1).powi(2);
+                                d1.partial_cmp(&d2).unwrap_or(std::cmp::Ordering::Equal)
+                            },
+                        );
                         if let Some((ox, oy, ow, oh)) = target {
                             // 关键修复：clamp 到 (ox, ox+ow) 而非 (ox, ox+ow-1)
                             // 否则永远到不了真正的右/下边界
@@ -1291,8 +1663,10 @@ impl App {
                         });
                         if let Some((ox, oy, ow, oh)) = current {
                             // clamp 允许鼠标到达真实边界
-                            self.pointer_pos.0 = self.pointer_pos.0.clamp(*ox as f64, (*ox + *ow) as f64);
-                            self.pointer_pos.1 = self.pointer_pos.1.clamp(*oy as f64, (*oy + *oh) as f64);
+                            self.pointer_pos.0 =
+                                self.pointer_pos.0.clamp(*ox as f64, (*ox + *ow) as f64);
+                            self.pointer_pos.1 =
+                                self.pointer_pos.1.clamp(*oy as f64, (*oy + *oh) as f64);
                         }
                     }
                 }
@@ -1308,7 +1682,8 @@ impl App {
 
                 // 截图区域选择模式：更新选择终点
                 if self.screenshot.selecting {
-                    self.screenshot.on_motion(self.pointer_pos.0, self.pointer_pos.1);
+                    self.screenshot
+                        .on_motion(self.pointer_pos.0, self.pointer_pos.1);
                     self.dirty = true;
                     return;
                 }
@@ -1327,22 +1702,32 @@ impl App {
                 // 转为 output 局部坐标（pointer_focus 返回的 offset 也是 output 局部的）
                 let oi = self.output_at_pointer();
                 let (ox, oy, _, _) = self.output_sizes.get(oi).copied().unwrap_or_default();
-                ptr.motion(self, focus, &MotionEvent {
-                    location: Point::from((self.pointer_pos.0 - ox as f64, self.pointer_pos.1 - oy as f64)),
-                    serial,
-                    time,
-                });
+                ptr.motion(
+                    self,
+                    focus,
+                    &MotionEvent {
+                        location: Point::from((
+                            self.pointer_pos.0 - ox as f64,
+                            self.pointer_pos.1 - oy as f64,
+                        )),
+                        serial,
+                        time,
+                    },
+                );
                 ptr.frame(self);
 
                 self.dirty = true;
             }
             InputEvent::PointerButton { event } => {
                 // 锁屏模式：阻止鼠标按钮
-                if self.lock_state.locked { return; }
+                if self.lock_state.locked {
+                    return;
+                }
                 // 截图/录制区域选择模式：按下记录起点，释放完成
                 if self.screenshot.selecting {
                     if event.state() == ButtonState::Pressed {
-                        self.screenshot.on_press(self.pointer_pos.0, self.pointer_pos.1);
+                        self.screenshot
+                            .on_press(self.pointer_pos.0, self.pointer_pos.1);
                         self.dirty = true;
                     } else if event.state() == ButtonState::Released {
                         if let Some((x, y, w, h)) = self.screenshot.on_release() {
@@ -1350,15 +1735,26 @@ impl App {
                                 // 区域录制：启动录制
                                 self.record_state.selecting = false;
                                 let area = record::RecordArea {
-                                    x: x as u32, y: y as u32, w: w as u32, h: h as u32
+                                    x: x as u32,
+                                    y: y as u32,
+                                    w: w as u32,
+                                    h: h as u32,
                                 };
-                                self.record_state.start_with_area(self.osize.w as u32, self.osize.h as u32, Some(area));
+                                self.record_state.start_with_area(
+                                    self.osize.w as u32,
+                                    self.osize.h as u32,
+                                    Some(area),
+                                );
                                 if self.record_state.recording {
-                                    self.notify(format!("Recording {}x{} area (Super+R to stop)", w, h));
+                                    self.notify(format!(
+                                        "Recording {}x{} area (Super+R to stop)",
+                                        w, h
+                                    ));
                                 }
                             } else {
                                 // 区域截图
-                                self.pending_screenshot = Some(screenshot::ScreenshotRequest::Area(x, y, w, h));
+                                self.pending_screenshot =
+                                    Some(screenshot::ScreenshotRequest::Area(x, y, w, h));
                             }
                             self.dirty = true;
                         } else {
@@ -1373,13 +1769,26 @@ impl App {
                 // 点击聚焦（仅 Press 时）
                 if event.state() == ButtonState::Pressed {
                     let oi = self.output_at_pointer();
-                    let (ox, oy, ow, oh) = self.output_sizes.get(oi).copied().unwrap_or((0, 0, self.osize.w, self.osize.h));
+                    let (ox, oy, ow, oh) = self.output_sizes.get(oi).copied().unwrap_or((
+                        0,
+                        0,
+                        self.osize.w,
+                        self.osize.h,
+                    ));
                     let px = self.pointer_pos.0 as i32 - ox;
                     let py = self.pointer_pos.1 as i32 - oy;
-                    let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
-                    
+                    let bar_h = if self.cfg.bar.enabled {
+                        self.cfg.bar.height
+                    } else {
+                        0
+                    };
+
                     // 使用鼠标所在 output 的工作区
-                    let ws_idx = self.output_active_ws.get(oi).copied().unwrap_or(self.active_ws);
+                    let ws_idx = self
+                        .output_active_ws
+                        .get(oi)
+                        .copied()
+                        .unwrap_or(self.active_ws);
                     self.active_ws = ws_idx;
                     let ws = &self.workspaces[ws_idx];
 
@@ -1396,7 +1805,16 @@ impl App {
                                 for (i, slot) in order.iter().enumerate() {
                                     if let WindowSlot::Wl(idx) = slot {
                                         if let Some(tl) = ws.tops.get(*idx) {
-                                            let (x, y, _, _) = layout::slot(i, order.len(), ow, oh, bar_h, &self.cfg, ws.layout, ws.split);
+                                            let (x, y, _, _) = layout::slot(
+                                                i,
+                                                order.len(),
+                                                ow,
+                                                oh,
+                                                bar_h,
+                                                &self.cfg,
+                                                ws.layout,
+                                                ws.split,
+                                            );
                                             let tl_pos = Point::from((x as f64, y as f64));
                                             if self.popup_at_pointer(tl, tl_pos).is_some() {
                                                 found = true;
@@ -1411,14 +1829,22 @@ impl App {
                             if !on_popup {
                                 let n_all = order.len();
                                 for (i, slot) in order.iter().enumerate() {
-                                    let (x, y, w, h) = layout::slot(i, n_all, ow, oh, bar_h, &self.cfg, ws.layout, ws.split);
+                                    let (x, y, w, h) = layout::slot(
+                                        i, n_all, ow, oh, bar_h, &self.cfg, ws.layout, ws.split,
+                                    );
                                     if px >= x && px < x + w && py >= y && py < y + h {
                                         let surf = match slot {
-                                            WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| tl.wl_surface().clone()),
-                                            WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()),
+                                            WindowSlot::Wl(idx) => {
+                                                ws.tops.get(*idx).map(|tl| tl.wl_surface().clone())
+                                            }
+                                            WindowSlot::X11(idx) => ws
+                                                .x11_surfaces
+                                                .get(*idx)
+                                                .and_then(|xs| xs.wl_surface()),
                                         };
                                         if let Some(surf) = surf {
-                                            self.workspaces[self.active_ws].focus = Some(surf.clone());
+                                            self.workspaces[self.active_ws].focus =
+                                                Some(surf.clone());
                                             let kbd = self.kbd.clone();
                                             let serial = SERIAL_COUNTER.next_serial();
                                             kbd.set_focus(self, Some(surf), serial);
@@ -1435,17 +1861,22 @@ impl App {
                 let serial = SERIAL_COUNTER.next_serial();
                 let time = (event.time() / 1000) as u32;
                 let ptr = self.pointer.clone();
-                ptr.button(self, &smithay::input::pointer::ButtonEvent {
-                    serial,
-                    time,
-                    button: event.button_code(),
-                    state: event.state(),
-                });
+                ptr.button(
+                    self,
+                    &smithay::input::pointer::ButtonEvent {
+                        serial,
+                        time,
+                        button: event.button_code(),
+                        state: event.state(),
+                    },
+                );
                 ptr.frame(self);
             }
             InputEvent::PointerAxis { event } => {
                 // 锁屏模式：阻止滚轮
-                if self.lock_state.locked { return; }
+                if self.lock_state.locked {
+                    return;
+                }
                 let time = (event.time() / 1000) as u32;
                 let mut frame = AxisFrame::new(time).source(event.source());
                 if let Some(v) = event.amount(Axis::Vertical) {
@@ -1470,16 +1901,22 @@ impl App {
 }
 
 impl XdgShellHandler for App {
-    fn xdg_shell_state(&mut self) -> &mut XdgShellState { &mut self.xdg }
+    fn xdg_shell_state(&mut self) -> &mut XdgShellState {
+        &mut self.xdg
+    }
     fn new_toplevel(&mut self, s: ToplevelSurface) {
         // 拦截 scratchpad 窗口
         if self.scratchpad.intercept_toplevel(s.clone()) {
             // 配置为浮动覆盖层：居中、上方 1/3 高度
             let ow = self.osize.w;
             let oh = self.osize.h;
-            let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
+            let bar_h = if self.cfg.bar.enabled {
+                self.cfg.bar.height
+            } else {
+                0
+            };
             let sp_w = ow * 3 / 4; // 75% 宽度
-            let sp_h = oh / 3;     // 1/3 高度
+            let sp_h = oh / 3; // 1/3 高度
             let sp_x = (ow - sp_w) / 2;
             let sp_y = bar_h + 8;
             s.with_pending_state(|st| {
@@ -1487,7 +1924,10 @@ impl XdgShellHandler for App {
                 st.states.set(xdg_toplevel::State::Activated);
             });
             s.send_configure();
-            info!("🚀 Scratchpad 浮动窗口: {}x{} at ({},{})", sp_w, sp_h, sp_x, sp_y);
+            info!(
+                "🚀 Scratchpad 浮动窗口: {}x{} at ({},{})",
+                sp_w, sp_h, sp_x, sp_y
+            );
             // 聚焦
             let surf = s.wl_surface().clone();
             let kbd = self.kbd.clone();
@@ -1496,7 +1936,7 @@ impl XdgShellHandler for App {
             self.dirty = true;
             return;
         }
-        
+
         self.pending_tops.push(s);
     }
     fn new_popup(&mut self, popup: PopupSurface, _positioner: PositionerState) {
@@ -1506,7 +1946,12 @@ impl XdgShellHandler for App {
             warn!("⚠️  track_popup: {:?}", e);
         }
     }
-    fn grab(&mut self, popup: PopupSurface, _seat: wl_seat::WlSeat, _serial: smithay::utils::Serial) {
+    fn grab(
+        &mut self,
+        popup: PopupSurface,
+        _seat: wl_seat::WlSeat,
+        _serial: smithay::utils::Serial,
+    ) {
         info!("🆕 grab popup created");
         let _ = popup.send_configure();
         if let Err(e) = self.popup_manager.track_popup(PopupKind::Xdg(popup)) {
@@ -1514,10 +1959,19 @@ impl XdgShellHandler for App {
         }
         self.dirty = true;
     }
-    fn reposition_request(&mut self, popup: PopupSurface, _positioner: PositionerState, _token: u32) {
+    fn reposition_request(
+        &mut self,
+        popup: PopupSurface,
+        _positioner: PositionerState,
+        _token: u32,
+    ) {
         let _ = popup.send_configure();
     }
-    fn fullscreen_request(&mut self, surface: ToplevelSurface, _output: Option<wayland_server::protocol::wl_output::WlOutput>) {
+    fn fullscreen_request(
+        &mut self,
+        surface: ToplevelSurface,
+        _output: Option<wayland_server::protocol::wl_output::WlOutput>,
+    ) {
         // Client (e.g. browser video) requests fullscreen
         let wl_surf = surface.wl_surface().clone();
         for (ws_idx, ws) in self.workspaces.iter_mut().enumerate() {
@@ -1555,22 +2009,30 @@ impl XdgShellHandler for App {
         use smithay::wayland::compositor::with_states;
         use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
         let app_id = with_states(surface.wl_surface(), |states| {
-            states.data_map.get::<XdgToplevelSurfaceData>()
+            states
+                .data_map
+                .get::<XdgToplevelSurfaceData>()
                 .and_then(|d| d.lock().ok())
                 .and_then(|d| d.app_id.clone())
                 .unwrap_or_default()
         });
         info!("🆔 app_id_changed: '{}'", app_id);
-        
+
         let wl_surf = surface.wl_surface().clone();
 
         // Check if this is a pending toplevel awaiting confirmation.
         // Non-empty app_id → real window, promote to tiling layout.
         // Empty app_id → tooltip/transient (e.g. Chromium hover), ignore.
-        if let Some(pos) = self.pending_tops.iter().position(|t| t.wl_surface() == &wl_surf) {
+        if let Some(pos) = self
+            .pending_tops
+            .iter()
+            .position(|t| t.wl_surface() == &wl_surf)
+        {
             self.pending_tops.remove(pos);
             // Filter clipboard helper windows — they create invisible toplevels to own selections
-            let is_clipboard = app_id.contains("clipboard") || app_id.contains("wl-copy") || app_id.contains("wl-paste");
+            let is_clipboard = app_id.contains("clipboard")
+                || app_id.contains("wl-copy")
+                || app_id.contains("wl-paste");
             if !app_id.is_empty() && !is_clipboard {
                 info!("✅ pending → tiling (app_id='{}')", app_id);
                 self.workspaces[self.active_ws].tops.push(surface.clone());
@@ -1595,7 +2057,7 @@ impl XdgShellHandler for App {
             }
             return;
         }
-        
+
         // 查找该 surface 在哪个工作区
         let mut found: Option<(usize, usize)> = None;
         for (ws_idx, ws) in self.workspaces.iter().enumerate() {
@@ -1605,12 +2067,14 @@ impl XdgShellHandler for App {
                     break;
                 }
             }
-            if found.is_some() { break; }
+            if found.is_some() {
+                break;
+            }
         }
-        
+
         if let Some((ws_idx, idx)) = found {
             self.window_app_ids.insert(idx, app_id.clone());
-            
+
             // 匹配窗口规则
             for rule in &self.cfg.window_rules {
                 if !rule.app_id.is_empty() && app_id.contains(&rule.app_id) {
@@ -1642,7 +2106,9 @@ impl XdgShellHandler for App {
         use smithay::wayland::compositor::with_states;
         use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
         let title = with_states(surface.wl_surface(), |states| {
-            states.data_map.get::<XdgToplevelSurfaceData>()
+            states
+                .data_map
+                .get::<XdgToplevelSurfaceData>()
                 .and_then(|d| d.lock().ok())
                 .and_then(|d| d.title.clone())
                 .unwrap_or_default()
@@ -1704,11 +2170,17 @@ impl SelectionHandler for App {
         _seat: Seat<Self>,
         user_data: &Self::SelectionUserData,
     ) {
-        tracing::info!("📋 send_selection: ty={:?}, mime={}, data_len={}", ty, mime_type, user_data.len());
+        tracing::info!(
+            "📋 send_selection: ty={:?}, mime={}, data_len={}",
+            ty,
+            mime_type,
+            user_data.len()
+        );
         // X11 代理选区标记：user_data 以 "X11_PROXY" 开头（10 bytes magic）
         // 这不可能是正常剪贴板内容
         const X11_PROXY_MAGIC: &[u8] = b"X11_PROXY\x00";
-        let is_x11_proxy = user_data.starts_with(X11_PROXY_MAGIC) && user_data.len() == X11_PROXY_MAGIC.len();
+        let is_x11_proxy =
+            user_data.starts_with(X11_PROXY_MAGIC) && user_data.len() == X11_PROXY_MAGIC.len();
 
         if is_x11_proxy {
             // X11→Wayland 方向：Wayland 客户端请求粘贴 X11 的数据
@@ -1730,7 +2202,10 @@ impl SelectionHandler for App {
             let buf = user_data.clone();
             std::thread::spawn(move || {
                 use std::io::Write;
-                if let Err(err) = smithay::reexports::rustix::fs::fcntl_setfl(&fd, smithay::reexports::rustix::fs::OFlags::empty()) {
+                if let Err(err) = smithay::reexports::rustix::fs::fcntl_setfl(
+                    &fd,
+                    smithay::reexports::rustix::fs::OFlags::empty(),
+                ) {
                     tracing::warn!("error clearing flags on selection fd: {:?}", err);
                 }
                 if let Err(err) = std::fs::File::from(fd).write_all(&buf) {
@@ -1740,13 +2215,21 @@ impl SelectionHandler for App {
         }
     }
 }
-impl DataDeviceHandler for App { fn data_device_state(&self) -> &DataDeviceState { &self.dd } }
+impl DataDeviceHandler for App {
+    fn data_device_state(&self) -> &DataDeviceState {
+        &self.dd
+    }
+}
 impl PrimarySelectionHandler for App {
-    fn primary_selection_state(&self) -> &PrimarySelectionState { &self.primary_sel }
+    fn primary_selection_state(&self) -> &PrimarySelectionState {
+        &self.primary_sel
+    }
 }
 impl smithay::wayland::output::OutputHandler for App {}
 impl ClientDndGrabHandler for App {}
-impl ServerDndGrabHandler for App { fn send(&mut self, _: String, _: OwnedFd, _: Seat<Self>) {} }
+impl ServerDndGrabHandler for App {
+    fn send(&mut self, _: String, _: OwnedFd, _: Seat<Self>) {}
+}
 
 impl InputMethodHandler for App {
     fn new_popup(&mut self, surface: ImPopupSurface) {
@@ -1756,7 +2239,11 @@ impl InputMethodHandler for App {
     }
     fn dismiss_popup(&mut self, surface: ImPopupSurface) {
         info!("🔤 IM popup: dismiss");
-        if self.im_popup.as_ref().map_or(false, |p| p.wl_surface() == surface.wl_surface()) {
+        if self
+            .im_popup
+            .as_ref()
+            .map_or(false, |p| p.wl_surface() == surface.wl_surface())
+        {
             self.im_popup = None;
         }
         self.dirty = true;
@@ -1766,18 +2253,23 @@ impl InputMethodHandler for App {
         self.im_popup = Some(surface);
         self.dirty = true;
     }
-    fn parent_geometry(&self, _parent: &WlSurface) -> Rectangle<i32, Logical> { Rectangle::default() }
+    fn parent_geometry(&self, _parent: &WlSurface) -> Rectangle<i32, Logical> {
+        Rectangle::default()
+    }
 }
 
 impl CompositorHandler for App {
-    fn compositor_state(&mut self) -> &mut CompositorState { &mut self.comp }
+    fn compositor_state(&mut self) -> &mut CompositorState {
+        &mut self.comp
+    }
     fn client_compositor_state<'a>(&self, c: &'a Client) -> &'a CompositorClientState {
         if let Some(cs) = c.get_data::<ClientState>() {
             &cs.comp
         } else if let Some(xw) = c.get_data::<smithay::xwayland::XWaylandClientData>() {
             &xw.compositor_state
         } else {
-            static FALLBACK: std::sync::OnceLock<CompositorClientState> = std::sync::OnceLock::new();
+            static FALLBACK: std::sync::OnceLock<CompositorClientState> =
+                std::sync::OnceLock::new();
             FALLBACK.get_or_init(CompositorClientState::default)
         }
     }
@@ -1790,8 +2282,13 @@ impl CompositorHandler for App {
         // 搜索所有工作区找到被销毁的窗口
         for ws_idx in 0..self.workspaces.len() {
             let before = self.workspaces[ws_idx].tops.len();
-            let closed_idx = self.workspaces[ws_idx].tops.iter().position(|tl| tl.wl_surface() == surface);
-            self.workspaces[ws_idx].tops.retain(|tl| tl.wl_surface() != surface);
+            let closed_idx = self.workspaces[ws_idx]
+                .tops
+                .iter()
+                .position(|tl| tl.wl_surface() == surface);
+            self.workspaces[ws_idx]
+                .tops
+                .retain(|tl| tl.wl_surface() != surface);
             if self.workspaces[ws_idx].tops.len() < before {
                 // 重新映射 prev_positions（索引移位修复）
                 if let Some(removed_idx) = closed_idx {
@@ -1806,8 +2303,14 @@ impl CompositorHandler for App {
                 if self.workspaces[ws_idx].focus.as_ref() == Some(surface) {
                     let order = self.workspaces[ws_idx].effective_order();
                     self.workspaces[ws_idx].focus = order.last().and_then(|s| match s {
-                        WindowSlot::Wl(idx) => self.workspaces[ws_idx].tops.get(*idx).map(|tl| tl.wl_surface().clone()),
-                        WindowSlot::X11(idx) => self.workspaces[ws_idx].x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()),
+                        WindowSlot::Wl(idx) => self.workspaces[ws_idx]
+                            .tops
+                            .get(*idx)
+                            .map(|tl| tl.wl_surface().clone()),
+                        WindowSlot::X11(idx) => self.workspaces[ws_idx]
+                            .x11_surfaces
+                            .get(*idx)
+                            .and_then(|xs| xs.wl_surface()),
                     });
                 }
                 if ws_idx == self.active_ws {
@@ -1832,7 +2335,9 @@ impl CompositorHandler for App {
         // Check if destroyed surface is an X11 window
         for ws_idx in 0..self.workspaces.len() {
             let before = self.workspaces[ws_idx].x11_surfaces.len();
-            self.workspaces[ws_idx].x11_surfaces.retain(|s| s.wl_surface().as_ref() != Some(surface));
+            self.workspaces[ws_idx]
+                .x11_surfaces
+                .retain(|s| s.wl_surface().as_ref() != Some(surface));
             if self.workspaces[ws_idx].x11_surfaces.len() < before {
                 info!("🗑️ X11 窗口 wl_surface 销毁 (工作区 {})", ws_idx + 1);
                 self.workspaces[ws_idx].fullscreen = None;
@@ -1840,8 +2345,14 @@ impl CompositorHandler for App {
                 // 更新 focus
                 let order = self.workspaces[ws_idx].effective_order();
                 self.workspaces[ws_idx].focus = order.last().and_then(|s| match s {
-                    WindowSlot::Wl(idx) => self.workspaces[ws_idx].tops.get(*idx).map(|tl| tl.wl_surface().clone()),
-                    WindowSlot::X11(idx) => self.workspaces[ws_idx].x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()),
+                    WindowSlot::Wl(idx) => self.workspaces[ws_idx]
+                        .tops
+                        .get(*idx)
+                        .map(|tl| tl.wl_surface().clone()),
+                    WindowSlot::X11(idx) => self.workspaces[ws_idx]
+                        .x11_surfaces
+                        .get(*idx)
+                        .and_then(|xs| xs.wl_surface()),
                 });
                 if ws_idx == self.active_ws {
                     self.do_layout_animated();
@@ -1858,22 +2369,30 @@ impl CompositorHandler for App {
     }
 }
 
-impl ShmHandler for App { fn shm_state(&self) -> &ShmState { &self.shm } }
+impl ShmHandler for App {
+    fn shm_state(&self) -> &ShmState {
+        &self.shm
+    }
+}
 impl SeatHandler for App {
-    type KeyboardFocus = WlSurface; type PointerFocus = WlSurface; type TouchFocus = WlSurface;
-    fn seat_state(&mut self) -> &mut SeatState<Self> { &mut self.seat_state }
+    type KeyboardFocus = WlSurface;
+    type PointerFocus = WlSurface;
+    type TouchFocus = WlSurface;
+    fn seat_state(&mut self) -> &mut SeatState<Self> {
+        &mut self.seat_state
+    }
     fn focus_changed(&mut self, seat: &Seat<Self>, surface: Option<&WlSurface>) {
         let dh = self.dh.clone();
         let client = surface.and_then(|s| s.client());
 
         // Update data device (clipboard) focus — sends selection offer to new focus client
         smithay::wayland::selection::data_device::set_data_device_focus::<App>(
-            &dh, seat, client.clone(),
+            &dh,
+            seat,
+            client.clone(),
         );
         // Update primary selection focus
-        smithay::wayland::selection::primary_selection::set_primary_focus::<App>(
-            &dh, seat, client,
-        );
+        smithay::wayland::selection::primary_selection::set_primary_focus::<App>(&dh, seat, client);
 
         // Deactivate all X11 surfaces first
         for ws in &self.workspaces {
@@ -1896,17 +2415,39 @@ impl SeatHandler for App {
     fn cursor_image(&mut self, _: &Seat<Self>, _: CursorImageStatus) {}
 }
 
-#[derive(Default)] struct ClientState { comp: CompositorClientState }
-impl ClientData for ClientState { fn initialized(&self, _: ClientId) {} fn disconnected(&self, _: ClientId, _: DisconnectReason) {} }
+#[derive(Default)]
+struct ClientState {
+    comp: CompositorClientState,
+}
+impl ClientData for ClientState {
+    fn initialized(&self, _: ClientId) {}
+    fn disconnected(&self, _: ClientId, _: DisconnectReason) {}
+}
 
 fn send_frames(s: &WlSurface, t: u32) {
-    with_surface_tree_downward(s, (), |_,_,&()| TraversalAction::DoChildren(()),
-        |_,st,&()| { for cb in st.cached_state.get::<SurfaceAttributes>().current().frame_callbacks.drain(..) { cb.done(t); } },
-        |_,_,&()| true);
+    with_surface_tree_downward(
+        s,
+        (),
+        |_, _, &()| TraversalAction::DoChildren(()),
+        |_, st, &()| {
+            for cb in st
+                .cached_state
+                .get::<SurfaceAttributes>()
+                .current()
+                .frame_callbacks
+                .drain(..)
+            {
+                cb.done(t);
+            }
+        },
+        |_, _, &()| true,
+    );
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    tracing_subscriber::fmt().with_env_filter("info,smithay=warn").init();
+    tracing_subscriber::fmt()
+        .with_env_filter("info,smithay=warn")
+        .init();
     if std::env::var("XDG_RUNTIME_DIR").is_err() {
         let dir = format!("/run/user/{}", unsafe { libc::getuid() });
         std::fs::create_dir_all(&dir).ok();
@@ -1915,7 +2456,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let direct = args.iter().any(|a| a == "--direct");
     let cfg = Config::load();
-    info!("🚀 Anchor v10 GPU ({})", if direct { "direct" } else { "session" });
+    info!(
+        "🚀 Anchor v10 GPU ({})",
+        if direct { "direct" } else { "session" }
+    );
 
     // ─── GPU 设备选择 ───
     let gpu_path = if let Ok(p) = std::env::var("TITAN_GPU") {
@@ -1926,13 +2470,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut first_card: Option<std::path::PathBuf> = None;
         let mut preferred: Option<std::path::PathBuf> = None;
         let prefer_vendor = cfg.gpu.vendor.to_lowercase();
-        
+
         if let Ok(entries) = std::fs::read_dir("/dev/dri") {
             for e in entries.flatten() {
                 let name = e.file_name().to_string_lossy().to_string();
                 if name.starts_with("card") {
-                    if first_card.is_none() { first_card = Some(e.path().clone()); }
-                    if let Ok(v) = std::fs::read_to_string(format!("/sys/class/drm/{}/device/vendor", name)) {
+                    if first_card.is_none() {
+                        first_card = Some(e.path().clone());
+                    }
+                    if let Ok(v) =
+                        std::fs::read_to_string(format!("/sys/class/drm/{}/device/vendor", name))
+                    {
                         let vendor = v.trim();
                         let matches = match prefer_vendor.as_str() {
                             "nvidia" => vendor == "0x10de",
@@ -1942,47 +2490,79 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         };
                         if matches && preferred.is_none() {
                             preferred = Some(e.path());
-                            if prefer_vendor != "auto" { break; }
+                            if prefer_vendor != "auto" {
+                                break;
+                            }
                         }
                     }
                 }
             }
         }
-        let result = preferred.or(first_card).expect("No DRM device found in /dev/dri");
-        info!("🎮 GPU auto-detected (vendor preference: {})", prefer_vendor);
+        let result = preferred
+            .or(first_card)
+            .expect("No DRM device found in /dev/dri");
+        info!(
+            "🎮 GPU auto-detected (vendor preference: {})",
+            prefer_vendor
+        );
         result
     };
     info!("🎮 {}", gpu_path.display());
-    
+
     let gpu_vendor = {
-        let card_name = gpu_path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_default();
-        let vendor_str = std::fs::read_to_string(format!("/sys/class/drm/{}/device/vendor", card_name))
-            .unwrap_or_default().trim().to_string();
+        let card_name = gpu_path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let vendor_str =
+            std::fs::read_to_string(format!("/sys/class/drm/{}/device/vendor", card_name))
+                .unwrap_or_default()
+                .trim()
+                .to_string();
         match vendor_str.as_str() {
             "0x10de" => "NVIDIA",
             "0x1002" => "AMD",
             "0x8086" => "Intel",
             _ => "Unknown",
-        }.to_string()
+        }
+        .to_string()
     };
     info!("🔍 GPU vendor: {}", gpu_vendor);
     if let Some(card_name) = gpu_path.file_name() {
-        std::env::set_var("TITAN_DRM_DEV", format!("/dev/dri/{}", card_name.to_string_lossy()));
+        std::env::set_var(
+            "TITAN_DRM_DEV",
+            format!("/dev/dri/{}", card_name.to_string_lossy()),
+        );
     }
 
     // ─── Session ───
     let (dev_fd, session, notifier) = if direct {
-        let fd = Arc::new(std::fs::OpenOptions::new().read(true).write(true).open(&gpu_path)?);
+        let fd = Arc::new(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&gpu_path)?,
+        );
         let _ = unsafe { libc::ioctl(fd.as_raw_fd(), 0x4000641eu64 as _) };
         let dup = unsafe { libc::dup(fd.as_raw_fd()) };
         use std::os::unix::io::FromRawFd;
-        (DrmDeviceFd::new(DeviceFd::from(OwnedFd::from(unsafe { std::fs::File::from_raw_fd(dup) }))), None, None)
+        (
+            DrmDeviceFd::new(DeviceFd::from(OwnedFd::from(unsafe {
+                std::fs::File::from_raw_fd(dup)
+            }))),
+            None,
+            None,
+        )
     } else {
         let (mut session, notifier) = LibSeatSession::new()?;
         use smithay::reexports::rustix::fs::OFlags;
         let fd = session.open(&gpu_path, OFlags::RDWR)?;
         info!("✅ DRM 设备已打开 (via libseat)");
-        (DrmDeviceFd::new(DeviceFd::from(fd)), Some(Arc::new(std::sync::Mutex::new(session))), Some(notifier))
+        (
+            DrmDeviceFd::new(DeviceFd::from(fd)),
+            Some(Arc::new(std::sync::Mutex::new(session))),
+            Some(notifier),
+        )
     };
 
     // ─── DRM + GBM 设备 ───
@@ -2021,8 +2601,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ─── 创建 App（显示相关字段用 dummy 值，显示枚举后更新）───
     let mut state = App {
-        comp: CompositorState::new::<App>(&dh), xdg: XdgShellState::new::<App>(&dh),
-        shm: ShmState::new::<App>(&dh, vec![]), seat_state, seat,
+        comp: CompositorState::new::<App>(&dh),
+        xdg: XdgShellState::new::<App>(&dh),
+        shm: ShmState::new::<App>(&dh, vec![]),
+        seat_state,
+        seat,
         dd: DataDeviceState::new::<App>(&dh),
         primary_sel: PrimarySelectionState::new::<App>(&dh),
         deco: XdgDecorationState::new::<App>(&dh),
@@ -2030,10 +2613,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         osize: Size::new(0, 0),
         workspaces: (0..NUM_WORKSPACES).map(|_| Workspace::new()).collect(),
         active_ws: 0,
-        run: true, frame: 0,
-        dh: dh.clone(), active: false,
+        run: true,
+        frame: 0,
+        dh: dh.clone(),
+        active: false,
         dirty: true,
-        kbd, pointer, cfg,
+        kbd,
+        pointer,
+        cfg,
         cursor_img,
         pointer_pos: (0.0, 0.0),
         window_titles: std::collections::HashMap::new(),
@@ -2047,7 +2634,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pending_tops: Vec::new(),
         dbus_notifications: notify::start_notification_daemon(),
         launcher: LauncherState::new(),
-        ws_anim: WsAnimation { start: None, from_ws: 0, to_ws: 0, duration_ms: 200, direction: 0 },
+        ws_anim: WsAnimation {
+            start: None,
+            from_ws: 0,
+            to_ws: 0,
+            duration_ms: 200,
+            direction: 0,
+        },
         layout_anim: LayoutAnimation::new(),
         prev_positions: Vec::new(),
         record_state: record::RecordState::new(),
@@ -2069,7 +2662,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = ListeningSocket::bind("wayland-anchor")?;
     std::env::set_var("WAYLAND_DISPLAY", "wayland-anchor");
     if std::env::var("XDG_RUNTIME_DIR").is_err() {
-        std::env::set_var("XDG_RUNTIME_DIR", format!("/run/user/{}", unsafe { libc::getuid() }));
+        std::env::set_var(
+            "XDG_RUNTIME_DIR",
+            format!("/run/user/{}", unsafe { libc::getuid() }),
+        );
     }
     info!("✅ wayland-anchor");
 
@@ -2078,15 +2674,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut eloop: EventLoop<App> = EventLoop::try_new()?;
     state.loop_handle = Some(eloop.handle());
     let mut clients: Vec<Client> = vec![];
-    eloop.handle().insert_source(dn, |e,_,state: &mut App| match e {
-        DrmEvent::VBlank(crtc) => { state.vblank_crtcs.insert(crtc); }
-        DrmEvent::Error(e) => error!("DRM:{e:?}"),
-    })?;
-    if let Some(notifier) = notifier {
-        eloop.handle().insert_source(notifier, |event, _, state: &mut App| match event {
-            SessionEvent::ActivateSession => { info!("▶️  会话激活"); state.active = true; }
-            SessionEvent::PauseSession => { info!("⏸️  会话暂停"); state.active = false; }
+    eloop
+        .handle()
+        .insert_source(dn, |e, _, state: &mut App| match e {
+            DrmEvent::VBlank(crtc) => {
+                state.vblank_crtcs.insert(crtc);
+            }
+            DrmEvent::Error(e) => error!("DRM:{e:?}"),
         })?;
+    if let Some(notifier) = notifier {
+        eloop
+            .handle()
+            .insert_source(notifier, |event, _, state: &mut App| match event {
+                SessionEvent::ActivateSession => {
+                    info!("▶️  会话激活");
+                    state.active = true;
+                }
+                SessionEvent::PauseSession => {
+                    info!("⏸️  会话暂停");
+                    state.active = false;
+                }
+            })?;
     }
     if let Some(session) = session.as_ref() {
         state.active = session.lock().unwrap().is_active();
@@ -2095,17 +2703,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             eloop.dispatch(Some(Duration::from_millis(100)), &mut state)?;
             state.active = session.lock().unwrap().is_active();
         }
-        if !state.active { return Err("libseat 会话 10s 内未激活".into()); }
+        if !state.active {
+            return Err("libseat 会话 10s 内未激活".into());
+        }
         device.activate(true)?;
         info!("✅ DRM master");
-    } else { state.active = true; }
+    } else {
+        state.active = true;
+    }
 
     // ─── EGL + GLES 渲染器（现在已有 DRM master，NVIDIA 上可以正常初始化）───
     let egl_display = unsafe { smithay::backend::egl::EGLDisplay::new(gbm.clone())? };
     info!("✅ EGLDisplay");
     let egl_context = smithay::backend::egl::EGLContext::new(&egl_display)?;
     info!("✅ EGLContext");
-    let render_formats: Vec<Format> = egl_context.dmabuf_render_formats().iter().copied().collect();
+    let render_formats: Vec<Format> = egl_context
+        .dmabuf_render_formats()
+        .iter()
+        .copied()
+        .collect();
     let mut renderer = unsafe { GlesRenderer::new(egl_context)? };
     info!("✅ GlesRenderer");
 
@@ -2126,7 +2742,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for &c in res.connectors() {
         for f in [false, true] {
             if let Ok(info) = device.get_connector(c, f) {
-                if info.state() != connector::State::Connected || info.modes().is_empty() { continue; }
+                if info.state() != connector::State::Connected || info.modes().is_empty() {
+                    continue;
+                }
                 let mode = info.modes().first().copied().unwrap();
                 let (mw, mh) = mode.size();
 
@@ -2140,26 +2758,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
                     }
-                    if found_crtc.is_some() { break; }
+                    if found_crtc.is_some() {
+                        break;
+                    }
                 }
                 let Some(crtc_h) = found_crtc else { continue };
                 used_crtcs.insert(crtc_h);
 
                 let conn_name = format!("{:?}", c);
-                info!("🖥️  Connector {} (CRTC {:?}): {}x{}", conn_name, crtc_h, mw, mh);
+                info!(
+                    "🖥️  Connector {} (CRTC {:?}): {}x{}",
+                    conn_name, crtc_h, mw, mh
+                );
 
                 connector_infos.push(ConnectorInfo {
-                    connector: c, crtc: crtc_h, mode, name: conn_name,
+                    connector: c,
+                    crtc: crtc_h,
+                    mode,
+                    name: conn_name,
                 });
                 break;
             }
         }
     }
-    if connector_infos.is_empty() { return Err("无可用显示器".into()); }
+    if connector_infos.is_empty() {
+        return Err("无可用显示器".into());
+    }
 
-    let fd_clones: Vec<_> = (0..connector_infos.len())
-        .map(|_| dev_fd.clone())
-        .collect();
+    let fd_clones: Vec<_> = (0..connector_infos.len()).map(|_| dev_fd.clone()).collect();
     let mut output_sizes: Vec<(i32, i32, i32, i32)> = Vec::new();
 
     for (idx, ci) in connector_infos.iter().enumerate() {
@@ -2167,51 +2793,86 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         let surface = match device.create_surface(ci.crtc, ci.mode, &[ci.connector]) {
             Ok(s) => s,
-            Err(e) => { warn!("⚠️  Surface 创建失败 {}: {:?}", ci.name, e); continue; }
+            Err(e) => {
+                warn!("⚠️  Surface 创建失败 {}: {:?}", ci.name, e);
+                continue;
+            }
         };
 
         let gbm_dup = GbmDevice::new(fd_clones[idx].clone())?;
         let alloc = GbmAllocator::new(gbm_dup, GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT);
-        let buf_surf = match GbmBufferedSurface::new(surface, alloc,
-            &[Fourcc::Argb8888, Fourcc::Xrgb8888, Fourcc::Abgr8888, Fourcc::Xbgr8888], render_formats.iter().copied()) {
+        let buf_surf = match GbmBufferedSurface::new(
+            surface,
+            alloc,
+            &[
+                Fourcc::Argb8888,
+                Fourcc::Xrgb8888,
+                Fourcc::Abgr8888,
+                Fourcc::Xbgr8888,
+            ],
+            render_formats.iter().copied(),
+        ) {
             Ok(bs) => {
                 info!("✅ GbmBufferedSurface 创建成功 ({})", ci.name);
                 bs
             }
             Err(e) => {
-                warn!("⚠️  GbmBufferedSurface 失败 {}: {:?}, trying SCANOUT only", ci.name, e);
+                warn!(
+                    "⚠️  GbmBufferedSurface 失败 {}: {:?}, trying SCANOUT only",
+                    ci.name, e
+                );
                 let gbm_dup2 = GbmDevice::new(fd_clones[idx].clone())?;
                 let alloc2 = GbmAllocator::new(gbm_dup2, GbmBufferFlags::SCANOUT);
                 let surface2 = device.create_surface(ci.crtc, ci.mode, &[ci.connector])?;
-                GbmBufferedSurface::new(surface2, alloc2,
-                    &[Fourcc::Argb8888, Fourcc::Xrgb8888], render_formats.iter().copied())?
+                GbmBufferedSurface::new(
+                    surface2,
+                    alloc2,
+                    &[Fourcc::Argb8888, Fourcc::Xrgb8888],
+                    render_formats.iter().copied(),
+                )?
             }
         };
-        
-        let wl_output = Output::new(ci.name.clone(), PhysicalProperties {
-            size: (mw as i32 / 10, mh as i32 / 10).into(),
-            subpixel: Subpixel::Unknown, make: gpu_vendor.clone(), model: ci.name.clone(),
-        });
-        let output_mode = Mode { size: (mw as i32, mh as i32).into(), refresh: ci.mode.vrefresh() as i32 * 1000 };
+
+        let wl_output = Output::new(
+            ci.name.clone(),
+            PhysicalProperties {
+                size: (mw as i32 / 10, mh as i32 / 10).into(),
+                subpixel: Subpixel::Unknown,
+                make: gpu_vendor.clone(),
+                model: ci.name.clone(),
+            },
+        );
+        let output_mode = Mode {
+            size: (mw as i32, mh as i32).into(),
+            refresh: ci.mode.vrefresh() as i32 * 1000,
+        };
         wl_output.add_mode(output_mode);
         wl_output.set_preferred(output_mode);
         wl_output.change_current_state(
-            Some(output_mode), Some(Transform::Normal),
-            Some(Scale::Integer(1)), Some(Point::from((output_x_offset, 0)))
+            Some(output_mode),
+            Some(Transform::Normal),
+            Some(Scale::Integer(1)),
+            Some(Point::from((output_x_offset, 0))),
         );
         wl_output.create_global::<App>(&dh);
 
         // 匹配配置中的 output 设置（工作区、位置）
         let output_cfg = state.cfg.outputs.iter().find(|oc| {
-            if oc.connector.is_empty() { false } else { ci.name.contains(&oc.connector) }
+            if oc.connector.is_empty() {
+                false
+            } else {
+                ci.name.contains(&oc.connector)
+            }
         });
         let default_ws = output_cfg.map(|oc| oc.workspace).unwrap_or(idx);
         let cfg_x = output_cfg.map(|oc| oc.x).unwrap_or(output_x_offset);
         let cfg_y = output_cfg.map(|oc| oc.y).unwrap_or(0);
-        let out_x = if output_cfg.map(|oc| oc.x).unwrap_or(0) != 0 || output_cfg.map(|oc| oc.y).unwrap_or(0) != 0 {
-            cfg_x  // 有显式配置位置
+        let out_x = if output_cfg.map(|oc| oc.x).unwrap_or(0) != 0
+            || output_cfg.map(|oc| oc.y).unwrap_or(0) != 0
+        {
+            cfg_x // 有显式配置位置
         } else {
-            output_x_offset  // 自动从左到右排列
+            output_x_offset // 自动从左到右排列
         };
 
         output_sizes.push((out_x, cfg_y, mw as i32, mh as i32));
@@ -2229,7 +2890,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
         output_x_offset += mw as i32;
     }
-    if anchor_outputs.is_empty() { return Err("所有输出创建失败".into()); }
+    if anchor_outputs.is_empty() {
+        return Err("所有输出创建失败".into());
+    }
     let primary_size = anchor_outputs[0].size;
     info!("✅ {} 个输出已就绪", anchor_outputs.len());
 
@@ -2242,23 +2905,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.active_ws = state.output_active_ws.first().copied().unwrap_or(0);
 
     {
-        struct SessionInputInterface { session: Arc<std::sync::Mutex<LibSeatSession>> }
+        struct SessionInputInterface {
+            session: Arc<std::sync::Mutex<LibSeatSession>>,
+        }
         impl libinput_crate::LibinputInterface for SessionInputInterface {
-    fn open_restricted(&mut self, path: &std::path::Path, flags: i32) -> Result<std::os::unix::io::OwnedFd, i32> {
-                use smithay::reexports::rustix::fs::OFlags;
+            fn open_restricted(
+                &mut self,
+                path: &std::path::Path,
+                flags: i32,
+            ) -> Result<std::os::unix::io::OwnedFd, i32> {
                 use smithay::backend::session::AsErrno;
-                self.session.lock().unwrap().open(path, OFlags::from_bits_truncate(flags as u32)).map_err(|e| e.as_errno().unwrap_or(libc::EACCES))
+                use smithay::reexports::rustix::fs::OFlags;
+                self.session
+                    .lock()
+                    .unwrap()
+                    .open(path, OFlags::from_bits_truncate(flags as u32))
+                    .map_err(|e| e.as_errno().unwrap_or(libc::EACCES))
             }
-            fn close_restricted(&mut self, fd: std::os::unix::io::OwnedFd) { let _ = self.session.lock().unwrap().close(fd); }
+            fn close_restricted(&mut self, fd: std::os::unix::io::OwnedFd) {
+                let _ = self.session.lock().unwrap().close(fd);
+            }
         }
         if let Some(session) = session.clone() {
             let iface = SessionInputInterface { session };
             let mut libinput_ctx = libinput_crate::Libinput::new_with_udev(iface);
-            if let Err(e) = libinput_ctx.udev_assign_seat("seat0") { warn!("⚠️  libinput: {:?}", e); }
-            else {
+            if let Err(e) = libinput_ctx.udev_assign_seat("seat0") {
+                warn!("⚠️  libinput: {:?}", e);
+            } else {
                 info!("✅ libinput (seat0)");
                 let backend = LibinputInputBackend::new(libinput_ctx);
-                eloop.handle().insert_source(backend, |event, _, state: &mut App| { state.handle_input_event(event); })?;
+                eloop
+                    .handle()
+                    .insert_source(backend, |event, _, state: &mut App| {
+                        state.handle_input_event(event);
+                    })?;
             }
         }
     }
@@ -2276,34 +2956,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         state.wallpaper_cache.scan_directory(&wp_dir);
         if state.cfg.wallpaper.mode == "image" || state.cfg.wallpaper.mode == "random" {
-            let wp_path = if state.cfg.wallpaper.path.is_empty() { String::new() } else { state.cfg.wallpaper.path.clone() };
-            state.wallpaper_cache.load(&wp_path, primary_size.w as usize, primary_size.h as usize);
+            let wp_path = if state.cfg.wallpaper.path.is_empty() {
+                String::new()
+            } else {
+                state.cfg.wallpaper.path.clone()
+            };
+            state
+                .wallpaper_cache
+                .load(&wp_path, primary_size.w as usize, primary_size.h as usize);
         }
     }
 
     std::process::Command::new("fcitx5")
         .arg("-d")
         .env("WAYLAND_DISPLAY", "wayland-anchor")
-        .env("XDG_RUNTIME_DIR", format!("/run/user/{}", unsafe { libc::getuid() }))
+        .env(
+            "XDG_RUNTIME_DIR",
+            format!("/run/user/{}", unsafe { libc::getuid() }),
+        )
         .env("XMODIFIERS", "@im=fcitx")
         .env("QT_IM_MODULE", "fcitx")
         .env("GTK_IM_MODULE", "fcitx")
         .env("SDL_IM_MODULE", "fcitx")
-        .spawn().ok();
+        .spawn()
+        .ok();
 
     // ── XWayland ──
     {
         let eloop_handle = eloop.handle();
         match xwayland::spawn_xwayland(&dh) {
             Ok((xwayland_src, xw_client)) => {
-                eloop.handle().insert_source(xwayland_src, move |event, _, state: &mut App| {
-                    if let smithay::xwayland::XWaylandEvent::Ready { display_number, .. } = event {
-                        state.xdisplay = Some(display_number);
-                    }
-                    xwayland::handle_xwayland_event(
-                        event, &eloop_handle, &xw_client, &mut state.xw,
-                    );
-                }).ok();
+                eloop
+                    .handle()
+                    .insert_source(xwayland_src, move |event, _, state: &mut App| {
+                        if let smithay::xwayland::XWaylandEvent::Ready { display_number, .. } =
+                            event
+                        {
+                            state.xdisplay = Some(display_number);
+                        }
+                        xwayland::handle_xwayland_event(
+                            event,
+                            &eloop_handle,
+                            &xw_client,
+                            &mut state.xw,
+                        );
+                    })
+                    .ok();
             }
             Err(e) => {
                 warn!("⚠️  XWayland spawn failed: {} — X11 apps won't work", e);
@@ -2337,7 +3035,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             } else {
                 device.pause();
-                for out in &mut anchor_outputs { out.pending_flip = false; }
+                for out in &mut anchor_outputs {
+                    out.pending_flip = false;
+                }
             }
             dev_active = state.active;
         }
@@ -2352,7 +3052,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         for out in &mut anchor_outputs {
             if state.vblank_crtcs.remove(&out.crtc) {
                 if let Err(e) = out.buf_surf.frame_submitted() {
-                    if state.frame > 1 { warn!("VBlank err: {:?}", e); }
+                    if state.frame > 1 {
+                        warn!("VBlank err: {:?}", e);
+                    }
                 }
                 out.pending_flip = false;
             }
@@ -2392,10 +3094,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
-            state.workspaces[state.active_ws].tops.retain(|tl| tl.alive());
-            let bar_h = if state.cfg.bar.enabled { state.cfg.bar.height } else { 0 };
+            state.workspaces[state.active_ws]
+                .tops
+                .retain(|tl| tl.alive());
+            let bar_h = if state.cfg.bar.enabled {
+                state.cfg.bar.height
+            } else {
+                0
+            };
             let time_secs = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
 
             let ws_anim_active = state.ws_anim.start.is_some();
             let ws_anim_dir = state.ws_anim.direction;
@@ -2404,7 +3114,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             for oi in 0..anchor_outputs.len() {
                 let out = &mut anchor_outputs[oi];
-                if out.pending_flip { continue; }
+                if out.pending_flip {
+                    continue;
+                }
 
                 // 此 output 的工作区（从 App 的 output_active_ws 读取，确保与 switch_workspace 同步）
                 let out_ws_idx = state.output_active_ws.get(oi).copied().unwrap_or(0);
@@ -2420,14 +3132,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let ws = &state.workspaces[out_ws_idx];
                     let order = ws.effective_order();
                     ws.focus.as_ref().and_then(|surf| {
-                        order.iter().enumerate().find(|(_, slot)| match slot {
-                            WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| tl.wl_surface() == surf).unwrap_or(false),
-                            WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()).map(|s| &s == surf).unwrap_or(false),
-                        }).map(|(i, _)| i)
+                        order
+                            .iter()
+                            .enumerate()
+                            .find(|(_, slot)| match slot {
+                                WindowSlot::Wl(idx) => ws
+                                    .tops
+                                    .get(*idx)
+                                    .map(|tl| tl.wl_surface() == surf)
+                                    .unwrap_or(false),
+                                WindowSlot::X11(idx) => ws
+                                    .x11_surfaces
+                                    .get(*idx)
+                                    .and_then(|xs| xs.wl_surface())
+                                    .map(|s| &s == surf)
+                                    .unwrap_or(false),
+                            })
+                            .map(|(i, _)| i)
                     })
                 };
-                let out_window_title = state.window_titles.get(&out_ws_focus_idx.unwrap_or(0))
-                    .cloned().unwrap_or_default();
+                let out_window_title = state
+                    .window_titles
+                    .get(&out_ws_focus_idx.unwrap_or(0))
+                    .cloned()
+                    .unwrap_or_default();
 
                 match out.buf_surf.next_buffer() {
                     Ok((mut dmabuf, _)) => {
@@ -2437,11 +3165,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // ═══════════════════════════════════════════════
                         // Phase 1: collect surface elements (before bind)
                         // ═══════════════════════════════════════════════
-                        let mut win_elems: Vec<Vec<WaylandSurfaceRenderElement<GlesRenderer>>> = Vec::new();
-                        let mut popup_elems: Vec<Vec<WaylandSurfaceRenderElement<GlesRenderer>>> = Vec::new();
-                        let mut sp_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
-                        let mut im_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
-                        let mut or_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
+                        let mut win_elems: Vec<Vec<WaylandSurfaceRenderElement<GlesRenderer>>> =
+                            Vec::new();
+                        let mut popup_elems: Vec<Vec<WaylandSurfaceRenderElement<GlesRenderer>>> =
+                            Vec::new();
+                        let mut sp_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                            Vec::new();
+                        let mut im_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                            Vec::new();
+                        let mut or_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                            Vec::new();
                         let mut im_popup_pos: (i32, i32) = (0, 0);
                         let mut ws_offset: i32 = 0;
                         let mut scratchpad_data: Option<(i32, i32, i32, i32)> = None; // (x, y, w, h)
@@ -2457,17 +3190,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 let tl_geo = smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
                                                     states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
                                                 }).unwrap_or_default();
-                                                let tl_render_pos = Point::<i32, Physical>::from((-tl_geo.loc.x, bar_h - tl_geo.loc.y));
-                                                win_elems.push(
-                                                    render_elements_from_surface_tree(&mut renderer, tl.wl_surface(), tl_render_pos, 1.0, 1.0, Kind::Unspecified)
-                                                );
+                                                let tl_render_pos = Point::<i32, Physical>::from((
+                                                    -tl_geo.loc.x,
+                                                    bar_h - tl_geo.loc.y,
+                                                ));
+                                                win_elems.push(render_elements_from_surface_tree(
+                                                    &mut renderer,
+                                                    tl.wl_surface(),
+                                                    tl_render_pos,
+                                                    1.0,
+                                                    1.0,
+                                                    Kind::Unspecified,
+                                                ));
                                                 let mut p_elems = Vec::new();
-                                                for (popup, popup_offset) in PopupManager::popups_for_surface(tl.wl_surface()) {
-                                                    let offset = (tl_geo.loc + popup_offset - popup.geometry().loc)
+                                                for (popup, popup_offset) in
+                                                    PopupManager::popups_for_surface(
+                                                        tl.wl_surface(),
+                                                    )
+                                                {
+                                                    let offset = (tl_geo.loc + popup_offset
+                                                        - popup.geometry().loc)
                                                         .to_physical_precise_round(1.0);
                                                     let pos = tl_render_pos + offset;
                                                     p_elems.extend(
-                                                        render_elements_from_surface_tree(&mut renderer, popup.wl_surface(), pos, 1.0, 1.0, Kind::Unspecified)
+                                                        render_elements_from_surface_tree(
+                                                            &mut renderer,
+                                                            popup.wl_surface(),
+                                                            pos,
+                                                            1.0,
+                                                            1.0,
+                                                            Kind::Unspecified,
+                                                        ),
                                                     );
                                                 }
                                                 popup_elems.push(p_elems);
@@ -2476,9 +3229,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         WindowSlot::X11(idx) => {
                                             if let Some(xs) = out_ws.x11_surfaces.get(*idx) {
                                                 if let Some(wl) = xs.wl_surface() {
-                                                    let render_pos = Point::<i32, Physical>::from((0, bar_h));
+                                                    let render_pos =
+                                                        Point::<i32, Physical>::from((0, bar_h));
                                                     win_elems.push(
-                                                        render_elements_from_surface_tree(&mut renderer, &wl, render_pos, 1.0, 1.0, Kind::Unspecified)
+                                                        render_elements_from_surface_tree(
+                                                            &mut renderer,
+                                                            &wl,
+                                                            render_pos,
+                                                            1.0,
+                                                            1.0,
+                                                            Kind::Unspecified,
+                                                        ),
                                                     );
                                                     popup_elems.push(Vec::new());
                                                 }
@@ -2494,16 +3255,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             let t = elapsed as f32 / ws_anim_duration as f32;
                                             let t_ease = 1.0 - (1.0 - t).powi(3);
                                             (ws_anim_dir as f32 * ow as f32 * (1.0 - t_ease)) as i32
-                                        } else { 0 }
-                                    } else { 0 }
-                                } else { 0 };
+                                        } else {
+                                            0
+                                        }
+                                    } else {
+                                        0
+                                    }
+                                } else {
+                                    0
+                                };
 
                                 // Unified window rendering using effective_order
                                 let order = out_ws.effective_order();
                                 for (i, slot) in order.iter().enumerate() {
-                                    let (x, y, _w, _h) = layout::slot(i, n_total, ow, oh, bar_h, &state.cfg, state.workspaces[out_ws_idx].layout, state.workspaces[out_ws_idx].split);
+                                    let (x, y, _w, _h) = layout::slot(
+                                        i,
+                                        n_total,
+                                        ow,
+                                        oh,
+                                        bar_h,
+                                        &state.cfg,
+                                        state.workspaces[out_ws_idx].layout,
+                                        state.workspaces[out_ws_idx].split,
+                                    );
                                     // 布局动画偏移（macOS 风格：从旧位置滑到新位置）
-                                    let (layout_dx, layout_dy) = state.layout_anim.offset_for(slot, (x, y)).unwrap_or((0, 0));
+                                    let (layout_dx, layout_dy) = state
+                                        .layout_anim
+                                        .offset_for(slot, (x, y))
+                                        .unwrap_or((0, 0));
                                     match slot {
                                         WindowSlot::Wl(idx) => {
                                             if let Some(tl) = out_ws.tops.get(*idx) {
@@ -2513,17 +3292,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 // 减去 geometry.loc 偏移（CSD 阴影/边框），使内容区精确对齐 slot
                                                 let bx = x - tl_geo.loc.x + ws_offset + layout_dx;
                                                 let by = y - tl_geo.loc.y + layout_dy;
-                                                let tl_render_pos = Point::<i32, Physical>::from((bx, by));
-                                                win_elems.push(
-                                                    render_elements_from_surface_tree(&mut renderer, tl.wl_surface(), tl_render_pos, 1.0, 1.0, Kind::Unspecified)
-                                                );
+                                                let tl_render_pos =
+                                                    Point::<i32, Physical>::from((bx, by));
+                                                win_elems.push(render_elements_from_surface_tree(
+                                                    &mut renderer,
+                                                    tl.wl_surface(),
+                                                    tl_render_pos,
+                                                    1.0,
+                                                    1.0,
+                                                    Kind::Unspecified,
+                                                ));
                                                 let mut p_elems = Vec::new();
-                                                for (popup, popup_offset) in PopupManager::popups_for_surface(tl.wl_surface()) {
-                                                    let offset = (tl_geo.loc + popup_offset - popup.geometry().loc)
+                                                for (popup, popup_offset) in
+                                                    PopupManager::popups_for_surface(
+                                                        tl.wl_surface(),
+                                                    )
+                                                {
+                                                    let offset = (tl_geo.loc + popup_offset
+                                                        - popup.geometry().loc)
                                                         .to_physical_precise_round(1.0);
                                                     let pos = tl_render_pos + offset;
                                                     p_elems.extend(
-                                                        render_elements_from_surface_tree(&mut renderer, popup.wl_surface(), pos, 1.0, 1.0, Kind::Unspecified)
+                                                        render_elements_from_surface_tree(
+                                                            &mut renderer,
+                                                            popup.wl_surface(),
+                                                            pos,
+                                                            1.0,
+                                                            1.0,
+                                                            Kind::Unspecified,
+                                                        ),
                                                     );
                                                 }
                                                 popup_elems.push(p_elems);
@@ -2532,9 +3329,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         WindowSlot::X11(idx) => {
                                             if let Some(xs) = out_ws.x11_surfaces.get(*idx) {
                                                 if let Some(wl) = xs.wl_surface() {
-                                                    let render_pos = Point::<i32, Physical>::from((x + ws_offset + layout_dx, y + layout_dy));
+                                                    let render_pos = Point::<i32, Physical>::from(
+                                                        (x + ws_offset + layout_dx, y + layout_dy),
+                                                    );
                                                     win_elems.push(
-                                                        render_elements_from_surface_tree(&mut renderer, &wl, render_pos, 1.0, 1.0, Kind::Unspecified)
+                                                        render_elements_from_surface_tree(
+                                                            &mut renderer,
+                                                            &wl,
+                                                            render_pos,
+                                                            1.0,
+                                                            1.0,
+                                                            Kind::Unspecified,
+                                                        ),
                                                     );
                                                     popup_elems.push(Vec::new());
                                                 }
@@ -2551,7 +3357,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let sp_h = oh / 3;
                                     let sp_x = (ow - sp_w) / 2;
                                     let sp_y = bar_h + 8;
-                                    sp_elems = render_elements_from_surface_tree(&mut renderer, sp_surf.wl_surface(), (sp_x, sp_y), 1.0, 1.0, Kind::Unspecified);
+                                    sp_elems = render_elements_from_surface_tree(
+                                        &mut renderer,
+                                        sp_surf.wl_surface(),
+                                        (sp_x, sp_y),
+                                        1.0,
+                                        1.0,
+                                        Kind::Unspecified,
+                                    );
                                     scratchpad_data = Some((sp_x, sp_y, sp_w, sp_h));
                                 }
                             }
@@ -2559,22 +3372,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // IM popup (fcitx5 candidate box) — collected separately (rendered on top of windows)
                             if let Some(ref im_popup) = state.im_popup {
                                 if im_popup.alive() {
-                                    let mut popup_pos = (state.pointer_pos.0 as i32, state.pointer_pos.1 as i32 + 20);
+                                    let mut popup_pos = (
+                                        state.pointer_pos.0 as i32,
+                                        state.pointer_pos.1 as i32 + 20,
+                                    );
                                     if let Some(parent) = im_popup.get_parent() {
                                         let popup_loc = im_popup.location();
                                         let im_order = out_ws.effective_order();
                                         for (i, slot) in im_order.iter().enumerate() {
                                             let matched = match slot {
-                                                WindowSlot::Wl(idx) => out_ws.tops.get(*idx)
+                                                WindowSlot::Wl(idx) => out_ws
+                                                    .tops
+                                                    .get(*idx)
                                                     .map(|tl| tl.wl_surface() == &parent.surface)
                                                     .unwrap_or(false),
-                                                WindowSlot::X11(idx) => out_ws.x11_surfaces.get(*idx)
+                                                WindowSlot::X11(idx) => out_ws
+                                                    .x11_surfaces
+                                                    .get(*idx)
                                                     .and_then(|xs| xs.wl_surface())
                                                     .map(|wl| &wl == &parent.surface)
                                                     .unwrap_or(false),
                                             };
                                             if matched {
-                                                let (x, y, _, _) = layout::slot(i, im_order.len(), ow, oh, bar_h, &state.cfg, out_ws.layout, out_ws.split);
+                                                let (x, y, _, _) = layout::slot(
+                                                    i,
+                                                    im_order.len(),
+                                                    ow,
+                                                    oh,
+                                                    bar_h,
+                                                    &state.cfg,
+                                                    out_ws.layout,
+                                                    out_ws.split,
+                                                );
                                                 let (bx, by) = match slot {
                                                     WindowSlot::Wl(idx) => {
                                                         if let Some(tl) = out_ws.tops.get(*idx) {
@@ -2582,7 +3411,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                                 states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
                                                             }).unwrap_or_default();
                                                             (x - geo.loc.x, y - geo.loc.y)
-                                                        } else { (x, y) }
+                                                        } else {
+                                                            (x, y)
+                                                        }
                                                     }
                                                     WindowSlot::X11(_) => (x, y),
                                                 };
@@ -2593,7 +3424,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                     im_popup_pos = popup_pos;
                                     if is_focused_output {
-                                        im_elems = render_elements_from_surface_tree(&mut renderer, im_popup.wl_surface(), popup_pos, 1.0, 1.0, Kind::Unspecified);
+                                        im_elems = render_elements_from_surface_tree(
+                                            &mut renderer,
+                                            im_popup.wl_surface(),
+                                            popup_pos,
+                                            1.0,
+                                            1.0,
+                                            Kind::Unspecified,
+                                        );
                                     }
                                 }
                             }
@@ -2607,12 +3445,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 // 渲染管线使用 output 局部坐标，所以必须减去当前 output 的 (ox, oy) 偏移。
                                 // 否则在多屏场景下，OR 窗口会渲染到错误的 output 上（甚至屏幕外）。
                                 // 全屏应用占据整个 output 时，这一转换也保证 OR popup 出现在正确位置。
-                                let (ox, oy, _, _) = state.output_sizes.get(oi).copied().unwrap_or((0, 0, state.osize.w, state.osize.h));
-                                let render_pos = Point::<i32, Physical>::from((geo.loc.x - ox, geo.loc.y - oy));
+                                let (ox, oy, _, _) = state
+                                    .output_sizes
+                                    .get(oi)
+                                    .copied()
+                                    .unwrap_or((0, 0, state.osize.w, state.osize.h));
+                                let render_pos =
+                                    Point::<i32, Physical>::from((geo.loc.x - ox, geo.loc.y - oy));
                                 if is_focused_output {
-                                    or_elems.extend(
-                                        render_elements_from_surface_tree(&mut renderer, &wl, render_pos, 1.0, 1.0, Kind::Unspecified)
-                                    );
+                                    or_elems.extend(render_elements_from_surface_tree(
+                                        &mut renderer,
+                                        &wl,
+                                        render_pos,
+                                        1.0,
+                                        1.0,
+                                        Kind::Unspecified,
+                                    ));
                                 }
                             }
                         }
@@ -2629,20 +3477,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // ── Lock screen: skip all normal rendering ──
                         if state.lock_state.locked {
                             // 计算锁屏激活以来的时间（用于基于时间的动画）
-                            let lock_elapsed = state.lock_state.time
+                            let lock_elapsed = state
+                                .lock_state
+                                .time
                                 .map(|t| t.elapsed().as_secs_f32())
                                 .unwrap_or(0.0);
                             if is_focused_output {
                                 // 焦点屏幕：完整锁屏 UI（时钟 + 密码输入框）
                                 layout::render_lock_screen(
-                                    &mut f, &state.cfg, ow, oh,
-                                    time_secs, lock_elapsed,
-                                    &state.lock_state.input, state.lock_state.wrong, state.lock_state.shake,
-                                    state.lock_state.style, state.lock_state.is_authenticating(),
+                                    &mut f,
+                                    &state.cfg,
+                                    ow,
+                                    oh,
+                                    time_secs,
+                                    lock_elapsed,
+                                    &state.lock_state.input,
+                                    state.lock_state.wrong,
+                                    state.lock_state.shake,
+                                    state.lock_state.style,
+                                    state.lock_state.is_authenticating(),
                                 );
                             } else {
                                 // 其他屏幕：暗色覆盖 + 同风格背景
-                                layout::render_lock_screen_dim(&mut f, &state.cfg, ow, oh, lock_elapsed, state.lock_state.style);
+                                layout::render_lock_screen_dim(
+                                    &mut f,
+                                    &state.cfg,
+                                    ow,
+                                    oh,
+                                    lock_elapsed,
+                                    state.lock_state.style,
+                                );
                             }
                             let sync = f.finish()?;
                             drop(target);
@@ -2708,12 +3572,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if fullscreen.is_none() {
                             let order = out_ws.effective_order();
                             for (i, _) in order.iter().enumerate() {
-                                let (x, y, _, _) = layout::slot(i, n_total, ow, oh, bar_h, &state.cfg, state.workspaces[out_ws_idx].layout, state.workspaces[out_ws_idx].split);
-                                let (dx, dy) = state.layout_anim.offset_for(&order[i], (x, y)).unwrap_or((0, 0));
+                                let (x, y, _, _) = layout::slot(
+                                    i,
+                                    n_total,
+                                    ow,
+                                    oh,
+                                    bar_h,
+                                    &state.cfg,
+                                    state.workspaces[out_ws_idx].layout,
+                                    state.workspaces[out_ws_idx].split,
+                                );
+                                let (dx, dy) = state
+                                    .layout_anim
+                                    .offset_for(&order[i], (x, y))
+                                    .unwrap_or((0, 0));
                                 layout::render_window_decorations_anim(
-                                    &mut f, &state.cfg, i, n_total, out_ws_focus_idx,
-                                    ow, oh, bar_h, state.workspaces[out_ws_idx].layout, state.workspaces[out_ws_idx].split,
-                                    ws_offset + dx, dy
+                                    &mut f,
+                                    &state.cfg,
+                                    i,
+                                    n_total,
+                                    out_ws_focus_idx,
+                                    ow,
+                                    oh,
+                                    bar_h,
+                                    state.workspaces[out_ws_idx].layout,
+                                    state.workspaces[out_ws_idx].split,
+                                    ws_offset + dx,
+                                    dy,
                                 );
                             }
                         }
@@ -2725,14 +3610,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let border = layout::opaque(accent.0, accent.1, accent.2);
                             let sp_bg = layout::opaque(0.06, 0.06, 0.10);
                             // Background (opaque, covers windows below)
-                            f.clear(sp_bg, &[layout::rect(sp_x - bw, sp_y - bw, sp_w + 2 * bw, sp_h + 2 * bw)]).ok();
+                            f.clear(
+                                sp_bg,
+                                &[layout::rect(
+                                    sp_x - bw,
+                                    sp_y - bw,
+                                    sp_w + 2 * bw,
+                                    sp_h + 2 * bw,
+                                )],
+                            )
+                            .ok();
                             // Border (top accent line)
-                            f.clear(border, &[layout::rect(sp_x - bw, sp_y - bw, sp_w + 2 * bw, bw)]).ok();
-                            f.clear(border, &[layout::rect(sp_x - bw, sp_y + sp_h, sp_w + 2 * bw, bw)]).ok();
-                            f.clear(border, &[layout::rect(sp_x - bw, sp_y, bw, sp_h)]).ok();
-                            f.clear(border, &[layout::rect(sp_x + sp_w, sp_y, bw, sp_h)]).ok();
+                            f.clear(
+                                border,
+                                &[layout::rect(sp_x - bw, sp_y - bw, sp_w + 2 * bw, bw)],
+                            )
+                            .ok();
+                            f.clear(
+                                border,
+                                &[layout::rect(sp_x - bw, sp_y + sp_h, sp_w + 2 * bw, bw)],
+                            )
+                            .ok();
+                            f.clear(border, &[layout::rect(sp_x - bw, sp_y, bw, sp_h)])
+                                .ok();
+                            f.clear(border, &[layout::rect(sp_x + sp_w, sp_y, bw, sp_h)])
+                                .ok();
                             // Scratchpad label
-                            crate::text_render::draw_text(&mut f, "SCRATCHPAD", sp_x + 6, sp_y - 22, 14.0, accent);
+                            crate::text_render::draw_text(
+                                &mut f,
+                                "SCRATCHPAD",
+                                sp_x + 6,
+                                sp_y - 22,
+                                14.0,
+                                accent,
+                            );
                             // Scratchpad terminal content — rendered AFTER background
                             draw_render_elements(&mut f, 1.0, &sp_elems, &[dmg])?;
                         }
@@ -2745,16 +3656,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         // Step 5: Headbar — 每个 output 显示自己的活跃工作区
                         {
-                            let ws_counts: Vec<usize> = state.workspaces.iter().map(|w| w.tops.len() + w.x11_surfaces.len()).collect();
-                            layout::render_headbar(&mut f, &state.cfg, ow, oh, n_windows, out_ws_focus_idx, time_secs, &out_window_title, out_ws_idx, NUM_WORKSPACES, &ws_counts, state.cpu_usage, state.mem_usage, state.record_state.recording);
+                            let ws_counts: Vec<usize> = state
+                                .workspaces
+                                .iter()
+                                .map(|w| w.tops.len() + w.x11_surfaces.len())
+                                .collect();
+                            layout::render_headbar(
+                                &mut f,
+                                &state.cfg,
+                                ow,
+                                oh,
+                                n_windows,
+                                out_ws_focus_idx,
+                                time_secs,
+                                &out_window_title,
+                                out_ws_idx,
+                                NUM_WORKSPACES,
+                                &ws_counts,
+                                state.cpu_usage,
+                                state.mem_usage,
+                                state.record_state.recording,
+                            );
                         }
 
                         // Step 6: Notifications — 只在鼠标所在的 output 上显示
                         if is_focused_output && !state.notifications.is_empty() {
                             let accent = crate::config::parse_color(&state.cfg.colors.focus_border);
-                            let notif_data: Vec<(String, std::time::Instant, std::time::Duration)> = state.notifications.iter()
-                                .map(|n| (n.text.clone(), n.created, n.duration)).collect();
-                            layout::render_notifications(&mut f, &notif_data, ow, state.cfg.bar.height, accent);
+                            let notif_data: Vec<(String, std::time::Instant, std::time::Duration)> =
+                                state
+                                    .notifications
+                                    .iter()
+                                    .map(|n| (n.text.clone(), n.created, n.duration))
+                                    .collect();
+                            layout::render_notifications(
+                                &mut f,
+                                &notif_data,
+                                ow,
+                                state.cfg.bar.height,
+                                accent,
+                            );
                         }
 
                         // Step 7: Launcher — 面板外透明（桌面可见）+ 面板本体深色背景
@@ -2769,18 +3709,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let lh = header_h + (n_items as i32) * item_h + 20;
                             let lx = (ow - lw) / 2;
                             let ly = bar_h + 24;
-                            f.clear(layout::opaque(0.10, 0.10, 0.16),
-                                &[layout::rect(lx, ly, lw, lh)]).ok();
+                            f.clear(
+                                layout::opaque(0.10, 0.10, 0.16),
+                                &[layout::rect(lx, ly, lw, lh)],
+                            )
+                            .ok();
 
                             // 渲染 launcher UI 元素
-                            layout::render_launcher(&mut f, &state.cfg, ow, oh, &state.launcher.query, &filtered, state.launcher.selected);
+                            layout::render_launcher(
+                                &mut f,
+                                &state.cfg,
+                                ow,
+                                oh,
+                                &state.launcher.query,
+                                &filtered,
+                                state.launcher.selected,
+                            );
                         }
 
                         // Step 8: Cursor — 只在鼠标所在的 output 上渲染（坐标需要转换）
                         if is_focused_output {
-                            let (ox, _oy, _ow, _oh) = state.output_sizes.get(oi).copied().unwrap_or((0, 0, 0, 0));
-                            let cx = state.pointer_pos.0 as i32 - ox - state.cursor_img.hotspot_x as i32;
-                            let cy = state.pointer_pos.1 as i32 - _oy - state.cursor_img.hotspot_y as i32;
+                            let (ox, _oy, _ow, _oh) =
+                                state.output_sizes.get(oi).copied().unwrap_or((0, 0, 0, 0));
+                            let cx =
+                                state.pointer_pos.0 as i32 - ox - state.cursor_img.hotspot_x as i32;
+                            let cy = state.pointer_pos.1 as i32
+                                - _oy
+                                - state.cursor_img.hotspot_y as i32;
                             state.cursor_img.render_batched(&mut f, cx, cy);
                         }
 
@@ -2798,7 +3753,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if is_focused_output {
                             if let Some(req) = state.pending_screenshot.take() {
                                 let area = match &req {
-                                    screenshot::ScreenshotRequest::Area(x, y, w, h) => Some((*x, *y, *w, *h)),
+                                    screenshot::ScreenshotRequest::Area(x, y, w, h) => {
+                                        Some((*x, *y, *w, *h))
+                                    }
                                     screenshot::ScreenshotRequest::Full => None,
                                 };
                                 use smithay::backend::allocator::Fourcc;
@@ -2826,12 +3783,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         rgba.extend_from_slice(&pixels[start..end]);
                                                     }
                                                 }
-                                                let result = screenshot::save_screenshot(&rgba, w, h, area);
+                                                let result =
+                                                    screenshot::save_screenshot(&rgba, w, h, area);
                                                 state.screenshot_result = Some(result);
                                             }
                                             Err(e) => {
                                                 tracing::warn!("📸 map_texture failed: {:?}", e);
-                                                state.screenshot_result = Some((String::new(), None));
+                                                state.screenshot_result =
+                                                    Some((String::new(), None));
                                             }
                                         }
                                     }
@@ -2844,19 +3803,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
                         // 屏幕录制帧捕获（每 6 帧采样一次 ≈ 10fps，降低 GPU→CPU 压力）
-                        if state.record_state.recording && is_focused_output && state.frame % 3 == 0 {
+                        if state.record_state.recording && is_focused_output && state.frame % 3 == 0
+                        {
                             use smithay::backend::allocator::Fourcc;
                             use smithay::backend::renderer::Renderer;
                             let region = Rectangle::from_size((ow, oh).into());
                             match renderer.copy_framebuffer(&target, region, Fourcc::Abgr8888) {
-                                Ok(mapping) => {
-                                    match renderer.map_texture(&mapping) {
-                                        Ok(pixels) => {
-                                            state.record_state.write_frame(&pixels, ow as u32, oh as u32);
-                                        }
-                                        Err(_) => {}
+                                Ok(mapping) => match renderer.map_texture(&mapping) {
+                                    Ok(pixels) => {
+                                        state
+                                            .record_state
+                                            .write_frame(&pixels, ow as u32, oh as u32);
                                     }
-                                }
+                                    Err(_) => {}
+                                },
                                 Err(_) => {}
                             }
                         }
@@ -2867,7 +3827,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         out.pending_flip = true;
                     }
                     Err(e) => {
-                        if state.frame == 0 { error!("❌ {e:?}"); }
+                        if state.frame == 0 {
+                            error!("❌ {e:?}");
+                        }
                     }
                 }
             }
@@ -2888,7 +3850,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             // 发送 frame callback
             let now = start.elapsed().as_millis() as u32;
-            for s in state.xdg.toplevel_surfaces() { send_frames(s.wl_surface(), now); }
+            for s in state.xdg.toplevel_surfaces() {
+                send_frames(s.wl_surface(), now);
+            }
             // XDG popup surfaces (browser menus, context menus, etc.)
             for s in state.xdg.toplevel_surfaces() {
                 for (popup, _) in PopupManager::popups_for_surface(s.wl_surface()) {
@@ -2897,11 +3861,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             // IM popup surface (fcitx5 candidate box) — needs frame callback to commit buffer
             if let Some(ref im_popup) = state.im_popup {
-                if im_popup.alive() { send_frames(im_popup.wl_surface(), now); }
+                if im_popup.alive() {
+                    send_frames(im_popup.wl_surface(), now);
+                }
             }
             // Scratchpad surface — needs frame callback to commit buffer
             if let Some(ref sp_surf) = state.scratchpad.surface {
-                if sp_surf.alive() { send_frames(sp_surf.wl_surface(), now); }
+                if sp_surf.alive() {
+                    send_frames(sp_surf.wl_surface(), now);
+                }
             }
             // X11 surfaces — need frame callbacks to update
             for xs in &state.workspaces[state.active_ws].x11_surfaces {
@@ -2918,7 +3886,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // Handle X11 layout changes
             // (X11 layout is now triggered directly in map/unmap/destroy handlers)
             // 动画进行中时持续请求渲染
-            if state.ws_anim.start.map(|s| (s.elapsed().as_millis() as u64) < state.ws_anim.duration_ms).unwrap_or(false) {
+            if state
+                .ws_anim
+                .start
+                .map(|s| (s.elapsed().as_millis() as u64) < state.ws_anim.duration_ms)
+                .unwrap_or(false)
+            {
                 state.dirty = true;
             }
             // 布局动画进行中时持续请求渲染
@@ -2932,7 +3905,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             state.frame += 1;
             // Drain D-Bus notifications into toast system
             {
-                let dbus_notifs: Vec<_> = state.dbus_notifications.lock()
+                let dbus_notifs: Vec<_> = state
+                    .dbus_notifications
+                    .lock()
                     .map(|mut s| s.pending.drain(..).collect())
                     .unwrap_or_default();
                 for n in dbus_notifs {
@@ -2945,14 +3920,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             state.drain_notifications();
-            if state.frame % 60 == 0 { state.popup_manager.cleanup(); }
-            if state.frame == 1 { info!("✅ 第一帧渲染！"); }
-            if state.frame % 600 == 0 { info!("📊 {} 帧", state.frame); }
+            if state.frame % 60 == 0 {
+                state.popup_manager.cleanup();
+            }
+            if state.frame == 1 {
+                info!("✅ 第一帧渲染！");
+            }
+            if state.frame % 600 == 0 {
+                info!("📊 {} 帧", state.frame);
+            }
         }
 
         eloop.dispatch(Some(Duration::from_millis(16)), &mut state)?;
         // 时钟每秒更新（bar enabled 时）
-        if state.frame % 60 == 0 && state.cfg.bar.enabled { state.dirty = true; }
+        if state.frame % 60 == 0 && state.cfg.bar.enabled {
+            state.dirty = true;
+        }
         // CPU/MEM 状态每 5 秒更新
         if state.frame % 300 == 0 {
             state.update_cpu_usage();
@@ -2961,13 +3944,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if let Ok(Some(stream)) = listener.accept() {
-            clients.push(display.handle().insert_client(stream, Arc::new(ClientState::default()))?);
+            clients.push(
+                display
+                    .handle()
+                    .insert_client(stream, Arc::new(ClientState::default()))?,
+            );
         }
         display.dispatch_clients(&mut state)?;
         display.flush_clients()?;
     }
 
-    info!("👋"); Ok(())
+    info!("👋");
+    Ok(())
 }
 
 delegate_xdg_shell!(App);
@@ -2986,7 +3974,9 @@ smithay::delegate_xwayland_shell!(App);
 // ── XWayland Handlers ──────────────────────────────────────
 
 impl smithay::wayland::xwayland_shell::XWaylandShellHandler for App {
-    fn xwayland_shell_state(&mut self) -> &mut smithay::wayland::xwayland_shell::XWaylandShellState {
+    fn xwayland_shell_state(
+        &mut self,
+    ) -> &mut smithay::wayland::xwayland_shell::XWaylandShellState {
         &mut self.xw.shell
     }
 
@@ -3003,20 +3993,43 @@ impl smithay::wayland::xwayland_shell::XWaylandShellHandler for App {
 
 impl smithay::xwayland::XwmHandler for App {
     fn xwm_state(&mut self, _xwm: smithay::xwayland::xwm::XwmId) -> &mut smithay::xwayland::X11Wm {
-        self.xw.xwm.as_mut().expect("XwmHandler called but X11Wm not ready")
+        self.xw
+            .xwm
+            .as_mut()
+            .expect("XwmHandler called but X11Wm not ready")
     }
 
-    fn new_window(&mut self, _xwm: smithay::xwayland::xwm::XwmId, window: smithay::xwayland::X11Surface) {
-        tracing::info!("🆕 X11 new_window: class='{}' title='{}'", window.class(), window.title());
+    fn new_window(
+        &mut self,
+        _xwm: smithay::xwayland::xwm::XwmId,
+        window: smithay::xwayland::X11Surface,
+    ) {
+        tracing::info!(
+            "🆕 X11 new_window: class='{}' title='{}'",
+            window.class(),
+            window.title()
+        );
     }
 
-    fn new_override_redirect_window(&mut self, _xwm: smithay::xwayland::xwm::XwmId, window: smithay::xwayland::X11Surface) {
+    fn new_override_redirect_window(
+        &mut self,
+        _xwm: smithay::xwayland::xwm::XwmId,
+        window: smithay::xwayland::X11Surface,
+    ) {
         self.xw.on_new_or_window(window);
         self.dirty = true;
     }
 
-    fn map_window_request(&mut self, _xwm: smithay::xwayland::xwm::XwmId, window: smithay::xwayland::X11Surface) {
-        tracing::info!("🗺️  X11 map_request: class='{}' title='{}'", window.class(), window.title());
+    fn map_window_request(
+        &mut self,
+        _xwm: smithay::xwayland::xwm::XwmId,
+        window: smithay::xwayland::X11Surface,
+    ) {
+        tracing::info!(
+            "🗺️  X11 map_request: class='{}' title='{}'",
+            window.class(),
+            window.title()
+        );
 
         if let Err(e) = window.set_mapped(true) {
             tracing::warn!("⚠️  X11 set_mapped failed: {:?}", e);
@@ -3042,7 +4055,11 @@ impl smithay::xwayland::XwmHandler for App {
         self.dirty = true;
     }
 
-    fn mapped_override_redirect_window(&mut self, _xwm: smithay::xwayland::xwm::XwmId, window: smithay::xwayland::X11Surface) {
+    fn mapped_override_redirect_window(
+        &mut self,
+        _xwm: smithay::xwayland::xwm::XwmId,
+        window: smithay::xwayland::X11Surface,
+    ) {
         tracing::info!("🗺️  X11 OR mapped: class='{}'", window.class());
         // Re-add in case it was removed by unmapped_window (fcitx5 reuses the same X11 window)
         let wid = window.window_id();
@@ -3052,7 +4069,11 @@ impl smithay::xwayland::XwmHandler for App {
         self.dirty = true;
     }
 
-    fn unmapped_window(&mut self, _xwm: smithay::xwayland::xwm::XwmId, window: smithay::xwayland::X11Surface) {
+    fn unmapped_window(
+        &mut self,
+        _xwm: smithay::xwayland::xwm::XwmId,
+        window: smithay::xwayland::X11Surface,
+    ) {
         tracing::info!("🗑️  X11 unmapped: class='{}'", window.class());
         let wid = window.window_id();
         for ws in &mut self.workspaces {
@@ -3065,8 +4086,14 @@ impl smithay::xwayland::XwmHandler for App {
         let order = self.workspaces[self.active_ws].effective_order();
         if let Some((_, slot)) = order.iter().enumerate().last() {
             let surf = match slot {
-                WindowSlot::Wl(idx) => self.workspaces[self.active_ws].tops.get(*idx).map(|tl| tl.wl_surface().clone()),
-                WindowSlot::X11(idx) => self.workspaces[self.active_ws].x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()),
+                WindowSlot::Wl(idx) => self.workspaces[self.active_ws]
+                    .tops
+                    .get(*idx)
+                    .map(|tl| tl.wl_surface().clone()),
+                WindowSlot::X11(idx) => self.workspaces[self.active_ws]
+                    .x11_surfaces
+                    .get(*idx)
+                    .and_then(|xs| xs.wl_surface()),
             };
             if let Some(surf) = surf {
                 self.workspaces[self.active_ws].focus = Some(surf.clone());
@@ -3078,12 +4105,20 @@ impl smithay::xwayland::XwmHandler for App {
         self.dirty = true;
     }
 
-    fn destroyed_window(&mut self, _xwm: smithay::xwayland::xwm::XwmId, window: smithay::xwayland::X11Surface) {
+    fn destroyed_window(
+        &mut self,
+        _xwm: smithay::xwayland::xwm::XwmId,
+        window: smithay::xwayland::X11Surface,
+    ) {
         tracing::info!("💥 X11 destroyed: class='{}'", window.class());
         let wid = window.window_id();
         // 重新映射 prev_positions（X11 窗口索引移位）
         for ws_idx in 0..self.workspaces.len() {
-            if let Some(removed_idx) = self.workspaces[ws_idx].x11_surfaces.iter().position(|s| s.window_id() == wid) {
+            if let Some(removed_idx) = self.workspaces[ws_idx]
+                .x11_surfaces
+                .iter()
+                .position(|s| s.window_id() == wid)
+            {
                 self.remap_prev_after_remove(&WindowSlot::X11(removed_idx));
             }
         }
@@ -3097,8 +4132,14 @@ impl smithay::xwayland::XwmHandler for App {
         let order = self.workspaces[self.active_ws].effective_order();
         if let Some((_, slot)) = order.iter().enumerate().last() {
             let surf = match slot {
-                WindowSlot::Wl(idx) => self.workspaces[self.active_ws].tops.get(*idx).map(|tl| tl.wl_surface().clone()),
-                WindowSlot::X11(idx) => self.workspaces[self.active_ws].x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()),
+                WindowSlot::Wl(idx) => self.workspaces[self.active_ws]
+                    .tops
+                    .get(*idx)
+                    .map(|tl| tl.wl_surface().clone()),
+                WindowSlot::X11(idx) => self.workspaces[self.active_ws]
+                    .x11_surfaces
+                    .get(*idx)
+                    .and_then(|xs| xs.wl_surface()),
             };
             if let Some(surf) = surf {
                 self.workspaces[self.active_ws].focus = Some(surf.clone());
@@ -3163,7 +4204,9 @@ impl smithay::xwayland::XwmHandler for App {
         //   1) Wayland 客户端拥有选区 → request_data_device_client_selection 转发请求
         //   2) 合成器自身拥有选区（如截图剪贴板）→ request_data_device_client_selection
         //      返回 ServerSideSelection 错误，需要手动从 seat user_data 读取并写入 fd
-        use smithay::wayland::selection::data_device::{request_data_device_client_selection, current_data_device_selection_userdata};
+        use smithay::wayland::selection::data_device::{
+            current_data_device_selection_userdata, request_data_device_client_selection,
+        };
 
         if selection == smithay::wayland::selection::SelectionTarget::Clipboard {
             // 先检查合成器是否拥有选区（截图等 compositor-provided selection）
@@ -3172,7 +4215,10 @@ impl smithay::xwayland::XwmHandler for App {
                 let buf: Arc<[u8]> = user_data.clone();
                 std::thread::spawn(move || {
                     use std::io::Write;
-                    if let Err(err) = smithay::reexports::rustix::fs::fcntl_setfl(&fd, smithay::reexports::rustix::fs::OFlags::empty()) {
+                    if let Err(err) = smithay::reexports::rustix::fs::fcntl_setfl(
+                        &fd,
+                        smithay::reexports::rustix::fs::OFlags::empty(),
+                    ) {
                         tracing::warn!("error clearing flags on selection fd: {:?}", err);
                     }
                     if let Err(err) = std::fs::File::from(fd).write_all(&buf) {
@@ -3184,25 +4230,33 @@ impl smithay::xwayland::XwmHandler for App {
         }
 
         // Wayland 客户端拥有选区 → 请求客户端发送数据
-        match request_data_device_client_selection::<App>(
-            &self.seat,
-            mime_type,
-            fd,
-        ) {
+        match request_data_device_client_selection::<App>(&self.seat, mime_type, fd) {
             Ok(()) => tracing::info!("📋 XwmHandler::send_selection: forwarded to Wayland client"),
             Err(e) => tracing::warn!("📋 XwmHandler::send_selection: request failed: {:?}", e),
         }
     }
 
-    fn maximize_request(&mut self, _xwm: smithay::xwayland::xwm::XwmId, window: smithay::xwayland::X11Surface) {
+    fn maximize_request(
+        &mut self,
+        _xwm: smithay::xwayland::xwm::XwmId,
+        window: smithay::xwayland::X11Surface,
+    ) {
         self.xw.ack_with_current_geometry(&window);
     }
 
-    fn unmaximize_request(&mut self, _xwm: smithay::xwayland::xwm::XwmId, window: smithay::xwayland::X11Surface) {
+    fn unmaximize_request(
+        &mut self,
+        _xwm: smithay::xwayland::xwm::XwmId,
+        window: smithay::xwayland::X11Surface,
+    ) {
         self.xw.ack_with_current_geometry(&window);
     }
 
-    fn fullscreen_request(&mut self, _xwm: smithay::xwayland::xwm::XwmId, window: smithay::xwayland::X11Surface) {
+    fn fullscreen_request(
+        &mut self,
+        _xwm: smithay::xwayland::xwm::XwmId,
+        window: smithay::xwayland::X11Surface,
+    ) {
         let _ = window.set_fullscreen(true);
         let wid = window.window_id();
         for ws_idx in 0..self.workspaces.len() {
@@ -3213,19 +4267,29 @@ impl smithay::xwayland::XwmHandler for App {
                 let (is_match, focus_surf) = {
                     let m = match slot {
                         WindowSlot::Wl(_) => false,
-                        WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).map(|s| s.window_id() == wid).unwrap_or(false),
+                        WindowSlot::X11(idx) => ws
+                            .x11_surfaces
+                            .get(*idx)
+                            .map(|s| s.window_id() == wid)
+                            .unwrap_or(false),
                     };
                     let focus = if m {
                         order.get(i).and_then(|s2| match s2 {
-                            WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()),
+                            WindowSlot::X11(idx) => {
+                                ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface())
+                            }
                             _ => None,
                         })
-                    } else { None };
+                    } else {
+                        None
+                    };
                     (m, focus)
                 };
                 if is_match {
                     self.workspaces[ws_idx].fullscreen = Some(i);
-                    if ws_idx != self.active_ws { self.active_ws = ws_idx; }
+                    if ws_idx != self.active_ws {
+                        self.active_ws = ws_idx;
+                    }
                     // 同步 ws.focus 到全屏 X11 窗口（防穿透）
                     if let Some(wl) = focus_surf {
                         self.workspaces[ws_idx].focus = Some(wl);
@@ -3238,7 +4302,11 @@ impl smithay::xwayland::XwmHandler for App {
         }
     }
 
-    fn unfullscreen_request(&mut self, _xwm: smithay::xwayland::xwm::XwmId, window: smithay::xwayland::X11Surface) {
+    fn unfullscreen_request(
+        &mut self,
+        _xwm: smithay::xwayland::xwm::XwmId,
+        window: smithay::xwayland::X11Surface,
+    ) {
         let _ = window.set_fullscreen(false);
         let wid = window.window_id();
         for ws_idx in 0..self.workspaces.len() {
@@ -3246,7 +4314,11 @@ impl smithay::xwayland::XwmHandler for App {
             if let Some(fi) = ws.fullscreen {
                 let order = ws.effective_order();
                 let matches = match order.get(fi) {
-                    Some(WindowSlot::X11(idx)) => ws.x11_surfaces.get(*idx).map(|s| s.window_id() == wid).unwrap_or(false),
+                    Some(WindowSlot::X11(idx)) => ws
+                        .x11_surfaces
+                        .get(*idx)
+                        .map(|s| s.window_id() == wid)
+                        .unwrap_or(false),
                     _ => false,
                 };
                 if matches {
@@ -3259,10 +4331,24 @@ impl smithay::xwayland::XwmHandler for App {
         }
     }
 
-    fn minimize_request(&mut self, _xwm: smithay::xwayland::xwm::XwmId, _window: smithay::xwayland::X11Surface) {}
-    fn unminimize_request(&mut self, _xwm: smithay::xwayland::xwm::XwmId, _window: smithay::xwayland::X11Surface) {}
+    fn minimize_request(
+        &mut self,
+        _xwm: smithay::xwayland::xwm::XwmId,
+        _window: smithay::xwayland::X11Surface,
+    ) {
+    }
+    fn unminimize_request(
+        &mut self,
+        _xwm: smithay::xwayland::xwm::XwmId,
+        _window: smithay::xwayland::X11Surface,
+    ) {
+    }
 
-    fn allow_selection_access(&mut self, _xwm: smithay::xwayland::xwm::XwmId, _selection: smithay::wayland::selection::SelectionTarget) -> bool {
+    fn allow_selection_access(
+        &mut self,
+        _xwm: smithay::xwayland::xwm::XwmId,
+        _selection: smithay::wayland::selection::SelectionTarget,
+    ) -> bool {
         // Wayland->X11: allow X11 clients to access Wayland selection
         true
     }
@@ -3276,17 +4362,14 @@ impl smithay::xwayland::XwmHandler for App {
         // X11→Wayland: X11 客户端设了新选区 → 在 Wayland 端注册为 compositor 选区
         // 使用 set_data_device_selection 让 Anchor 成为 Wayland data device selection owner
         // Wayland 客户端粘贴时 SelectionHandler::send_selection 会被调，通过 X11Wm::send_selection 获取 X11 数据
-        if selection == smithay::wayland::selection::SelectionTarget::Clipboard && !mime_types.is_empty() {
+        if selection == smithay::wayland::selection::SelectionTarget::Clipboard
+            && !mime_types.is_empty()
+        {
             use smithay::wayland::selection::data_device::set_data_device_selection;
             // 使用 magic bytes 标记这是 X11 代理选区
             // SelectionHandler::send_selection 检测到这个标记会用 X11Wm::send_selection 获取实际数据
             let user_data: Arc<[u8]> = Arc::from(&b"X11_PROXY\x00"[..]);
-            set_data_device_selection::<App>(
-                &self.dh,
-                &self.seat,
-                mime_types,
-                user_data,
-            );
+            set_data_device_selection::<App>(&self.dh, &self.seat, mime_types, user_data);
             tracing::info!("X11→Wayland: registered X11 selection as compositor selection");
         }
     }
@@ -3298,7 +4381,7 @@ impl smithay::xwayland::XwmHandler for App {
     ) {
     }
 
-        fn property_notify(
+    fn property_notify(
         &mut self,
         _xwm: smithay::xwayland::xwm::XwmId,
         window: smithay::xwayland::X11Surface,
@@ -3331,7 +4414,11 @@ impl XdgDecorationHandler for App {
         });
         toplevel.send_configure();
     }
-    fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode) {
+    fn request_mode(
+        &mut self,
+        toplevel: ToplevelSurface,
+        _mode: smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode,
+    ) {
         use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
         toplevel.with_pending_state(|state| {
             state.decoration_mode = Some(Mode::ServerSide);

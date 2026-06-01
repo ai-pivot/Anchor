@@ -50,7 +50,9 @@ impl RecordState {
 
     /// 开始录制（指定裁剪区域）
     pub fn start_with_area(&mut self, screen_w: u32, screen_h: u32, area: Option<RecordArea>) {
-        if self.recording { return; }
+        if self.recording {
+            return;
+        }
 
         // 实际录制的尺寸
         let (rec_w, rec_h) = if let Some(a) = &area {
@@ -59,7 +61,9 @@ impl RecordState {
             (screen_w, screen_h)
         };
 
-        if rec_w == 0 || rec_h == 0 { return; }
+        if rec_w == 0 || rec_h == 0 {
+            return;
+        }
 
         let output_dir = std::env::var("HOME")
             .map(|h| format!("{}/Videos", h))
@@ -71,12 +75,25 @@ impl RecordState {
 
         let mut cmd = Command::new("ffmpeg");
         cmd.args([
-            "-y", "-f", "rawvideo", "-pix_fmt", "rgba",
-            "-s", &format!("{}x{}", rec_w, rec_h),
-            "-r", &format!("{}", self.fps),
-            "-i", "-",
-            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-            "-pix_fmt", "yuv420p",
+            "-y",
+            "-f",
+            "rawvideo",
+            "-pix_fmt",
+            "rgba",
+            "-s",
+            &format!("{}x{}", rec_w, rec_h),
+            "-r",
+            &format!("{}", self.fps),
+            "-i",
+            "-",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-crf",
+            "23",
+            "-pix_fmt",
+            "yuv420p",
             &output_path,
         ]);
         cmd.stdin(std::process::Stdio::piped());
@@ -85,12 +102,18 @@ impl RecordState {
 
         let mut child = match cmd.spawn() {
             Ok(c) => c,
-            Err(e) => { info!("🔴 录制失败: {}", e); return; }
+            Err(e) => {
+                info!("🔴 录制失败: {}", e);
+                return;
+            }
         };
 
         let pipe = match child.stdin.take() {
             Some(p) => p,
-            None => { let _ = child.kill(); return; }
+            None => {
+                let _ = child.kill();
+                return;
+            }
         };
 
         // 容量 2 的同步通道
@@ -101,7 +124,9 @@ impl RecordState {
             .spawn(move || {
                 let mut pipe = pipe;
                 while let Ok(frame) = rx.recv() {
-                    if pipe.write_all(&frame).is_err() { break; }
+                    if pipe.write_all(&frame).is_err() {
+                        break;
+                    }
                 }
                 drop(pipe);
                 let _ = child.wait();
@@ -113,15 +138,23 @@ impl RecordState {
         self.area = area;
         self.recording = true;
         if let Some(a) = &self.area {
-            info!("🔴 开始区域录制 → {} ({}x{} @ {}fps)", output_path, a.w, a.h, self.fps);
+            info!(
+                "🔴 开始区域录制 → {} ({}x{} @ {}fps)",
+                output_path, a.w, a.h, self.fps
+            );
         } else {
-            info!("🔴 开始全屏录制 → {} ({}x{} @ {}fps)", output_path, screen_w, screen_h, self.fps);
+            info!(
+                "🔴 开始全屏录制 → {} ({}x{} @ {}fps)",
+                output_path, screen_w, screen_h, self.fps
+            );
         }
     }
 
     /// 裁剪并写入一帧（非阻塞，channel 满就跳过）
     pub fn write_frame(&mut self, full_pixels: &[u8], full_w: u32, full_h: u32) {
-        if !self.recording { return; }
+        if !self.recording {
+            return;
+        }
         if let Some(ref tx) = self.frame_tx {
             if let Some(a) = &self.area {
                 // 区域录制：裁剪
@@ -147,7 +180,9 @@ impl RecordState {
 
     /// 停止录制
     pub fn stop(&mut self) {
-        if !self.recording { return; }
+        if !self.recording {
+            return;
+        }
         self.recording = false;
         self.area = None;
         self.frame_tx = None;
@@ -156,5 +191,7 @@ impl RecordState {
 }
 
 impl Drop for RecordState {
-    fn drop(&mut self) { self.stop(); }
+    fn drop(&mut self) {
+        self.stop();
+    }
 }

@@ -52,8 +52,7 @@ pub fn linear_to_block_linear(
             let lin_offset = y * width * bpp + x * bpp;
 
             if bl_offset + bpp <= dst.len() && lin_offset + bpp <= src.len() {
-                dst[bl_offset..bl_offset + bpp]
-                    .copy_from_slice(&src[lin_offset..lin_offset + bpp]);
+                dst[bl_offset..bl_offset + bpp].copy_from_slice(&src[lin_offset..lin_offset + bpp]);
             }
         }
     }
@@ -127,9 +126,9 @@ mod tests {
         // Pixel (0,0) → bl_offset = 0*512 + 0*64 + 0*4 = 0
         // Pixel (16,0) → bl_offset = 1*512 + 0*64 + 0*4 = 512
         // Pixel (0,4) → bl_offset = 0*512 + 4*64 + 0*4 = 256
-        assert_eq!(dst[0], 0);     // pixel (0,0).r = 0
-        assert_eq!(dst[512], 16);  // pixel (16,0).r = 16
-        assert_eq!(dst[256], 0);   // pixel (0,4).r = 0
-        assert_eq!(dst[257], 4);   // pixel (0,4).g = 4
+        assert_eq!(dst[0], 0); // pixel (0,0).r = 0
+        assert_eq!(dst[512], 16); // pixel (16,0).r = 16
+        assert_eq!(dst[256], 0); // pixel (0,4).r = 0
+        assert_eq!(dst[257], 4); // pixel (0,4).g = 4
     }
 }

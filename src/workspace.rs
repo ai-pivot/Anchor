@@ -5,8 +5,8 @@
 
 use crate::layout::{LayoutPreset, SplitDir};
 use smithay::{
-    wayland::shell::xdg::ToplevelSurface,
     reexports::wayland_server::protocol::wl_surface::WlSurface,
+    wayland::shell::xdg::ToplevelSurface,
 };
 
 /// Total number of workspaces (1-9, matching Super+1..9 keybindings).
@@ -163,15 +163,21 @@ impl Workspace {
         let order = self.effective_order();
         for (i, slot) in order.iter().enumerate() {
             let matches = match slot {
-                WindowSlot::Wl(idx) => self.tops.get(*idx)
+                WindowSlot::Wl(idx) => self
+                    .tops
+                    .get(*idx)
                     .map(|tl| tl.wl_surface() == focus_surf)
                     .unwrap_or(false),
-                WindowSlot::X11(idx) => self.x11_surfaces.get(*idx)
+                WindowSlot::X11(idx) => self
+                    .x11_surfaces
+                    .get(*idx)
                     .and_then(|xs| xs.wl_surface())
                     .map(|wl| &wl == focus_surf)
                     .unwrap_or(false),
             };
-            if matches { return Some(i); }
+            if matches {
+                return Some(i);
+            }
         }
         None
     }

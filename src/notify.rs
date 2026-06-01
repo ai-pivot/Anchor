@@ -1,5 +1,5 @@
 use std::sync::{Arc, Mutex};
-use zbus::{interface, connection::Builder as ConnBuilder};
+use zbus::{connection::Builder as ConnBuilder, interface};
 
 /// A notification received via D-Bus
 #[derive(Debug, Clone)]
@@ -61,7 +61,9 @@ impl NotificationServer {
 
 /// Start the D-Bus notification daemon in a background thread.
 pub fn start_notification_daemon() -> Arc<Mutex<NotificationState>> {
-    let state = Arc::new(Mutex::new(NotificationState { pending: Vec::new() }));
+    let state = Arc::new(Mutex::new(NotificationState {
+        pending: Vec::new(),
+    }));
     let state_clone = state.clone();
 
     std::thread::spawn(move || {

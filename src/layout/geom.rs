@@ -5,8 +5,8 @@
 //! - `slot()`: 给定索引、总数、屏幕尺寸、bar 高度、布局预设和平铺方向，
 //!            返回窗口槽位 `(x, y, w, h)`
 
-use crate::config::Config;
 use super::util::rect;
+use crate::config::Config;
 
 /// 布局预设
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,8 +26,10 @@ pub enum SplitDir {
 
 impl LayoutPreset {
     pub const ALL: [LayoutPreset; 4] = [
-        LayoutPreset::MasterStack, LayoutPreset::Columns,
-        LayoutPreset::Center, LayoutPreset::Grid,
+        LayoutPreset::MasterStack,
+        LayoutPreset::Columns,
+        LayoutPreset::Center,
+        LayoutPreset::Grid,
     ];
     pub fn next(self) -> Self {
         let idx = Self::ALL.iter().position(|&x| x == self).unwrap_or(0);
@@ -53,11 +55,24 @@ impl LayoutPreset {
 }
 
 impl Default for LayoutPreset {
-    fn default() -> Self { Self::MasterStack }
+    fn default() -> Self {
+        Self::MasterStack
+    }
 }
 
-pub fn slot(i: usize, n: usize, ow: i32, oh: i32, bar_h: i32, cfg: &Config, layout: LayoutPreset, split: SplitDir) -> (i32, i32, i32, i32) {
-    if n == 0 { return (0, bar_h, 0, 0); }
+pub fn slot(
+    i: usize,
+    n: usize,
+    ow: i32,
+    oh: i32,
+    bar_h: i32,
+    cfg: &Config,
+    layout: LayoutPreset,
+    split: SplitDir,
+) -> (i32, i32, i32, i32) {
+    if n == 0 {
+        return (0, bar_h, 0, 0);
+    }
     let gap = cfg.layout.gap;
     let margin = cfg.layout.margin;
     let usable_w = ow - 2 * margin;
@@ -78,10 +93,15 @@ pub fn slot(i: usize, n: usize, ow: i32, oh: i32, bar_h: i32, cfg: &Config, layo
                             } else {
                                 let stack_n = n - 1;
                                 let stack_w = usable_w - master_w - gap;
-                                let stack_h = (usable_h - gap * (stack_n - 1) as i32) / stack_n as i32;
-                                let extra = (usable_h - gap * (stack_n - 1) as i32) % stack_n as i32;
+                                let stack_h =
+                                    (usable_h - gap * (stack_n - 1) as i32) / stack_n as i32;
+                                let extra =
+                                    (usable_h - gap * (stack_n - 1) as i32) % stack_n as i32;
                                 let si = i - 1;
-                                let sy = bar_h + margin + si as i32 * (stack_h + gap) + extra.min(si as i32);
+                                let sy = bar_h
+                                    + margin
+                                    + si as i32 * (stack_h + gap)
+                                    + extra.min(si as i32);
                                 let sh = stack_h + if si < extra as usize { 1 } else { 0 };
                                 (margin + master_w + gap, sy, stack_w, sh)
                             }
@@ -95,10 +115,13 @@ pub fn slot(i: usize, n: usize, ow: i32, oh: i32, bar_h: i32, cfg: &Config, layo
                                 let stack_n = n - 1;
                                 let stack_y = bar_h + margin + master_h + gap;
                                 let stack_h = usable_h - master_h - gap;
-                                let stack_w = (usable_w - gap * (stack_n - 1) as i32) / stack_n as i32;
-                                let extra = (usable_w - gap * (stack_n - 1) as i32) % stack_n as i32;
+                                let stack_w =
+                                    (usable_w - gap * (stack_n - 1) as i32) / stack_n as i32;
+                                let extra =
+                                    (usable_w - gap * (stack_n - 1) as i32) % stack_n as i32;
                                 let si = i - 1;
-                                let sx = margin + si as i32 * (stack_w + gap) + extra.min(si as i32);
+                                let sx =
+                                    margin + si as i32 * (stack_w + gap) + extra.min(si as i32);
                                 let sw = stack_w + if si < extra as usize { 1 } else { 0 };
                                 (sx, stack_y, sw, stack_h)
                             }
@@ -144,7 +167,8 @@ pub fn slot(i: usize, n: usize, ow: i32, oh: i32, bar_h: i32, cfg: &Config, layo
                     let max_h = 800.min(oh * 7 / 10);
                     let rh = (max_h - gap * (n as i32 - 1)) / n as i32;
                     let extra = (max_h - gap * (n as i32 - 1)) % n as i32;
-                    let total_w = (usable_w).min(n as i32 * (800 / n as i32) + gap * (n as i32 - 1));
+                    let total_w =
+                        (usable_w).min(n as i32 * (800 / n as i32) + gap * (n as i32 - 1));
                     let start_x = ow / 2 - total_w / 2;
                     let start_y = (bar_h + oh) / 2 - max_h / 2;
                     let cw = (total_w - gap * (n as i32 - 1)) / n as i32;
@@ -160,7 +184,11 @@ pub fn slot(i: usize, n: usize, ow: i32, oh: i32, bar_h: i32, cfg: &Config, layo
             let rows = (n as i32 + cols - 1) / cols;
             let col = i as i32 % cols;
             let row = i as i32 / cols;
-            let items_in_row = if row < rows - 1 { cols } else { n as i32 - row * cols };
+            let items_in_row = if row < rows - 1 {
+                cols
+            } else {
+                n as i32 - row * cols
+            };
             let col_w = (usable_w - gap * (cols - 1)) / cols;
             let row_h = (usable_h - gap * (rows - 1)) / rows;
             let row_start = if row == rows - 1 {

@@ -15,7 +15,11 @@ pub struct ScreenshotState {
 
 impl ScreenshotState {
     pub fn new() -> Self {
-        Self { selecting: false, start: None, end: None }
+        Self {
+            selecting: false,
+            start: None,
+            end: None,
+        }
     }
     pub fn begin_selection(&mut self) {
         self.selecting = true;
@@ -47,7 +51,11 @@ impl ScreenshotState {
             self.selecting = false;
             self.start = None;
             self.end = None;
-            if w < 5 || h < 5 { None } else { Some((x, y, w, h)) }
+            if w < 5 || h < 5 {
+                None
+            } else {
+                Some((x, y, w, h))
+            }
         } else {
             self.cancel();
             None
@@ -59,7 +67,11 @@ impl ScreenshotState {
             let y = sy.min(ey) as i32;
             let w = (sx - ex).abs() as i32;
             let h = (sy - ey).abs() as i32;
-            if w > 0 && h > 0 { Some((x, y, w, h)) } else { None }
+            if w > 0 && h > 0 {
+                Some((x, y, w, h))
+            } else {
+                None
+            }
         } else {
             None
         }
@@ -77,7 +89,12 @@ pub enum ScreenshotRequest {
 
 /// 将 RGBA 数据编码为 PNG 并保存
 /// 返回 (文件路径, PNG 二进制数据)
-pub fn save_screenshot(rgba: &[u8], width: u32, height: u32, area: Option<(i32, i32, i32, i32)>) -> (String, Option<Vec<u8>>) {
+pub fn save_screenshot(
+    rgba: &[u8],
+    width: u32,
+    height: u32,
+    area: Option<(i32, i32, i32, i32)>,
+) -> (String, Option<Vec<u8>>) {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -98,7 +115,13 @@ pub fn save_screenshot(rgba: &[u8], width: u32, height: u32, area: Option<(i32, 
             if let Ok(mut f) = File::create(&png_path) {
                 let _ = f.write_all(&png_data);
             }
-            tracing::info!("📸 截图已保存: {} ({}x{}, {} bytes)", png_path.display(), final_w, final_h, png_data.len());
+            tracing::info!(
+                "📸 截图已保存: {} ({}x{}, {} bytes)",
+                png_path.display(),
+                final_w,
+                final_h,
+                png_data.len()
+            );
             (png_path.display().to_string(), Some(png_data))
         }
         Err(e) => {
@@ -109,7 +132,15 @@ pub fn save_screenshot(rgba: &[u8], width: u32, height: u32, area: Option<(i32, 
 }
 
 /// 裁剪 RGBA 数据
-fn crop_rgba(rgba: &[u8], src_w: u32, src_h: u32, x: i32, y: i32, w: i32, h: i32) -> (Vec<u8>, u32, u32) {
+fn crop_rgba(
+    rgba: &[u8],
+    src_w: u32,
+    src_h: u32,
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+) -> (Vec<u8>, u32, u32) {
     let x = x.max(0) as u32;
     let y = y.max(0) as u32;
     let w = w.max(1) as u32;
@@ -148,17 +179,32 @@ pub fn render_selection_overlay(
     let (x, y, w, h) = rect;
     let dim = crate::layout::opaque(0.0, 0.0, 0.0);
 
-    if y > 0 { f.clear(dim, &[crate::layout::rect(0, 0, screen_w, y)]).ok(); }
-    if y + h < screen_h { f.clear(dim, &[crate::layout::rect(0, y + h, screen_w, screen_h - y - h)]).ok(); }
-    if x > 0 { f.clear(dim, &[crate::layout::rect(0, y, x, h)]).ok(); }
-    if x + w < screen_w { f.clear(dim, &[crate::layout::rect(x + w, y, screen_w - x - w, h)]).ok(); }
+    if y > 0 {
+        f.clear(dim, &[crate::layout::rect(0, 0, screen_w, y)]).ok();
+    }
+    if y + h < screen_h {
+        f.clear(
+            dim,
+            &[crate::layout::rect(0, y + h, screen_w, screen_h - y - h)],
+        )
+        .ok();
+    }
+    if x > 0 {
+        f.clear(dim, &[crate::layout::rect(0, y, x, h)]).ok();
+    }
+    if x + w < screen_w {
+        f.clear(dim, &[crate::layout::rect(x + w, y, screen_w - x - w, h)])
+            .ok();
+    }
 
     let border = crate::layout::opaque(0.48, 0.64, 0.97);
     let bw = 2;
     f.clear(border, &[crate::layout::rect(x, y, w, bw)]).ok();
-    f.clear(border, &[crate::layout::rect(x, y + h - bw, w, bw)]).ok();
+    f.clear(border, &[crate::layout::rect(x, y + h - bw, w, bw)])
+        .ok();
     f.clear(border, &[crate::layout::rect(x, y, bw, h)]).ok();
-    f.clear(border, &[crate::layout::rect(x + w - bw, y, bw, h)]).ok();
+    f.clear(border, &[crate::layout::rect(x + w - bw, y, bw, h)])
+        .ok();
 
     let size_text = format!("{}x{}", w, h);
     crate::text_render::draw_text(f, &size_text, x + w + 6, y - 4, 13.0, (1.0, 1.0, 1.0));
