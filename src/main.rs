@@ -2424,11 +2424,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let mut popup_pos = (state.pointer_pos.0 as i32, state.pointer_pos.1 as i32 + 20);
                                     if let Some(parent) = im_popup.get_parent() {
                                         let popup_loc = im_popup.location();
-                                        let parent_rect = parent.location;
-                                        for (i, tl) in out_ws.tops.iter().enumerate() {
-                                            if tl.wl_surface() == &parent.surface {
-                                                let (x, y, _, _) = layout::slot(i, out_ws.tops.len(), ow, oh, bar_h, &state.cfg, out_ws.layout, out_ws.split);
-                                                popup_pos = (x + popup_loc.x, y + popup_loc.y);
+                                        let im_order = out_ws.effective_order();
+                                        for (i, slot) in im_order.iter().enumerate() {
+                                            let matched = match slot {
+                                                WindowSlot::Wl(idx) => out_ws.tops.get(*idx)
+                                                    .map(|tl| tl.wl_surface() == &parent.surface)
+                                                    .unwrap_or(false),
+                                                WindowSlot::X11(idx) => out_ws.x11_surfaces.get(*idx)
+                                                    .and_then(|xs| xs.wl_surface())
+                                                    .map(|wl| &wl == &parent.surface)
+                                                    .unwrap_or(false),
+                                            };
+                                            if matched {
+                                                let (x, y, _, _) = layout::slot(i, im_order.len(), ow, oh, bar_h, &state.cfg, out_ws.layout, out_ws.split);
+                                                let (bx, by) = match slot {
+                                                    WindowSlot::Wl(idx) => {
+                                                        if let Some(tl) = out_ws.tops.get(*idx) {
+                                                            let geo = smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
+                                                                states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
+                                                            }).unwrap_or_default();
+                                                            (x - geo.loc.x, y - geo.loc.y)
+                                                        } else { (x, y) }
+                                                    }
+                                                    WindowSlot::X11(_) => (x, y),
+                                                };
+                                                popup_pos = (bx + popup_loc.x, by + popup_loc.y);
                                                 break;
                                             }
                                         }
