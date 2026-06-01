@@ -119,4 +119,29 @@ esac
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 mkdir -p "$XDG_RUNTIME_DIR"
 
+# ─── 关键 session 守护进程 ───
+# 这两件事必须在 anchor 之前/同步启动，否则会导致：
+# (1) 浏览器、密码管理器、TLS 客户端证书丢失登录态
+#     （gnome-keyring-daemon 死了，Secret Service API 不可用）
+# (2) 任何 D-Bus auto-launch 服务找不到正确的 XDG_CURRENT_DESKTOP/XDG_SESSION_TYPE
+#     （dbus-update-activation-environment 没把变量推送到 systemd 风格激活）
+#
+# GDM 在用户登录时已经启动了这些守护进程，但**当 anchor 进程死亡重启时**，
+# 守护进程是 anchor 的子进程也会被一起杀掉。用户重新启动 anchor
+# 不会重新触发 GDM 的 login 流程，所以必须在这里手动恢复。
+if command -v dbus-update-activation-environment &>/dev/null; then
+    dbus-update-activation-environment --systemd \
+        XDG_SESSION_TYPE XDG_CURRENT_DESKTOP \
+        DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR 2>/dev/null
+fi
+
+if command -v gnome-keyring-daemon &>/dev/null && \
+   [ -z "$GNOME_KEYRING_CONTROL" ]; then
+    # --start: 启动守护进程
+    # --replace: 替换已有的（如果存在）
+    # 把输出 export 到环境（gnome-keyring-daemon 打印 "GNOME_KEYRING_CONTROL=..."
+    # 等行，必须 eval 才能让这些变量进入当前 shell）
+    eval $(gnome-keyring-daemon --start --replace --components=secrets,ssh 2>/dev/null)
+fi
+
 exec "$PROJECT_DIR/target/release/anchor" 2>&1 | tee /tmp/anchor-session.log
