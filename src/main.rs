@@ -2104,6 +2104,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
 
         if state.dirty {
+            // ── 锁屏 PAM 轮询（必须在渲染之前）──
+            // 如果认证刚完成，当前帧立刻渲染桌面而非锁屏
+            if state.lock_state.locked {
+                state.lock_state.poll_unlock();
+                if !state.lock_state.locked {
+                    // 刚解锁！立即重新布局窗口
+                    state.do_layout();
+                }
+            }
+
             // Upload wallpaper to GPU texture if needed
             if state.wallpaper_cache.pixels.is_some() && state.wallpaper_texture.is_none() {
                 if let Some(ref wp) = state.wallpaper_cache.pixels {
@@ -2371,7 +2381,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     &mut f, &state.cfg, ow, oh,
                                     time_secs, lock_elapsed,
                                     &state.lock_state.input, state.lock_state.wrong, state.lock_state.shake,
-                                    state.lock_state.style,
+                                    state.lock_state.style, state.lock_state.is_authenticating(),
                                 );
                             } else {
                                 // 其他屏幕：暗色覆盖 + 同风格背景
@@ -2622,8 +2632,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             // 锁屏动画需要持续重绘（frame 驱动动画，必须保证 dirty 始终为 true）
             if state.lock_state.locked {
-                // 轮询异步 PAM 结果（无结果时为 no-op）
-                state.lock_state.poll_unlock();
                 state.dirty = true;
             }
             state.frame += 1;

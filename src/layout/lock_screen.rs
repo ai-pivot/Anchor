@@ -257,7 +257,7 @@ pub fn render_lock_screen(
     f: &mut impl Frame, cfg: &Config, ow: i32, oh: i32,
     time_secs: u64, elapsed: f32,
     password: &str, wrong: bool, shake: Option<std::time::Instant>,
-    style: u8,
+    style: u8, authenticating: bool,
 ) {
     let accent = parse_color(&cfg.colors.focus_border);
 
@@ -391,7 +391,18 @@ pub fn render_lock_screen(
     }
 
     // ── 提示文字 ──
-    if wrong {
+    if authenticating {
+        // 动态省略号动画（基于 elapsed）
+        let dots = match (elapsed * 2.0) as u32 % 4 {
+            0 => "Verifying",
+            1 => "Verifying.",
+            2 => "Verifying..",
+            _ => "Verifying...",
+        };
+        let hw = text_render::text_width(dots, 14.0);
+        text_render::draw_text(f, dots, cx - hw / 2, box_y + box_h + 14, 14.0,
+            (accent.0 * 0.7, accent.1 * 0.7, accent.2 * 0.7));
+    } else if wrong {
         let hint = "Authentication failed";
         let hw = text_render::text_width(hint, 14.0);
         text_render::draw_text(f, hint, cx - hw / 2, box_y + box_h + 14, 14.0,
