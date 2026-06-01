@@ -13,6 +13,7 @@ mod cursor;
 mod notify;
 mod xwayland;
 mod screenshot;
+mod auth;
 
 use std::{
     os::unix::io::OwnedFd,
@@ -29,7 +30,7 @@ use smithay::{
         drm::{DrmDevice, DrmDeviceFd, DrmEvent, GbmBufferedSurface},
         input::{Axis, ButtonState, InputEvent, KeyState, PointerAxisEvent},
         libinput::LibinputInputBackend,
-        renderer::{ImportDma, ImportMem, Bind, Frame, Renderer,
+        renderer::{ImportDma, ImportMem, ExportMem, Bind, Frame, Renderer,
             gles::GlesRenderer,
             element::{RenderElement, surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement}, Kind},
             utils::{draw_render_elements, on_commit_buffer_handler}, Color32F},
@@ -232,10 +233,18 @@ struct App {
     xdisplay: Option<u32>,
     // 截图状态（区域选择）
     screenshot: screenshot::ScreenshotState,
-    /// DRM 设备 fd（用于截图，dup 副本）
-    drm_fd: std::os::unix::io::RawFd,
+    /// 待处理的截图请求（在渲染流程中执行）
+    pending_screenshot: Option<screenshot::ScreenshotRequest>,
+    /// 截图完成的缓存结果（渲染后处理）
+    screenshot_result: Option<(String, Option<Vec<u8>>)>,
     /// EventLoop handle（用于 XWM selection 转发等需要注册临时 source 的场景）
     loop_handle: Option<smithay::reexports::calloop::LoopHandle<'static, App>>,
+    // 锁屏状态
+    locked: bool,
+    lock_input: String,
+    lock_time: Option<std::time::Instant>,
+    lock_shake: Option<std::time::Instant>,
+    lock_wrong: bool,
 }
 
 /// 工作区切换动画状态
@@ -970,6 +979,51 @@ impl App {
                                 return FilterResult::Intercept(());
                             }
                         }
+                        // ── 锁屏模式键盘处理 ──
+                        if data.locked && state == KeyState::Pressed {
+                            let sym = keysym.modified_sym();
+                            match sym {
+                                Keysym::Escape => { data.lock_input.clear(); data.lock_wrong = false; data.dirty = true; return FilterResult::Intercept(()); }
+                                Keysym::Return => {
+                                    // Verify password via PAM
+                                    let username = std::env::var("USER").unwrap_or_default();
+                                    let password = data.lock_input.clone();
+                                    if auth::verify_password(&username, &password) {
+                                        info!("🔓 Screen unlocked");
+                                        data.locked = false;
+                                        data.lock_input.clear();
+                                        data.lock_wrong = false;
+                                        data.lock_shake = None;
+                                    } else {
+                                        info!("🔒 Wrong password");
+                                        data.lock_input.clear();
+                                        data.lock_wrong = true;
+                                        data.lock_shake = Some(std::time::Instant::now());
+                                    }
+                                    data.dirty = true;
+                                    return FilterResult::Intercept(());
+                                }
+                                Keysym::BackSpace => { data.lock_input.pop(); data.lock_wrong = false; data.dirty = true; return FilterResult::Intercept(()); }
+                                _ => {
+                                    // Printable characters → append to password
+                                    let ch = match sym.raw() {
+                                        32..=126 => Some(sym.raw() as u8 as char),
+                                        _ => None,
+                                    };
+                                    if let Some(c) = ch {
+                                        if !mods.logo && !mods.ctrl && !mods.alt {
+                                            data.lock_input.push(c);
+                                            data.lock_wrong = false;
+                                            data.dirty = true;
+                                            return FilterResult::Intercept(());
+                                        }
+                                    }
+                                }
+                            }
+                            // Intercept all other keys when locked
+                            return FilterResult::Intercept(());
+                        }
+                        if data.locked { return FilterResult::Intercept(()); }
                         // ── 启动器模式键盘处理 ──
                         if data.launcher_visible && state == KeyState::Pressed {
                             let sym = keysym.modified_sym();
@@ -1016,7 +1070,20 @@ impl App {
                                     cmd.spawn().ok();
                                     return FilterResult::Intercept(());
                                 }
-                                Keysym::Escape if mods.shift => { data.run = false; return FilterResult::Intercept(()); }
+                                Keysym::Escape => {
+                                    if mods.shift {
+                                        data.run = false;
+                                    } else {
+                                        info!("🔒 Locking screen");
+                                        data.locked = true;
+                                        data.lock_input.clear();
+                                        data.lock_time = Some(std::time::Instant::now());
+                                        data.lock_wrong = false;
+                                        data.lock_shake = None;
+                                        data.dirty = true;
+                                    }
+                                    return FilterResult::Intercept(());
+                                }
                                 // Super+Shift+R: reload config & restart
                                 Keysym::r => {
                                     info!("🔄 Reloading Anchor...");
@@ -1076,15 +1143,8 @@ impl App {
                                     // Super+Shift+P: 全屏截图直接保存+剪贴板
                                     // Super+P: 区域选择截图
                                     if mods.shift {
-                                        let (path, png_data) = screenshot::take_full_screenshot(data.drm_fd);
-                                        if path.is_empty() {
-                                            data.notify("Screenshot failed");
-                                        } else if let Some(png) = png_data {
-                                            data.set_clipboard_png(png);
-                                            data.notify("Screenshot saved & copied");
-                                        } else {
-                                            data.notify("Screenshot saved (clipboard failed)");
-                                        }
+                                        data.pending_screenshot = Some(screenshot::ScreenshotRequest::Full);
+                                        data.dirty = true;
                                     } else {
                                         // 进入区域选择模式
                                         data.screenshot.begin_selection();
@@ -1212,6 +1272,12 @@ impl App {
                     return;
                 }
 
+                // 锁屏模式：不转发鼠标事件给客户端，仅更新光标位置
+                if self.locked {
+                    self.dirty = true;
+                    return;
+                }
+
                 // 转发给客户端
                 let serial = SERIAL_COUNTER.next_serial();
                 let time = (event.time() / 1000) as u32;
@@ -1230,6 +1296,8 @@ impl App {
                 self.dirty = true;
             }
             InputEvent::PointerButton { event } => {
+                // 锁屏模式：阻止鼠标按钮
+                if self.locked { return; }
                 // 截图区域选择模式：按下记录起点，释放完成截图
                 if self.screenshot.selecting {
                     if event.state() == ButtonState::Pressed {
@@ -1237,15 +1305,8 @@ impl App {
                         self.dirty = true;
                     } else if event.state() == ButtonState::Released {
                         if let Some((x, y, w, h)) = self.screenshot.on_release() {
-                            let (path, png_data) = screenshot::take_area_screenshot(self.drm_fd, x, y, w, h);
-                            if path.is_empty() {
-                                self.notify("Screenshot failed");
-                            } else if let Some(png) = png_data {
-                                self.set_clipboard_png(png);
-                                self.notify("Area screenshot saved & copied");
-                            } else {
-                                self.notify("Area screenshot saved (clipboard failed)");
-                            }
+                            self.pending_screenshot = Some(screenshot::ScreenshotRequest::Area(x, y, w, h));
+                            self.dirty = true;
                         } else {
                             self.notify("Selection too small, cancelled");
                         }
@@ -1328,6 +1389,8 @@ impl App {
                 ptr.frame(self);
             }
             InputEvent::PointerAxis { event } => {
+                // 锁屏模式：阻止滚轮
+                if self.locked { return; }
                 let time = (event.time() / 1000) as u32;
                 let mut frame = AxisFrame::new(time).source(event.source());
                 if let Some(v) = event.amount(Axis::Vertical) {
@@ -1938,8 +2001,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         xw: xwayland::XWaylandState::new::<App>(&dh),
         xdisplay: None,
         screenshot: screenshot::ScreenshotState::new(),
-        drm_fd: unsafe { libc::dup(dev_fd.as_raw_fd()) }, // dup for screenshot
+        pending_screenshot: None,
+        screenshot_result: None,
         loop_handle: None,
+        locked: false,
+        lock_input: String::new(),
+        lock_time: None,
+        lock_shake: None,
+        lock_wrong: false,
     };
     let listener = ListeningSocket::bind("wayland-anchor")?;
     std::env::set_var("WAYLAND_DISPLAY", "wayland-anchor");
@@ -2484,6 +2553,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let dmg = Rectangle::from_size(sp_size);
 
                         // Step 1: Wallpaper
+                        // ── Lock screen: skip all normal rendering ──
+                        if state.locked {
+                            // Only render wallpaper + lock overlay on the focused output
+                            if is_focused_output {
+                                layout::render_lock_screen(
+                                    &mut f, &state.cfg, ow, oh,
+                                    time_secs, state.frame,
+                                    &state.lock_input, state.lock_wrong, state.lock_shake,
+                                );
+                            }
+                            let sync = f.finish()?;
+                            drop(target);
+                            out.buf_surf.queue_buffer(Some(sync), None, ())?;
+                            out.pending_flip = true;
+                            continue; // skip all other rendering for this output
+                        }
                         if let Some(ref _tex) = state.wallpaper_texture {
                             if let Some(ref wp) = state.wallpaper_cache.pixels {
                                 let (ww, wh) = state.wallpaper_cache.size;
@@ -2610,6 +2695,51 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
                         let sync = f.finish()?;
+                        // drop f 释放对 target 的借用
+
+                        // Step 10: 执行待处理的截图请求（finish 后 framebuffer 完整，target 仍可用）
+                        if is_focused_output {
+                            if let Some(req) = state.pending_screenshot.take() {
+                                let area = match &req {
+                                    screenshot::ScreenshotRequest::Area(x, y, w, h) => Some((*x, *y, *w, *h)),
+                                    screenshot::ScreenshotRequest::Full => None,
+                                };
+                                use smithay::backend::allocator::Fourcc;
+                                use smithay::backend::renderer::Renderer;
+                                let region = Rectangle::from_size((ow, oh).into());
+                                match renderer.copy_framebuffer(&target, region, Fourcc::Xrgb8888) {
+                                    Ok(mapping) => {
+                                        match renderer.map_texture(&mapping) {
+                                            Ok(pixels) => {
+                                                let w = ow as u32;
+                                                let h = oh as u32;
+                                                // OpenGL ReadPixels bottom-up → 翻转为 top-down
+                                                let row_len = w as usize * 4;
+                                                let mut flipped = Vec::with_capacity(pixels.len());
+                                                for row in (0..h as usize).rev() {
+                                                    let start = row * row_len;
+                                                    let end = start + row_len;
+                                                    if end <= pixels.len() {
+                                                        flipped.extend_from_slice(&pixels[start..end]);
+                                                    }
+                                                }
+                                                let result = screenshot::save_screenshot(&flipped, w, h, area);
+                                                state.screenshot_result = Some(result);
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!("📸 map_texture failed: {:?}", e);
+                                                state.screenshot_result = Some((String::new(), None));
+                                            }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        tracing::warn!("📸 copy_framebuffer failed: {:?}", e);
+                                        state.screenshot_result = Some((String::new(), None));
+                                    }
+                                }
+                            }
+                        }
+
                         drop(target);
 
                         out.buf_surf.queue_buffer(Some(sync), None, ())?;
@@ -2621,6 +2751,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             state.dirty = false;
+
+            // 处理截图结果
+            if let Some((path, png_data)) = state.screenshot_result.take() {
+                if path.is_empty() {
+                    state.notify("Screenshot failed".to_string());
+                } else if let Some(png) = png_data {
+                    state.set_clipboard_png(png);
+                    state.notify("Screenshot saved & copied".to_string());
+                } else {
+                    state.notify("Screenshot saved (clipboard failed)".to_string());
+                }
+                state.dirty = true;
+            }
+
             // 发送 frame callback
             let now = start.elapsed().as_millis() as u32;
             for s in state.xdg.toplevel_surfaces() { send_frames(s.wl_surface(), now); }
