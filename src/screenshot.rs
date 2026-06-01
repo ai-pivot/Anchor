@@ -89,9 +89,9 @@ impl ScreenshotState {
     }
 }
 
-/// 执行全屏截图：保存文件 + 复制到剪贴板
-/// 返回保存的文件路径
-pub fn take_full_screenshot(drm_dev: &str) -> String {
+/// 执行全屏截图：保存文件 + 返回 PNG 数据（用于剪贴板）
+/// 返回 (文件路径, PNG 二进制数据)
+pub fn take_full_screenshot(drm_dev: &str) -> (String, Option<Vec<u8>>) {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -127,7 +127,7 @@ pub fn take_full_screenshot(drm_dev: &str) -> String {
     if let Ok(output) = dump_result {
         if !output.status.success() {
             tracing::warn!("Screenshot dump failed: {}", String::from_utf8_lossy(&output.stderr));
-            return String::new();
+            return (String::new(), None);
         }
     }
 
@@ -147,18 +147,19 @@ pub fn take_full_screenshot(drm_dev: &str) -> String {
     let _ = std::fs::remove_file(&raw_path);
 
     if converted {
-        // 复制 PNG 到剪贴板
-        copy_to_clipboard(&png_path);
-        png_path.display().to_string()
+        // 读取 PNG 数据用于剪贴板
+        let png_data = read_png_for_clipboard(&png_path);
+        (png_path.display().to_string(), png_data)
     } else {
         // fallback：返回 raw 路径（不做剪贴板复制）
         tracing::warn!("Failed to convert screenshot to PNG");
-        raw_path.display().to_string()
+        (raw_path.display().to_string(), None)
     }
 }
 
 /// 执行区域截图：dump 全屏后裁剪区域
-pub fn take_area_screenshot(drm_dev: &str, x: i32, y: i32, w: i32, h: i32) -> String {
+/// 返回 (文件路径, PNG 二进制数据)
+pub fn take_area_screenshot(drm_dev: &str, x: i32, y: i32, w: i32, h: i32) -> (String, Option<Vec<u8>>) {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -194,7 +195,7 @@ pub fn take_area_screenshot(drm_dev: &str, x: i32, y: i32, w: i32, h: i32) -> St
     if let Ok(output) = dump_result {
         if !output.status.success() {
             tracing::warn!("Screenshot dump failed: {}", String::from_utf8_lossy(&output.stderr));
-            return String::new();
+            return (String::new(), None);
         }
     }
 
@@ -205,11 +206,11 @@ pub fn take_area_screenshot(drm_dev: &str, x: i32, y: i32, w: i32, h: i32) -> St
     let _ = std::fs::remove_file(&raw_path);
 
     if converted {
-        copy_to_clipboard(&png_path);
-        png_path.display().to_string()
+        let png_data = read_png_for_clipboard(&png_path);
+        (png_path.display().to_string(), png_data)
     } else {
         tracing::warn!("Failed to convert area screenshot to PNG");
-        raw_path.display().to_string()
+        (raw_path.display().to_string(), None)
     }
 }
 
@@ -308,30 +309,10 @@ fn get_screen_resolutions() -> Vec<(u32, u32)> {
     res
 }
 
-/// 复制图片文件到 Wayland 剪贴板
-fn copy_to_clipboard(png_path: &std::path::Path) {
-    let result = std::process::Command::new("wl-copy")
-        .arg("-t")
-        .arg("image/png")
-        .arg("--")
-        .arg(png_path)
-        .output();
-
-    match result {
-        Ok(output) => {
-            if output.status.success() {
-                tracing::info!("📋 Screenshot copied to clipboard");
-            } else {
-                tracing::warn!(
-                    "wl-copy failed: {}",
-                    String::from_utf8_lossy(&output.stderr)
-                );
-            }
-        }
-        Err(e) => {
-            tracing::warn!("Failed to run wl-copy: {}", e);
-        }
-    }
+/// 读取 PNG 文件内容，返回 PNG 二进制数据
+/// 调用方应使用 set_data_device_selection 将数据设到 Wayland 剪贴板
+fn read_png_for_clipboard(png_path: &std::path::Path) -> Option<Vec<u8>> {
+    std::fs::read(png_path).ok()
 }
 
 /// 渲染区域选择 overlay（半透明遮罩 + 选区高亮）

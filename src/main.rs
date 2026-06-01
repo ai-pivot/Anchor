@@ -524,6 +524,19 @@ impl App {
         });
     }
 
+    /// 将 PNG 图片数据设到 Wayland 剪贴板（image/png）
+    fn set_clipboard_png(&mut self, png_data: Vec<u8>) {
+        use smithay::wayland::selection::data_device::set_data_device_selection;
+        let user_data: Arc<[u8]> = Arc::from(png_data);
+        set_data_device_selection::<App>(
+            &self.dh,
+            &self.seat,
+            vec!["image/png".into(), "text/uri-list".into()],
+            user_data,
+        );
+        tracing::info!("📋 Screenshot copied to Wayland clipboard");
+    }
+
     fn load_apps(terminal_cmd: &str) -> Vec<(String, String)> {
         let mut apps = Vec::new();
         let dirs = [
@@ -1032,11 +1045,14 @@ impl App {
                                     if mods.shift {
                                         let drm_dev = std::env::var("TITAN_DRM_DEV")
                                             .unwrap_or_else(|_| "/dev/dri/card0".into());
-                                        let path = screenshot::take_full_screenshot(&drm_dev);
+                                        let (path, png_data) = screenshot::take_full_screenshot(&drm_dev);
                                         if path.is_empty() {
                                             data.notify("Screenshot failed");
-                                        } else {
+                                        } else if let Some(png) = png_data {
+                                            data.set_clipboard_png(png);
                                             data.notify("Screenshot saved & copied");
+                                        } else {
+                                            data.notify("Screenshot saved (clipboard failed)");
                                         }
                                     } else {
                                         // 进入区域选择模式
@@ -1192,11 +1208,14 @@ impl App {
                         if let Some((x, y, w, h)) = self.screenshot.on_release() {
                             let drm_dev = std::env::var("TITAN_DRM_DEV")
                                 .unwrap_or_else(|_| "/dev/dri/card0".into());
-                            let path = screenshot::take_area_screenshot(&drm_dev, x, y, w, h);
+                            let (path, png_data) = screenshot::take_area_screenshot(&drm_dev, x, y, w, h);
                             if path.is_empty() {
                                 self.notify("Screenshot failed");
-                            } else {
+                            } else if let Some(png) = png_data {
+                                self.set_clipboard_png(png);
                                 self.notify("Area screenshot saved & copied");
+                            } else {
+                                self.notify("Area screenshot saved (clipboard failed)");
                             }
                         } else {
                             self.notify("Selection too small, cancelled");
@@ -2171,7 +2190,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let (ww, wh) = state.wallpaper_cache.size;
                     match renderer.import_memory(
                         wp,
-                        Fourcc::Argb8888,
+                        Fourcc::Abgr8888,
                         Size::new(ww as i32, wh as i32),
                         false,
                     ) {
@@ -2181,6 +2200,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         Err(e) => {
                             warn!("⚠️  壁纸纹理上传失败: {:?}, fallback gradient", e);
+                            // Don't clear pixels — let CPU render path use them as fallback
                             state.wallpaper_cache.pixels = None;
                         }
                     }
@@ -2389,7 +2409,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     &[],
                                 );
                             }
-                        } else {
+                        } else if !state.wallpaper_cache.render(&mut f, &state.cfg, ow, oh) {
                             layout::render_wallpaper(&mut f, &state.cfg, ow, oh, state.frame);
                         }
 
