@@ -312,7 +312,10 @@ impl App {
                 match slot {
                     WindowSlot::Wl(idx) => {
                         if let Some(tl) = ws.tops.get(*idx) {
-                            let tl_pos = Point::from((0.0, bar_h as f64));
+                            let tl_geo = smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
+                                states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
+                            }).unwrap_or_default();
+                            let tl_pos = Point::from((-tl_geo.loc.x as f64, bar_h as f64 - tl_geo.loc.y as f64));
                             if let Some(r) = self.popup_at_pointer(tl, tl_pos) { return Some(r); }
                             return Some((tl.wl_surface().clone(), tl_pos));
                         }
@@ -337,7 +340,10 @@ impl App {
             if let WindowSlot::Wl(idx) = slot {
                 if let Some(tl) = ws.tops.get(*idx) {
                     let (x, y, _, _) = layout::slot(i, order.len(), ow, oh, bar_h, &self.cfg, ws.layout, ws.split);
-                    let tl_pos = Point::from((x as f64, y as f64));
+                    let tl_geo = smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
+                        states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
+                    }).unwrap_or_default();
+                    let tl_pos = Point::from((x as f64 - tl_geo.loc.x as f64, y as f64 - tl_geo.loc.y as f64));
                     if let Some(r) = self.popup_at_pointer(tl, tl_pos) {
                         return Some(r);
                     }
@@ -350,29 +356,34 @@ impl App {
         for (i, slot) in order.iter().enumerate() {
             let (x, y, w, h) = layout::slot(i, n_all, ow, oh, bar_h, &self.cfg, ws.layout, ws.split);
             if px >= x as f64 && px < (x + w) as f64 && py >= y as f64 && py < (y + h) as f64 {
-                let surf = match slot {
-                    WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| tl.wl_surface().clone()),
-                    WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()),
-                };
-                if let Some(s) = surf {
-                    let local_pos = Point::from((px - x as f64, py - y as f64));
-                    // Find the deepest subsurface at this point (handles Chrome dropdown menus etc.)
-                    if let Some((sub, sub_loc)) = smithay::desktop::utils::under_from_surface_tree(
-                        &s,
-                        local_pos,
-                        (0, 0),
-                        smithay::desktop::WindowSurfaceType::ALL,
-                    ) {
-                        // sub_loc is the subsurface position relative to toplevel.
-                        // Smithay ptr.motion computes: event.location - offset = local coords.
-                        // So offset = topleft_slot_pos + subsurface_pos = global surface position.
-                        let offset = Point::from((
-                            x as f64 + sub_loc.x as f64,
-                            y as f64 + sub_loc.y as f64,
-                        ));
-                        return Some((sub, offset));
+                match slot {
+                    WindowSlot::Wl(idx) => {
+                        if let Some(tl) = ws.tops.get(*idx) {
+                            let s = tl.wl_surface().clone();
+                            // 获取 geometry 偏移（CSD 阴影/边框），渲染位置需减去它
+                            let tl_geo = smithay::wayland::compositor::with_states(&s, |states| {
+                                states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
+                            }).unwrap_or_default();
+                            let bx = x as f64 - tl_geo.loc.x as f64;
+                            let by = y as f64 - tl_geo.loc.y as f64;
+                            let local_pos = Point::from((px - bx, py - by));
+                            if let Some((sub, sub_loc)) = smithay::desktop::utils::under_from_surface_tree(
+                                &s,
+                                local_pos,
+                                (0, 0),
+                                smithay::desktop::WindowSurfaceType::ALL,
+                            ) {
+                                let offset = Point::from((bx + sub_loc.x as f64, by + sub_loc.y as f64));
+                                return Some((sub, offset));
+                            }
+                            return Some((s, Point::from((bx, by))));
+                        }
                     }
-                    return Some((s, Point::from((x as f64, y as f64))));
+                    WindowSlot::X11(idx) => {
+                        if let Some(s) = ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()) {
+                            return Some((s, Point::from((x as f64, y as f64))));
+                        }
+                    }
                 }
             }
         }
@@ -386,7 +397,17 @@ impl App {
                 };
                 if matches == Some(true) {
                     let (x, y, _w, _h) = layout::slot(i, order.len(), self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
-                    return Some((focus_surf.clone(), Point::from((x as f64, y as f64))));
+                    match slot {
+                        WindowSlot::Wl(_) => {
+                            let geo = smithay::wayland::compositor::with_states(focus_surf, |states| {
+                                states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
+                            }).unwrap_or_default();
+                            return Some((focus_surf.clone(), Point::from((x as f64 - geo.loc.x as f64, y as f64 - geo.loc.y as f64))));
+                        }
+                        WindowSlot::X11(_) => {
+                            return Some((focus_surf.clone(), Point::from((x as f64, y as f64))));
+                        }
+                    }
                 }
             }
         }
@@ -394,12 +415,21 @@ impl App {
         // Last resort: last window in order
         if let Some((i, slot)) = order.iter().enumerate().last() {
             let (x, y, _w, _h) = layout::slot(i, order.len(), self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
-            let surf = match slot {
-                WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| tl.wl_surface().clone()),
-                WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()),
-            };
-            if let Some(s) = surf {
-                return Some((s, Point::from((x as f64, y as f64))));
+            match slot {
+                WindowSlot::Wl(idx) => {
+                    if let Some(tl) = ws.tops.get(*idx) {
+                        let s = tl.wl_surface().clone();
+                        let geo = smithay::wayland::compositor::with_states(&s, |states| {
+                            states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
+                        }).unwrap_or_default();
+                        return Some((s, Point::from((x as f64 - geo.loc.x as f64, y as f64 - geo.loc.y as f64))));
+                    }
+                }
+                WindowSlot::X11(idx) => {
+                    if let Some(s) = ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()) {
+                        return Some((s, Point::from((x as f64, y as f64))));
+                    }
+                }
             }
         }
 
@@ -1479,7 +1509,9 @@ impl XdgShellHandler for App {
                         // 移动窗口到目标工作区
                         if self.workspaces[ws_idx].tops.len() > idx {
                             let top = self.workspaces[ws_idx].tops.remove(idx);
+                            self.workspaces[ws_idx].rebuild_order();
                             self.workspaces[target_ws].tops.push(top);
+                            self.workspaces[target_ws].rebuild_order();
                             self.switch_workspace(target_ws);
                             self.do_layout();
                         }
@@ -2281,24 +2313,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // 每个 output 都渲染自己工作区的窗口（不再限制 is_primary）
                         {
                             if let Some(fi) = fullscreen {
-                                if let Some(tl) = out_ws.tops.get(fi) {
-                                    let tl_geo = smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
-                                        states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
-                                    }).unwrap_or_default();
-                                    let tl_render_pos = Point::<i32, Physical>::from((0, bar_h));
-                                    win_elems.push(
-                                        render_elements_from_surface_tree(&mut renderer, tl.wl_surface(), tl_render_pos, 1.0, 1.0, Kind::Unspecified)
-                                    );
-                                    let mut p_elems = Vec::new();
-                                    for (popup, popup_offset) in PopupManager::popups_for_surface(tl.wl_surface()) {
-                                        let offset = (tl_geo.loc + popup_offset - popup.geometry().loc)
-                                            .to_physical_precise_round(1.0);
-                                        let pos = tl_render_pos + offset;
-                                        p_elems.extend(
-                                            render_elements_from_surface_tree(&mut renderer, popup.wl_surface(), pos, 1.0, 1.0, Kind::Unspecified)
-                                        );
+                                let fs_order = out_ws.effective_order();
+                                if let Some(fs_slot) = fs_order.get(fi) {
+                                    match fs_slot {
+                                        WindowSlot::Wl(idx) => {
+                                            if let Some(tl) = out_ws.tops.get(*idx) {
+                                                let tl_geo = smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
+                                                    states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
+                                                }).unwrap_or_default();
+                                                let tl_render_pos = Point::<i32, Physical>::from((-tl_geo.loc.x, bar_h - tl_geo.loc.y));
+                                                win_elems.push(
+                                                    render_elements_from_surface_tree(&mut renderer, tl.wl_surface(), tl_render_pos, 1.0, 1.0, Kind::Unspecified)
+                                                );
+                                                let mut p_elems = Vec::new();
+                                                for (popup, popup_offset) in PopupManager::popups_for_surface(tl.wl_surface()) {
+                                                    let offset = (tl_geo.loc + popup_offset - popup.geometry().loc)
+                                                        .to_physical_precise_round(1.0);
+                                                    let pos = tl_render_pos + offset;
+                                                    p_elems.extend(
+                                                        render_elements_from_surface_tree(&mut renderer, popup.wl_surface(), pos, 1.0, 1.0, Kind::Unspecified)
+                                                    );
+                                                }
+                                                popup_elems.push(p_elems);
+                                            }
+                                        }
+                                        WindowSlot::X11(idx) => {
+                                            if let Some(xs) = out_ws.x11_surfaces.get(*idx) {
+                                                if let Some(wl) = xs.wl_surface() {
+                                                    let render_pos = Point::<i32, Physical>::from((0, bar_h));
+                                                    win_elems.push(
+                                                        render_elements_from_surface_tree(&mut renderer, &wl, render_pos, 1.0, 1.0, Kind::Unspecified)
+                                                    );
+                                                    popup_elems.push(Vec::new());
+                                                }
+                                            }
+                                        }
                                     }
-                                    popup_elems.push(p_elems);
                                 }
                             } else {
                                 // 工作区切换动画只对鼠标所在的 output 生效
@@ -2322,7 +2372,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 let tl_geo = smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
                                                     states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
                                                 }).unwrap_or_default();
-                                                let tl_render_pos = Point::<i32, Physical>::from((x + ws_offset, y));
+                                                // 减去 geometry.loc 偏移（CSD 阴影/边框），使内容区精确对齐 slot
+                                                let bx = x - tl_geo.loc.x;
+                                                let by = y - tl_geo.loc.y;
+                                                let tl_render_pos = Point::<i32, Physical>::from((bx + ws_offset, by));
                                                 win_elems.push(
                                                     render_elements_from_surface_tree(&mut renderer, tl.wl_surface(), tl_render_pos, 1.0, 1.0, Kind::Unspecified)
                                                 );
