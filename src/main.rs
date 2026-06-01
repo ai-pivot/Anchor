@@ -1494,6 +1494,27 @@ impl XdgShellHandler for App {
 impl SelectionHandler for App {
     type SelectionUserData = Arc<[u8]>;
 
+    /// Wayland 客户端设了新选区 → 代理到 X11（Wayland→X11 方向）
+    fn new_selection(
+        &mut self,
+        _ty: smithay::wayland::selection::SelectionTarget,
+        source: Option<smithay::wayland::selection::SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
+        if let Some(xwm) = self.xw.xwm.as_mut() {
+            if source.is_some() {
+                // Wayland 客户端设了选区 → 让 XWM 成为 X11 端的选区 owner
+                let mime_types = vec!["text/plain".to_string(), "UTF8_STRING".to_string()];
+                let _ = xwm.new_selection(smithay::wayland::selection::SelectionTarget::Clipboard, Some(mime_types));
+                let _ = xwm.new_selection(smithay::wayland::selection::SelectionTarget::Primary, Some(vec!["UTF8_STRING".to_string()]));
+            } else {
+                // 选区被清除
+                let _ = xwm.new_selection(smithay::wayland::selection::SelectionTarget::Clipboard, None);
+                let _ = xwm.new_selection(smithay::wayland::selection::SelectionTarget::Primary, None);
+            }
+        }
+    }
+
     fn send_selection(
         &mut self,
         _ty: smithay::wayland::selection::SelectionTarget,
@@ -1505,7 +1526,6 @@ impl SelectionHandler for App {
         let buf = user_data.clone();
         std::thread::spawn(move || {
             use std::io::Write;
-            // Clear O_NONBLOCK
             if let Err(err) = smithay::reexports::rustix::fs::fcntl_setfl(&fd, smithay::reexports::rustix::fs::OFlags::empty()) {
                 tracing::warn!("error clearing flags on selection fd: {:?}", err);
             }
@@ -2772,6 +2792,7 @@ impl smithay::xwayland::XwmHandler for App {
     fn unminimize_request(&mut self, _xwm: smithay::xwayland::xwm::XwmId, _window: smithay::xwayland::X11Surface) {}
 
     fn allow_selection_access(&mut self, _xwm: smithay::xwayland::xwm::XwmId, _selection: smithay::wayland::selection::SelectionTarget) -> bool {
+        // Wayland->X11: allow X11 clients to access Wayland selection
         true
     }
 
@@ -2779,27 +2800,34 @@ impl smithay::xwayland::XwmHandler for App {
         &mut self,
         _xwm: smithay::xwayland::xwm::XwmId,
         selection: smithay::wayland::selection::SelectionTarget,
-        mime_types: Vec<String>,
+        _mime_types: Vec<String>,
     ) {
-        tracing::debug!("X11 new selection: {:?}, types: {:?}", selection, mime_types);
-        if let Some(xwm) = self.xw.xwm.as_mut() {
-            if let Err(e) = xwm.new_selection(selection, Some(mime_types)) {
-                tracing::warn!("X11Wm new_selection failed: {:?}", e);
-            }
+        // X11->Wayland: X11 client set new selection, bridge via xclip+wl-copy
+        // NEVER call X11Wm::new_selection() here - that is Wayland->X11 direction only
+        if selection == smithay::wayland::selection::SelectionTarget::Clipboard {
+            let display = self.xdisplay.map(|d| format!(":{}", d)).unwrap_or_else(|| ":0".into());
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                let result = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(format!(
+                        "DISPLAY={} xclip -selection clipboard -o 2>/dev/null | wl-copy 2>/dev/null",
+                        display
+                    ))
+                    .output();
+                match result {
+                    Ok(out) if out.status.success() => tracing::info!("X11->Wayland clipboard bridged"),
+                    _ => {}
+                }
+            });
         }
     }
 
     fn cleared_selection(
         &mut self,
         _xwm: smithay::xwayland::xwm::XwmId,
-        selection: smithay::wayland::selection::SelectionTarget,
+        _selection: smithay::wayland::selection::SelectionTarget,
     ) {
-        tracing::debug!("X11 selection cleared: {:?}", selection);
-        if let Some(xwm) = self.xw.xwm.as_mut() {
-            if let Err(e) = xwm.new_selection(selection, None) {
-                tracing::warn!("X11Wm clear_selection failed: {:?}", e);
-            }
-        }
     }
 
         fn property_notify(
