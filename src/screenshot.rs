@@ -78,15 +78,14 @@ fn drm_ioctl(fd: RawFd, cmd: u64, arg: *mut u8) -> i32 {
     unsafe { libc::ioctl(fd, cmd, arg) }
 }
 
-/// 从 DRM 设备读取 framebuffer 像素数据
+/// 从 DRM fd 读取 framebuffer 像素数据
+/// 注意：调用方负责 dup fd，本函数不会关闭传入的 fd
 /// 返回 (width, height, pitch, pixel_data)
-fn drm_read_fb(drm_dev: &str) -> Result<(u32, u32, u32, Vec<u8>), String> {
-    let fd = unsafe { libc::open(
-        std::ffi::CString::new(drm_dev).unwrap().as_ptr(),
-        libc::O_RDWR,
-    ) };
+fn drm_read_fb(drm_fd: RawFd) -> Result<(u32, u32, u32, Vec<u8>), String> {
+    // dup fd 以避免影响调用方的 DRM 状态
+    let fd = unsafe { libc::dup(drm_fd) };
     if fd < 0 {
-        return Err(format!("无法打开 DRM 设备: {}", drm_dev));
+        return Err(format!("dup DRM fd 失败 (errno={})", unsafe { *libc::__errno_location() }));
     }
 
     // 1. 获取 DRM resources（CRTC 列表）
@@ -282,8 +281,9 @@ fn crop_rgba(rgba: &[u8], src_w: u32, src_h: u32, x: i32, y: i32, w: i32, h: i32
 }
 
 /// 执行全屏截图
+/// drm_fd: 合成器已有的 DRM 设备 fd（会被 dup，不影响原 fd）
 /// 返回 (文件路径, PNG 二进制数据)
-pub fn take_full_screenshot(drm_dev: &str) -> (String, Option<Vec<u8>>) {
+pub fn take_full_screenshot(drm_fd: RawFd) -> (String, Option<Vec<u8>>) {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -293,7 +293,7 @@ pub fn take_full_screenshot(drm_dev: &str) -> (String, Option<Vec<u8>>) {
     let _ = std::fs::create_dir_all(&dir);
     let png_path = dir.join(format!("anchor-{}.png", ts));
 
-    match do_screenshot(drm_dev, &png_path, None) {
+    match do_screenshot(drm_fd, &png_path, None) {
         Ok(png_data) => (png_path.display().to_string(), Some(png_data)),
         Err(e) => {
             tracing::warn!("Screenshot failed: {}", e);
@@ -303,8 +303,9 @@ pub fn take_full_screenshot(drm_dev: &str) -> (String, Option<Vec<u8>>) {
 }
 
 /// 执行区域截图
+/// drm_fd: 合成器已有的 DRM 设备 fd（会被 dup，不影响原 fd）
 /// 返回 (文件路径, PNG 二进制数据)
-pub fn take_area_screenshot(drm_dev: &str, x: i32, y: i32, w: i32, h: i32) -> (String, Option<Vec<u8>>) {
+pub fn take_area_screenshot(drm_fd: RawFd, x: i32, y: i32, w: i32, h: i32) -> (String, Option<Vec<u8>>) {
     let ts = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -314,7 +315,7 @@ pub fn take_area_screenshot(drm_dev: &str, x: i32, y: i32, w: i32, h: i32) -> (S
     let _ = std::fs::create_dir_all(&dir);
     let png_path = dir.join(format!("anchor-{}.png", ts));
 
-    match do_screenshot(drm_dev, &png_path, Some((x, y, w, h))) {
+    match do_screenshot(drm_fd, &png_path, Some((x, y, w, h))) {
         Ok(png_data) => (png_path.display().to_string(), Some(png_data)),
         Err(e) => {
             tracing::warn!("Area screenshot failed: {}", e);
@@ -324,8 +325,8 @@ pub fn take_area_screenshot(drm_dev: &str, x: i32, y: i32, w: i32, h: i32) -> (S
 }
 
 /// 核心截图逻辑：读 DRM FB → 转 RGBA → 可选裁剪 → 编码 PNG → 保存文件 → 返回 PNG 数据
-fn do_screenshot(drm_dev: &str, png_path: &Path, area: Option<(i32, i32, i32, i32)>) -> Result<Vec<u8>, String> {
-    let (width, height, pitch, raw) = drm_read_fb(drm_dev)?;
+fn do_screenshot(drm_fd: RawFd, png_path: &Path, area: Option<(i32, i32, i32, i32)>) -> Result<Vec<u8>, String> {
+    let (width, height, pitch, raw) = drm_read_fb(drm_fd)?;
     tracing::info!("📸 读取 framebuffer: {}x{}, pitch={}, {} bytes", width, height, pitch, raw.len());
 
     let rgba = bgr0_to_rgba(&raw, width, height, pitch);

@@ -232,6 +232,8 @@ struct App {
     xdisplay: Option<u32>,
     // 截图状态（区域选择）
     screenshot: screenshot::ScreenshotState,
+    /// DRM 设备 fd（用于截图，dup 副本）
+    drm_fd: std::os::unix::io::RawFd,
     /// EventLoop handle（用于 XWM selection 转发等需要注册临时 source 的场景）
     loop_handle: Option<smithay::reexports::calloop::LoopHandle<'static, App>>,
 }
@@ -1074,9 +1076,7 @@ impl App {
                                     // Super+Shift+P: 全屏截图直接保存+剪贴板
                                     // Super+P: 区域选择截图
                                     if mods.shift {
-                                        let drm_dev = std::env::var("TITAN_DRM_DEV")
-                                            .unwrap_or_else(|_| "/dev/dri/card0".into());
-                                        let (path, png_data) = screenshot::take_full_screenshot(&drm_dev);
+                                        let (path, png_data) = screenshot::take_full_screenshot(data.drm_fd);
                                         if path.is_empty() {
                                             data.notify("Screenshot failed");
                                         } else if let Some(png) = png_data {
@@ -1237,9 +1237,7 @@ impl App {
                         self.dirty = true;
                     } else if event.state() == ButtonState::Released {
                         if let Some((x, y, w, h)) = self.screenshot.on_release() {
-                            let drm_dev = std::env::var("TITAN_DRM_DEV")
-                                .unwrap_or_else(|_| "/dev/dri/card0".into());
-                            let (path, png_data) = screenshot::take_area_screenshot(&drm_dev, x, y, w, h);
+                            let (path, png_data) = screenshot::take_area_screenshot(self.drm_fd, x, y, w, h);
                             if path.is_empty() {
                                 self.notify("Screenshot failed");
                             } else if let Some(png) = png_data {
@@ -1940,6 +1938,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         xw: xwayland::XWaylandState::new::<App>(&dh),
         xdisplay: None,
         screenshot: screenshot::ScreenshotState::new(),
+        drm_fd: unsafe { libc::dup(dev_fd.as_raw_fd()) }, // dup for screenshot
         loop_handle: None,
     };
     let listener = ListeningSocket::bind("wayland-anchor")?;
