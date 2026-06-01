@@ -259,3 +259,12 @@ For SDDM: Create `/usr/share/wayland-sessions/anchor.desktop` with same content.
     in multi-monitor setups, and even on single-monitor setups they may
     appear behind fullscreen Wayland windows when the underlying X11
     client has been re-laid-out by a fullscreen toggle.
+20. **Screenshot clipboard needs `wl-copy` for X11 paste.** `set_data_device_selection`
+    on the compositor side only sets the Wayland `wl_data_device` selection.
+    X11 clients (Feishu, Chrome, etc.) paste via X11 `CLIPBOARD` atom +
+    `XConvertSelection`. The XWayland bridge has incomplete mime support
+    for `image/png` — X11 GTK clients frequently get empty data. The
+    reliable fix is to additionally pipe the PNG bytes through `wl-copy
+    --type image/png` (external process, async spawn), which uses
+    XFixes to set the X11 CLIPBOARD atom directly. wl-copy is
+    standard on most Wayland distros (`wl-clipboard` package).
