@@ -1494,25 +1494,30 @@ impl XdgShellHandler for App {
 impl SelectionHandler for App {
     type SelectionUserData = Arc<[u8]>;
 
-    /// Wayland 客户端设了新选区 → 代理到 X11（Wayland→X11 方向）
+    /// Wayland 客户端设了新选区 → 通过 xclip 代理到 X11（Wayland→X11 方向）
+    /// 绝不调 X11Wm::new_selection()——它会抢 X11 选区 owner，导致 X11→Wayland 的 Xfixes 事件被干扰
     fn new_selection(
         &mut self,
         _ty: smithay::wayland::selection::SelectionTarget,
-        source: Option<smithay::wayland::selection::SelectionSource>,
+        _source: Option<smithay::wayland::selection::SelectionSource>,
         _seat: Seat<Self>,
     ) {
-        if let Some(xwm) = self.xw.xwm.as_mut() {
-            if source.is_some() {
-                // Wayland 客户端设了选区 → 让 XWM 成为 X11 端的选区 owner
-                let mime_types = vec!["text/plain".to_string(), "UTF8_STRING".to_string()];
-                let _ = xwm.new_selection(smithay::wayland::selection::SelectionTarget::Clipboard, Some(mime_types));
-                let _ = xwm.new_selection(smithay::wayland::selection::SelectionTarget::Primary, Some(vec!["UTF8_STRING".to_string()]));
-            } else {
-                // 选区被清除
-                let _ = xwm.new_selection(smithay::wayland::selection::SelectionTarget::Clipboard, None);
-                let _ = xwm.new_selection(smithay::wayland::selection::SelectionTarget::Primary, None);
+        // Wayland→X11: 用 wl-paste|xclip 桥接，不干预 X11 选区 owner
+        let display = self.xdisplay.map(|d| format!(":{}", d)).unwrap_or_else(|| ":0".into());
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            let result = std::process::Command::new("sh")
+                .arg("-c")
+                .arg(format!(
+                    "wl-paste 2>/dev/null | DISPLAY={} xclip -selection clipboard -i 2>/dev/null",
+                    display
+                ))
+                .output();
+            match result {
+                Ok(out) if out.status.success() => tracing::info!("Wayland→X11 clipboard bridged"),
+                _ => {}
             }
-        }
+        });
     }
 
     fn send_selection(
