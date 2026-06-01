@@ -1135,8 +1135,11 @@ impl App {
                 let time = (event.time() / 1000) as u32;
                 let focus = self.pointer_focus();
                 let ptr = self.pointer.clone();
+                // 转为 output 局部坐标（pointer_focus 返回的 offset 也是 output 局部的）
+                let oi = self.output_at_pointer();
+                let (ox, oy, _, _) = self.output_sizes.get(oi).copied().unwrap_or_default();
                 ptr.motion(self, focus, &MotionEvent {
-                    location: Point::from((self.pointer_pos.0, self.pointer_pos.1)),
+                    location: Point::from((self.pointer_pos.0 - ox as f64, self.pointer_pos.1 - oy as f64)),
                     serial,
                     time,
                 });
