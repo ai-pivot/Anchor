@@ -147,6 +147,8 @@ struct App {
     ws_anim: WsAnimation,
     // 窗口布局动画（macOS 风格）
     layout_anim: LayoutAnimation,
+    /// 上一次 layout_workspace 的 slot 位置（动画起点，在每次 layout 后更新）
+    prev_slots: Vec<(i32, i32)>,
     // 多显示器尺寸信息（用于鼠标穿越）
     output_sizes: Vec<(i32, i32, i32, i32)>, // (x, y, w, h) per output
     /// 每个 output 当前活跃的工作区索引（独立切换）
@@ -496,6 +498,15 @@ impl App {
                 }
             }
         }
+
+        // 保存本次 layout 的 slot 位置（供下次动画使用）
+        if ws_idx == self.active_ws {
+            let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
+            self.prev_slots = (0..n).map(|i| {
+                let (x, y, _, _) = layout::slot(i, n, self.osize.w, self.osize.h, bar_h, &self.cfg, self.workspaces[ws_idx].layout, self.workspaces[ws_idx].split);
+                (x, y)
+            }).collect();
+        }
     }
 
     fn do_layout(&mut self) {
@@ -503,25 +514,14 @@ impl App {
     }
 
     /// 触发布局动画 + 重新布局
-    /// 在调用此方法前，必须已经确定了窗口变化（add/remove/move/layout change）
     fn do_layout_animated(&mut self) {
-        // 记录当前 slot 位置（动画起点）
-        let ws = &self.workspaces[self.active_ws];
-        let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
-        let order = ws.effective_order();
-        let n = order.len();
-        let old_slots: Vec<(i32, i32)> = if n > 0 {
-            (0..n).map(|i| {
-                layout::slot(i, n, self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split)
-            }).map(|(x, y, _, _)| (x, y)).collect()
-        } else {
-            Vec::new()
-        };
+        // 使用上次 layout 保存的位置作为动画起点（mutation 之前的位置）
+        let old_slots = self.prev_slots.clone();
 
         // 执行布局
         self.layout_workspace(self.active_ws);
 
-        // 启动动画
+        // 启动动画（old_slots 是变化前的位置）
         if !old_slots.is_empty() {
             self.layout_anim.begin(&old_slots);
             self.dirty = true;
@@ -1920,6 +1920,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         launcher: LauncherState::new(),
         ws_anim: WsAnimation { start: None, from_ws: 0, to_ws: 0, duration_ms: 200, direction: 0 },
         layout_anim: LayoutAnimation::new(),
+        prev_slots: Vec::new(),
         output_sizes: vec![],
         output_active_ws: vec![],
         focused_output: 0,
