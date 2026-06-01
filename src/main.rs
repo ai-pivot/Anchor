@@ -747,68 +747,82 @@ impl App {
     }
 
     /// 将当前焦点窗口移动到目标工作区，然后跟随窗口切换到目标工作区
+    /// 支持 Wayland (tops) 和 X11 (x11_surfaces) 窗口
     fn move_window_to_workspace(&mut self, target: usize) {
         if target >= NUM_WORKSPACES { return; }
         let out_idx = self.focused_output;
-        if target == self.output_active_ws.get(out_idx).copied().unwrap_or(0) { return; }
+        let ws_idx = self.output_active_ws.get(out_idx).copied().unwrap_or(0);
+        if target == ws_idx { return; }
         let fi = match self.focus_idx() {
             Some(i) => i,
             None => return,
         };
 
-        let ws_idx = self.output_active_ws.get(out_idx).copied().unwrap_or(0);
-
-        let tl = match self.workspaces[ws_idx].tops.get(fi) {
-            Some(tl) => tl.clone(),
+        let order = self.workspaces[ws_idx].effective_order();
+        let slot = match order.get(fi) {
+            Some(s) => s.clone(),
             None => return,
         };
-        let surf = tl.wl_surface().clone();
 
-        info!("📦 移动窗口 #{} → 工作区 {}", fi + 1, target + 1);
+        // 1. 先 clone 窗口（在 remove 之前）
+        let surf = match &slot {
+            WindowSlot::Wl(idx) => self.workspaces[ws_idx].tops.get(*idx).map(|tl| tl.wl_surface().clone()),
+            WindowSlot::X11(idx) => self.workspaces[ws_idx].x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()),
+        };
+        let surf = match surf {
+            Some(s) => s,
+            None => return,
+        };
 
-        // 从当前工作区移除
-        self.workspaces[ws_idx].tops.remove(fi);
-        if let Some(fs) = self.workspaces[ws_idx].fullscreen {
-            if fs == fi { self.workspaces[ws_idx].fullscreen = None; }
-            else if fs > fi { self.workspaces[ws_idx].fullscreen = Some(fs - 1); }
+        info!("📦 移动窗口 slot {:?} (order #{}) → 工作区 {}", slot, fi, target + 1);
+
+        // 2. 从源工作区移除窗口
+        match &slot {
+            WindowSlot::Wl(idx) => { self.workspaces[ws_idx].tops.remove(*idx); }
+            WindowSlot::X11(idx) => { self.workspaces[ws_idx].x11_surfaces.remove(*idx); }
         }
-        if self.workspaces[ws_idx].focus.as_ref() == Some(&surf) {
-            self.workspaces[ws_idx].focus = self.workspaces[ws_idx].tops.last()
-                .map(|t| t.wl_surface().clone());
+        self.workspaces[ws_idx].rebuild_order();
+        self.workspaces[ws_idx].fullscreen = None;
+
+        // 更新源工作区焦点
+        {
+            let src_order = self.workspaces[ws_idx].effective_order();
+            self.workspaces[ws_idx].focus = src_order.last().and_then(|s| match s {
+                WindowSlot::Wl(idx) => self.workspaces[ws_idx].tops.get(*idx).map(|tl| tl.wl_surface().clone()),
+                WindowSlot::X11(idx) => self.workspaces[ws_idx].x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()),
+            });
         }
 
-        // 添加到目标工作区
-        self.workspaces[target].tops.push(tl.clone());
+        // 3. 添加到目标工作区
         self.workspaces[target].focus = Some(surf.clone());
+        self.workspaces[target].rebuild_order();
 
-        // 重新布局源工作区（移除窗口后）
+        // 4. 布局源工作区
         self.active_ws = ws_idx;
         self.do_layout();
 
-        // 布局目标工作区（新窗口加入后需要重新计算位置）
+        // 布局目标工作区
         self.layout_workspace(target);
 
-        // 如果目标工作区已经在某个 output 上显示，把鼠标移过去
-        // 如果不在任何 output 上，切换当前 output 到目标工作区
+        // 5. 切换到目标工作区
         let target_output = self.output_active_ws.iter().position(|&ws| ws == target);
         if let Some(t_oi) = target_output {
-            // 目标工作区已在 output t_oi 上显示，移鼠标过去
             let (ox, oy, ow, oh) = self.output_sizes.get(t_oi).copied().unwrap_or_default();
             self.pointer_pos = (ox as f64 + ow as f64 / 2.0, oy as f64 + oh as f64 / 2.0);
             self.focused_output = t_oi;
             self.active_ws = target;
         } else {
-            // 目标工作区没在任何 output 上，切换当前 output
             self.switch_workspace(target);
         }
 
-        // 设置焦点
+        // 6. 设置焦点
         let kbd = self.kbd.clone();
         let serial = SERIAL_COUNTER.next_serial();
         kbd.set_focus(self, Some(surf), serial);
         self.notify(format!("Moved → WS {}", target + 1));
         self.dirty = true;
     }
+
 
     /// 用方向键切换焦点窗口（Super+方向键）
     fn focus_direction(&mut self, direction: Keysym) {
@@ -1462,7 +1476,30 @@ impl XdgShellHandler for App {
     }
 }
 
-impl SelectionHandler for App { type SelectionUserData = (); }
+impl SelectionHandler for App {
+    type SelectionUserData = Arc<[u8]>;
+
+    fn send_selection(
+        &mut self,
+        _ty: smithay::wayland::selection::SelectionTarget,
+        _mime_type: String,
+        fd: std::os::unix::io::OwnedFd,
+        _seat: Seat<Self>,
+        user_data: &Self::SelectionUserData,
+    ) {
+        let buf = user_data.clone();
+        std::thread::spawn(move || {
+            use std::io::Write;
+            // Clear O_NONBLOCK
+            if let Err(err) = smithay::reexports::rustix::fs::fcntl_setfl(&fd, smithay::reexports::rustix::fs::OFlags::empty()) {
+                tracing::warn!("error clearing flags on selection fd: {:?}", err);
+            }
+            if let Err(err) = std::fs::File::from(fd).write_all(&buf) {
+                tracing::warn!("error writing selection: {:?}", err);
+            }
+        });
+    }
+}
 impl DataDeviceHandler for App { fn data_device_state(&self) -> &DataDeviceState { &self.dd } }
 impl PrimarySelectionHandler for App {
     fn primary_selection_state(&self) -> &PrimarySelectionState { &self.primary_sel }
@@ -2656,17 +2693,13 @@ impl smithay::xwayland::XwmHandler for App {
         mime_type: String,
         fd: std::os::unix::io::OwnedFd,
     ) {
-        // Wayland 客户端请求 X11 选区数据 → 转发给 X11Wm 从 X11 获取
-        if let (Some(xwm), Some(loop_handle)) = (self.xw.xwm.as_mut(), self.loop_handle.as_ref()) {
-            if let Err(e) = xwm.send_selection::<App>(
-                selection,
-                mime_type,
-                fd,
-                loop_handle.clone(),
-            ) {
-                tracing::warn!("X11 selection send failed: {:?}", e);
-            }
-        }
+        // X11 客户端请求 Wayland 选区 → 通过 DataDevice 获取数据写入 fd
+        use smithay::wayland::selection::data_device::request_data_device_client_selection;
+        request_data_device_client_selection::<App>(
+            &self.seat,
+            mime_type,
+            fd,
+        );
     }
 
     fn maximize_request(&mut self, _xwm: smithay::xwayland::xwm::XwmId, window: smithay::xwayland::X11Surface) {
@@ -2724,24 +2757,34 @@ impl smithay::xwayland::XwmHandler for App {
     fn unminimize_request(&mut self, _xwm: smithay::xwayland::xwm::XwmId, _window: smithay::xwayland::X11Surface) {}
 
     fn allow_selection_access(&mut self, _xwm: smithay::xwayland::xwm::XwmId, _selection: smithay::wayland::selection::SelectionTarget) -> bool {
-        // TODO: 需要 SelectionUserData 存储选区数据才能实现 Wayland→X11 转发
-        // 暂时返回 false 避免飞书等 X11 应用启动时 panic
-        false
+        true
     }
 
     fn new_selection(
         &mut self,
         _xwm: smithay::xwayland::xwm::XwmId,
-        _selection: smithay::wayland::selection::SelectionTarget,
-        _mime_types: Vec<String>,
+        selection: smithay::wayland::selection::SelectionTarget,
+        mime_types: Vec<String>,
     ) {
+        tracing::debug!("X11 new selection: {:?}, types: {:?}", selection, mime_types);
+        if let Some(xwm) = self.xw.xwm.as_mut() {
+            if let Err(e) = xwm.new_selection(selection, Some(mime_types)) {
+                tracing::warn!("X11Wm new_selection failed: {:?}", e);
+            }
+        }
     }
 
     fn cleared_selection(
         &mut self,
         _xwm: smithay::xwayland::xwm::XwmId,
-        _selection: smithay::wayland::selection::SelectionTarget,
+        selection: smithay::wayland::selection::SelectionTarget,
     ) {
+        tracing::debug!("X11 selection cleared: {:?}", selection);
+        if let Some(xwm) = self.xw.xwm.as_mut() {
+            if let Err(e) = xwm.new_selection(selection, None) {
+                tracing::warn!("X11Wm clear_selection failed: {:?}", e);
+            }
+        }
     }
 
         fn property_notify(
