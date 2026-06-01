@@ -24,8 +24,8 @@ pub fn render_launcher(
     let lx = (ow - lw) / 2;
     let ly = bar_h + 24;
 
-    // ── 全屏暗色遮罩（深蓝灰，非纯黑 — 能隐约看到壁纸色调）──
-    f.clear(opaque(0.05, 0.05, 0.08), &[rect(0, bar_h, ow, oh - bar_h)]).ok();
+    // ── 不清除全屏！壁纸和窗口已渲染好，直接在上面叠加面板 ──
+    // 桌面内容透过来就是"毛玻璃"效果（无需真正的模糊）
 
     // ── 面板背景（比遮罩略亮，明显可见的深蓝）──
     f.clear(opaque(0.10, 0.10, 0.16), &[rect(lx, ly, lw, lh)]).ok();

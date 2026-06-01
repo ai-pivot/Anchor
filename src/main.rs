@@ -202,7 +202,7 @@ struct LayoutAnimation {
 
 impl LayoutAnimation {
     fn new() -> Self {
-        Self { start: None, duration_ms: 250, old_slots: Vec::new() }
+        Self { start: None, duration_ms: 350, old_slots: Vec::new() }
     }
 
     /// 开始动画：记录当前 slot 位置
@@ -515,15 +515,28 @@ impl App {
 
     /// 触发布局动画 + 重新布局
     fn do_layout_animated(&mut self) {
-        // 使用上次 layout 保存的位置作为动画起点（mutation 之前的位置）
+        // 使用上次 layout 保存的位置作为动画起点
         let old_slots = self.prev_slots.clone();
 
         // 执行布局
         self.layout_workspace(self.active_ws);
 
-        // 启动动画（old_slots 是变化前的位置）
-        if !old_slots.is_empty() {
-            self.layout_anim.begin(&old_slots);
+        // 为新窗口填充假的旧位置（从底部滑入），保证所有窗口都有动画
+        let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
+        let mut anim_slots = old_slots;
+        let n_new = self.prev_slots.len(); // layout_workspace 刚更新了 prev_slots
+        if anim_slots.len() < n_new {
+            // 新增的窗口：旧位置设为屏幕底部（从下方滑入）
+            for i in anim_slots.len()..n_new {
+                let (new_x, _new_y, _w, h) = layout::slot(i, n_new, self.osize.w, self.osize.h, bar_h, &self.cfg, self.workspaces[self.active_ws].layout, self.workspaces[self.active_ws].split);
+                // 从 slot 底部下方 80px 的位置开始
+                anim_slots.push((new_x, _new_y + h + 80));
+            }
+        }
+
+        // 启动动画
+        if !anim_slots.is_empty() {
+            self.layout_anim.begin(&anim_slots);
             self.dirty = true;
         }
     }
