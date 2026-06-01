@@ -2467,29 +2467,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 use smithay::backend::allocator::Fourcc;
                                 use smithay::backend::renderer::Renderer;
                                 let region = Rectangle::from_size((ow, oh).into());
-                                match renderer.copy_framebuffer(&target, region, Fourcc::Xrgb8888) {
+                                // 关键：使用 Abgr8888 而非 Xrgb8888。
+                                // Abgr8888 在 little-endian 内存中 = R,G,B,A 字节序（RGBA），
+                                // 避免 XRGB 格式的 BGR/RGB 字节序歧义。
+                                // 同时 GlesRenderer 会自动做 Y-flip（bottom-up → top-down），
+                                // 所以这里不再做行反转。
+                                match renderer.copy_framebuffer(&target, region, Fourcc::Abgr8888) {
                                     Ok(mapping) => {
                                         match renderer.map_texture(&mapping) {
                                             Ok(pixels) => {
                                                 let w = ow as u32;
                                                 let h = oh as u32;
                                                 let row_len = w as usize * 4;
-                                                // OpenGL ReadPixels bottom-up → 翻转为 top-down
-                                                // XRGB8888 内存布局: B,G,R,X → 转 RGBA
+                                                // Abgr8888 little-endian = R,G,B,A 像素序
                                                 let mut rgba = Vec::with_capacity(pixels.len());
-                                                for row in (0..h as usize).rev() {
+                                                for row in 0..h as usize {
                                                     let start = row * row_len;
                                                     let end = start + row_len;
                                                     if end <= pixels.len() {
-                                                        for px in (start..end).step_by(4) {
-                                                            let b = pixels[px];
-                                                            let g = pixels[px + 1];
-                                                            let r = pixels[px + 2];
-                                                            rgba.push(r);
-                                                            rgba.push(g);
-                                                            rgba.push(b);
-                                                            rgba.push(255); // alpha
-                                                        }
+                                                        // 字节序: R,G,B,A → R,G,B,A (无需翻转)
+                                                        rgba.extend_from_slice(&pixels[start..end]);
                                                     }
                                                 }
                                                 let result = screenshot::save_screenshot(&rgba, w, h, area);
