@@ -433,6 +433,7 @@ impl App {
                         if let Some(tl) = self.workspaces[ws_idx].tops.get(*idx) {
                             tl.with_pending_state(|st| {
                                 st.states.set(xdg_toplevel::State::Activated);
+                                st.states.unset(xdg_toplevel::State::Fullscreen);
                                 st.size = Some((w, h).into());
                             });
                             tl.send_configure();
@@ -2621,6 +2622,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             // 锁屏动画需要持续重绘（frame 驱动动画，必须保证 dirty 始终为 true）
             if state.lock_state.locked {
+                // 轮询异步 PAM 结果（无结果时为 no-op）
+                state.lock_state.poll_unlock();
                 state.dirty = true;
             }
             state.frame += 1;

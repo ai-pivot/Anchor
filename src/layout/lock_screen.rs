@@ -49,7 +49,8 @@ fn render_lock_bg(
     elapsed: f32, style: u8, brightness_scale: f32,
 ) {
     // 基于 elapsed 的动画时间，使用整数帧计数保持 hash_rand 确定性
-    let t = elapsed;
+    // 速度系数 0.7：旧代码 t = frame * 0.012，60fps 时 t 每秒增加 0.72
+    let t = elapsed * 0.7;
     let frame = (elapsed * 60.0) as u32; // 假设 60fps 基准的虚拟帧计数（用于确定性随机）
 
     match style {
@@ -117,7 +118,7 @@ fn render_lock_bg(
                 }
             }
             // 扫描线（基于时间的平滑移动）
-            let scan_y = (elapsed * 120.0) as i32 % oh;
+            let scan_y = (elapsed * 84.0) as i32 % oh;
             let b = 0.30 * brightness_scale;
             f.clear(opaque(accent.0 * b, accent.1 * b, accent.2 * b),
                 &[rect(0, scan_y, ow, 3)]).ok();
@@ -160,7 +161,7 @@ fn render_lock_bg(
                 f.clear(opaque(accent.0 * b2, accent.1 * b2, accent.2 * b2), &dots).ok();
             }
             // 垂直扫描线（来回，基于时间）
-            let scan_raw = (elapsed * 180.0) as i32 % (ow * 2);
+            let scan_raw = (elapsed * 126.0) as i32 % (ow * 2);
             let scan_x = if scan_raw > ow { ow * 2 - scan_raw } else { scan_raw };
             let sb = 0.40 * brightness_scale;
             // 扫描线本体

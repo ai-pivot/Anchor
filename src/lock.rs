@@ -2,12 +2,20 @@
 //!
 //! Manages the lock screen UI state: password input, PAM verification,
 //! shake animation on wrong password, and random style selection.
+//! PAM verification runs on a background thread to avoid blocking the compositor.
 
 use crate::auth;
+use std::sync::{Arc, Mutex};
 use tracing::info;
 
 /// Random lock screen style count (0..STYLE_COUNT).
 const STYLE_COUNT: u8 = 5;
+
+/// Shared auth result between compositor thread and PAM thread.
+struct AuthResult {
+    done: bool,
+    success: bool,
+}
 
 /// Lock screen state, held inside `App`.
 pub struct LockState {
@@ -23,6 +31,8 @@ pub struct LockState {
     pub wrong: bool,
     /// Random visual style index (0..STYLE_COUNT).
     pub style: u8,
+    /// Pending async PAM verification result.
+    auth_result: Option<Arc<Mutex<AuthResult>>>,
 }
 
 impl LockState {
@@ -34,6 +44,7 @@ impl LockState {
             shake: None,
             wrong: false,
             style: 0,
+            auth_result: None,
         }
     }
 
@@ -45,6 +56,7 @@ impl LockState {
         self.time = Some(std::time::Instant::now());
         self.wrong = false;
         self.shake = None;
+        self.auth_result = None;
         // Random style selection using multiple entropy sources
         self.style = (std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -55,25 +67,58 @@ impl LockState {
             % STYLE_COUNT;
     }
 
-    /// Attempt to unlock with the current input buffer.
-    /// Returns `true` if successfully unlocked.
-    pub fn try_unlock(&mut self) -> bool {
+    /// Check if async PAM verification has completed.
+    /// Returns Some(true) if unlocked, Some(false) if wrong password, None if still pending.
+    pub fn poll_unlock(&mut self) -> Option<bool> {
+        let result = self.auth_result.as_ref()?;
+        let guard = result.lock().unwrap();
+        if guard.done {
+            let success = guard.success;
+            drop(guard);
+            self.auth_result = None;
+            if success {
+                info!("🔓 Screen unlocked (async PAM)");
+                self.locked = false;
+                self.input.clear();
+                self.wrong = false;
+                self.shake = None;
+            } else {
+                info!("🔒 Wrong password (async PAM)");
+                self.input.clear();
+                self.wrong = true;
+                self.shake = Some(std::time::Instant::now());
+            }
+            Some(success)
+        } else {
+            None
+        }
+    }
+
+    /// Returns true if a PAM verification is currently in progress.
+    pub fn is_authenticating(&self) -> bool {
+        self.auth_result.is_some()
+    }
+
+    /// Attempt to unlock with the current input buffer (async).
+    /// Starts PAM verification on a background thread.
+    pub fn try_unlock(&mut self) {
+        // Don't start another auth if one is already pending
+        if self.auth_result.is_some() {
+            return;
+        }
         let username = std::env::var("USER").unwrap_or_default();
         let password = self.input.clone();
-        if auth::verify_password(&username, &password) {
-            info!("🔓 Screen unlocked");
-            self.locked = false;
-            self.input.clear();
-            self.wrong = false;
-            self.shake = None;
-            true
-        } else {
-            info!("🔒 Wrong password");
-            self.input.clear();
-            self.wrong = true;
-            self.shake = Some(std::time::Instant::now());
-            false
-        }
+        let result = Arc::new(Mutex::new(AuthResult {
+            done: false,
+            success: false,
+        }));
+        self.auth_result = Some(result.clone());
+        std::thread::spawn(move || {
+            let success = auth::verify_password(&username, &password);
+            let mut guard = result.lock().unwrap();
+            guard.done = true;
+            guard.success = success;
+        });
     }
 
     /// Handle backspace during lock screen input.
