@@ -227,3 +227,12 @@ For SDDM: Create `/usr/share/wayland-sessions/anchor.desktop` with same content.
 15. **Screenshot must run after `f.finish()` but before `drop(target)`.** The framebuffer
     is only complete after finish, and target must still be alive for `copy_framebuffer`.
     Needs `use smithay::backend::renderer::Renderer` in scope for the trait method.
+16. **Fullscreen must be a hard input boundary.** When `ws.fullscreen` is set, `pointer_focus`
+    MUST return early at the fullscreen branch and never fall through to non-fullscreen
+    hit-test or `ws.focus` fallback. Otherwise, if `ws.focus` still points to a
+    non-fullscreen window (because `toggle_fullscreen` didn't update it), pointer events
+    will "leak through" the fullscreen window to the underlying window — appearing as
+    mouse events reaching the wrong client. Always sync `ws.focus = fullscreen_surface`
+    when entering fullscreen (both Wayland `toggle_fullscreen` and X11 `fullscreen_request`).
+    The pointer_focus fullscreen branch must `return None` (not fall through) when the
+    fullscreen slot is invalid, to prevent the same leak.
