@@ -2726,12 +2726,28 @@ impl smithay::xwayland::XwmHandler for App {
     fn new_selection(
         &mut self,
         _xwm: smithay::xwayland::xwm::XwmId,
-        _selection: smithay::wayland::selection::SelectionTarget,
+        selection: smithay::wayland::selection::SelectionTarget,
         _mime_types: Vec<String>,
     ) {
-        // X11 客户端设置了新选区
-        // TODO: 正确的 X11→Wayland 转发需要创建 SelectionSource 通过 Wayland data device 广播
-        // 不能调 xwm.new_selection()，那是 Wayland→X11 方向（会让 XWM 抢占选区 owner）
+        // X11 客户端设置了新选区 → 通过 xclip + wl-copy 桥接到 Wayland 剪贴板
+        if selection == smithay::wayland::selection::SelectionTarget::Clipboard {
+            let display = self.xdisplay.map(|d| format!(":{}", d)).unwrap_or_else(|| ":0".into());
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                let result = std::process::Command::new("sh")
+                    .arg("-c")
+                    .arg(format!(
+                        "DISPLAY={} xclip -selection clipboard -t text/plain -o 2>/dev/null | wl-copy -t text/plain 2>/dev/null",
+                        display
+                    ))
+                    .output();
+                if let Ok(output) = result {
+                    if output.status.success() {
+                        tracing::info!("📋 X11→Wayland clipboard bridge OK");
+                    }
+                }
+            });
+        }
     }
 
     fn cleared_selection(
