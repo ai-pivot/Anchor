@@ -12,6 +12,7 @@ mod wallpaper;
 mod cursor;
 mod notify;
 mod xwayland;
+mod screenshot;
 
 use std::{
     os::unix::io::OwnedFd,
@@ -221,6 +222,8 @@ struct App {
     xw: xwayland::XWaylandState,
     /// XWayland display number (e.g. 1 for :1), set when XWayland becomes ready
     xdisplay: Option<u32>,
+    // 截图状态（区域选择）
+    screenshot: screenshot::ScreenshotState,
 }
 
 /// 工作区切换动画状态
@@ -802,6 +805,15 @@ impl App {
                 let _ = smithay::input::keyboard::KeyboardHandle::<Self>::input(
                     &kbd, self, keycode, state, serial, time,
                     |data: &mut App, mods: &ModifiersState, keysym: smithay::input::keyboard::KeysymHandle<'_>| {
+                        // ── 截图区域选择模式键盘处理 ──
+                        if data.screenshot.selecting && state == KeyState::Pressed {
+                            let sym = keysym.modified_sym();
+                            if sym == Keysym::Escape {
+                                data.screenshot.cancel();
+                                data.dirty = true;
+                                return FilterResult::Intercept(());
+                            }
+                        }
                         // ── 启动器模式键盘处理 ──
                         if data.launcher_visible && state == KeyState::Pressed {
                             let sym = keysym.modified_sym();
@@ -905,24 +917,23 @@ impl App {
                                 }
                                 Keysym::f => { data.toggle_fullscreen(); return FilterResult::Intercept(()); }
                                 Keysym::p => {
-                                    // 内置截图
-                                    let ts = std::time::SystemTime::now()
-                                        .duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-                                    let home = std::env::var("HOME").unwrap_or_else(|_| "/tmp".into());
-                                    let dir = std::path::PathBuf::from(format!("{}/Pictures/Screenshots", home));
-                                    let _ = std::fs::create_dir_all(&dir);
-                                    let path = dir.join(format!("anchor-{}.raw", ts));
-                                    let exe = std::env::current_exe().unwrap_or_default();
-                                    let project_dir = exe.parent().and_then(|p| p.parent())
-                                        .map(|p| p.display().to_string())
-                                        .unwrap_or_else(|| ".".into());
-                                    let dump_tool = format!("{}/scripts/drm-dump-fb", project_dir);
-                                    // 截图使用的 DRM 设备
-                                    let drm_dev = std::env::var("TITAN_DRM_DEV")
-                                        .unwrap_or_else(|_| "/dev/dri/card0".into());
-                                    let args = format!("timeout 3 {} {} {}", dump_tool, drm_dev, path.display());
-                                    std::process::Command::new("sh").arg("-c").arg(&args).spawn().ok();
-                                    data.notify("Screenshot saved");
+                                    // Super+Shift+P: 全屏截图直接保存+剪贴板
+                                    // Super+P: 区域选择截图
+                                    if mods.shift {
+                                        let drm_dev = std::env::var("TITAN_DRM_DEV")
+                                            .unwrap_or_else(|_| "/dev/dri/card0".into());
+                                        let path = screenshot::take_full_screenshot(&drm_dev);
+                                        if path.is_empty() {
+                                            data.notify("Screenshot failed");
+                                        } else {
+                                            data.notify("Screenshot saved & copied");
+                                        }
+                                    } else {
+                                        // 进入区域选择模式
+                                        data.screenshot.begin_selection();
+                                        data.notify("Select area (drag to select, Esc to cancel)");
+                                        data.dirty = true;
+                                    }
                                     return FilterResult::Intercept(());
                                 }
                                 Keysym::grave => {
@@ -1017,6 +1028,13 @@ impl App {
                 }
                 self.pointer_pos.1 = self.pointer_pos.1.clamp(0.0, screen_h - 1.0);
 
+                // 截图区域选择模式：更新选择终点
+                if self.screenshot.selecting {
+                    self.screenshot.on_motion(self.pointer_pos.0, self.pointer_pos.1);
+                    self.dirty = true;
+                    return;
+                }
+
                 // 转发给客户端
                 let serial = SERIAL_COUNTER.next_serial();
                 let time = (event.time() / 1000) as u32;
@@ -1032,6 +1050,29 @@ impl App {
                 self.dirty = true;
             }
             InputEvent::PointerButton { event } => {
+                // 截图区域选择模式：按下记录起点，释放完成截图
+                if self.screenshot.selecting {
+                    if event.state() == ButtonState::Pressed {
+                        self.screenshot.on_press(self.pointer_pos.0, self.pointer_pos.1);
+                        self.dirty = true;
+                    } else if event.state() == ButtonState::Released {
+                        if let Some((x, y, w, h)) = self.screenshot.on_release() {
+                            let drm_dev = std::env::var("TITAN_DRM_DEV")
+                                .unwrap_or_else(|_| "/dev/dri/card0".into());
+                            let path = screenshot::take_area_screenshot(&drm_dev, x, y, w, h);
+                            if path.is_empty() {
+                                self.notify("Screenshot failed");
+                            } else {
+                                self.notify("Area screenshot saved & copied");
+                            }
+                        } else {
+                            self.notify("Selection too small, cancelled");
+                        }
+                        self.dirty = true;
+                    }
+                    return; // 截图模式中拦截所有鼠标点击
+                }
+
                 // 点击聚焦（仅 Press 时）
                 if event.state() == ButtonState::Pressed {
                     let px = self.pointer_pos.0 as i32;
@@ -1723,6 +1764,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         output_sizes,
         xw: xwayland::XWaylandState::new::<App>(&dh),
         xdisplay: None,
+        screenshot: screenshot::ScreenshotState::new(),
     };
     let listener = ListeningSocket::bind("wayland-anchor")?;
     std::env::set_var("WAYLAND_DISPLAY", "wayland-anchor");
@@ -2176,6 +2218,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let cx = state.pointer_pos.0 as i32 - state.cursor_img.hotspot_x as i32;
                             let cy = state.pointer_pos.1 as i32 - state.cursor_img.hotspot_y as i32;
                             state.cursor_img.render_batched(&mut f, cx, cy);
+                        }
+
+                        // Step 9: Screenshot area selection overlay
+                        if is_primary && state.screenshot.selecting {
+                            if let Some(rect) = state.screenshot.selection_rect() {
+                                screenshot::render_selection_overlay(&mut f, ow, oh, rect);
+                            }
                         }
 
                         let sync = f.finish()?;
