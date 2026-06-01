@@ -19,11 +19,22 @@ pub fn render_headbar(
     active_workspace: usize, total_workspaces: usize,
     workspace_window_counts: &[usize],
     cpu_usage: f32, mem_usage: f32,
+    recording: bool,
 ) {
     if !cfg.bar.enabled { return; }
     let h = cfg.bar.height;
 
     let accent = parse_color(&cfg.colors.focus_border);
+
+    // ── 录制指示器（红色闪烁圆点）──
+    if recording {
+        let blink = (time_secs % 2) == 0;
+        if blink {
+            f.clear(opaque(0.9, 0.15, 0.15), &[rect(ow / 2 + 60, h / 2 - 4, 8, 8)]).ok();
+        }
+        text_render::draw_text(f, "REC", ow / 2 + 72, h / 2 - 8, 13.0,
+            (0.9, 0.3, 0.3));
+    }
 
     // ── 背景 ──
     f.clear(opaque(0.03, 0.03, 0.06), &[smithay::utils::Rectangle::from_size(Size::new(ow, h))]).ok();

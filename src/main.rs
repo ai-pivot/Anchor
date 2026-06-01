@@ -12,6 +12,7 @@ mod cursor;
 mod notify;
 mod xwayland;
 mod screenshot;
+mod record;
 mod auth;
 mod workspace;
 use workspace::{Workspace, WindowSlot, NUM_WORKSPACES};
@@ -153,6 +154,8 @@ struct App {
     launcher_blur_tex: Option<smithay::backend::renderer::gles::GlesTexture>,
     /// 毛玻璃纹理尺寸
     launcher_blur_size: (u32, u32),
+    // 屏幕录制
+    record_state: record::RecordState,
     // 多显示器尺寸信息（用于鼠标穿越）
     output_sizes: Vec<(i32, i32, i32, i32)>, // (x, y, w, h) per output
     /// 每个 output 当前活跃的工作区索引（独立切换）
@@ -1181,6 +1184,20 @@ impl App {
                                     }
                                     return FilterResult::Intercept(());
                                 }
+                                Keysym::r => {
+                                    // Super+R: 开始/停止屏幕录制
+                                    if data.record_state.recording {
+                                        data.record_state.stop();
+                                        data.notify("Recording stopped");
+                                    } else {
+                                        data.record_state.start(data.osize.w as u32, (data.osize.h - data.cfg.bar.height) as u32);
+                                        if data.record_state.recording {
+                                            data.notify("Recording started (Super+R to stop)");
+                                        }
+                                    }
+                                    data.dirty = true;
+                                    return FilterResult::Intercept(());
+                                }
                                 Keysym::grave => {
                                     // Scratchpad: 切换下拉终端
                                     let msg = data.scratchpad.toggle(&data.cfg.terminal.command, data.xdisplay);
@@ -2052,6 +2069,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         prev_positions: Vec::new(),
         launcher_blur_tex: None,
         launcher_blur_size: (1, 1),
+        record_state: record::RecordState::new(),
         output_sizes: vec![],
         output_active_ws: vec![],
         focused_output: 0,
@@ -2747,7 +2765,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Step 5: Headbar — 每个 output 显示自己的活跃工作区
                         {
                             let ws_counts: Vec<usize> = state.workspaces.iter().map(|w| w.tops.len() + w.x11_surfaces.len()).collect();
-                            layout::render_headbar(&mut f, &state.cfg, ow, oh, n_windows, out_ws_focus_idx, time_secs, &out_window_title, out_ws_idx, NUM_WORKSPACES, &ws_counts, state.cpu_usage, state.mem_usage);
+                            layout::render_headbar(&mut f, &state.cfg, ow, oh, n_windows, out_ws_focus_idx, time_secs, &out_window_title, out_ws_idx, NUM_WORKSPACES, &ws_counts, state.cpu_usage, state.mem_usage, state.record_state.recording);
                         }
 
                         // Step 6: Notifications — 只在鼠标所在的 output 上显示
@@ -2758,8 +2776,29 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             layout::render_notifications(&mut f, &notif_data, ow, state.cfg.bar.height, accent);
                         }
 
-                        // Step 7: Launcher — 只在鼠标所在的 output 上显示
+                        // Step 7: Launcher — 毛玻璃全屏覆盖 + 面板 UI
                         if is_focused_output && state.launcher.visible {
+                            // 毛玻璃全屏覆盖（包括面板 + 外部区域）
+                            if let Some(ref blur_tex) = state.launcher_blur_tex {
+                                // 全屏模糊背景
+                                let _ = f.render_texture_from_to(
+                                    blur_tex,
+                                    Rectangle::from_size(Size::from((state.launcher_blur_size.0 as f64, state.launcher_blur_size.1 as f64))),
+                                    Rectangle::from_loc_and_size((0, bar_h), (ow, oh - bar_h)),
+                                    &[Rectangle::from_loc_and_size((0, bar_h), (ow, oh - bar_h))],
+                                    &[Rectangle::from_loc_and_size((0, bar_h), (ow, oh - bar_h))],
+                                    Transform::Normal,
+                                    1.0,
+                                    None,
+                                    &[],
+                                );
+                            } else {
+                                // 第一帧 fallback: 全屏深色覆盖
+                                f.clear(layout::opaque(0.06, 0.06, 0.10),
+                                    &[layout::rect(0, bar_h, ow, oh - bar_h)]).ok();
+                            }
+
+                            // 面板本体: 深色半透明背景（比毛玻璃稍暗，文字可读）
                             let filtered = state.launcher.filtered();
                             let lw = ow * 3 / 4;
                             let max_items = 12usize;
@@ -2769,24 +2808,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let lh = header_h + (n_items as i32) * item_h + 20;
                             let lx = (ow - lw) / 2;
                             let ly = bar_h + 24;
+                            f.clear(layout::opaque(0.10, 0.10, 0.16),
+                                &[layout::rect(lx, ly, lw, lh)]).ok();
 
-                            // 毛玻璃背景（使用上一帧缓存的模糊纹理）
-                            if let Some(ref blur_tex) = state.launcher_blur_tex {
-                                let _ = f.render_texture_from_to(
-                                    blur_tex,
-                                    Rectangle::from_size(Size::from((state.launcher_blur_size.0 as f64, state.launcher_blur_size.1 as f64))),
-                                    Rectangle::from_loc_and_size((lx, ly), (lw, lh)),
-                                    &[Rectangle::from_loc_and_size((lx, ly), (lw, lh))],
-                                    &[Rectangle::from_loc_and_size((lx, ly), (lw, lh))],
-                                    Transform::Normal,
-                                    1.0,
-                                    None,
-                                    &[],
-                                );
-                            } else {
-                                f.clear(layout::opaque(0.08, 0.08, 0.14),
-                                    &[layout::rect(lx, ly, lw, lh)]).ok();
-                            }
                             // 渲染 launcher UI 元素
                             layout::render_launcher(&mut f, &state.cfg, ow, oh, &state.launcher.query, &filtered, state.launcher.selected);
                         }
@@ -2809,58 +2833,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let sync = f.finish()?;
                         // drop f 释放对 target 的借用
 
-                        // Step 9.5: 毛玻璃模糊纹理更新（launcher 可见时，每 10 帧更新一次）
-                        if is_focused_output && state.launcher.visible && state.frame % 10 == 0 {
-                            let lw = ow * 3 / 4;
-                            let max_items = 12usize;
-                            let item_h: i32 = 36;
-                            let header_h: i32 = 48;
-                            let n_items = state.launcher.filtered().len().min(max_items);
-                            let lh = header_h + (n_items as i32) * item_h + 20;
-                            let lx = (ow - lw) / 2;
-                            let ly = bar_h + 24;
-                            let blur_scale = 8u32;
-                            let small_w = (lw as u32 / blur_scale).max(1);
-                            let small_h = (lh as u32 / blur_scale).max(1);
-                            let region = Rectangle::from_loc_and_size((lx, ly), (lw, lh));
-                            if let Ok(mapping) = renderer.copy_framebuffer(&target, region, Fourcc::Abgr8888) {
-                                if let Ok(pixels) = renderer.map_texture(&mapping) {
-                                    let mut blurred = vec![0u8; (small_w * small_h * 4) as usize];
-                                    for sy in 0..small_h {
-                                        for sx in 0..small_w {
-                                            let src_x = (sx * blur_scale) as usize;
-                                            let src_y = (sy * blur_scale) as usize;
-                                            let mut r = 0u32; let mut g = 0u32; let mut b = 0u32; let mut count = 0u32;
-                                            for dy in 0..blur_scale {
-                                                for dx in 0..blur_scale {
-                                                    let px = (src_x + dx as usize).min((lw as usize).saturating_sub(1));
-                                                    let py = (src_y + dy as usize).min((lh as usize).saturating_sub(1));
-                                                    let idx = (py * lw as usize + px) * 4;
-                                                    if idx + 3 < pixels.len() {
-                                                        r += pixels[idx] as u32;
-                                                        g += pixels[idx+1] as u32;
-                                                        b += pixels[idx+2] as u32;
-                                                        count += 1;
+                        // Step 9.5: 毛玻璃模糊纹理（launcher 可见时，每 5 帧更新）
+                        if is_focused_output && state.launcher.visible {
+                            let do_update = state.launcher_blur_tex.is_none() || state.frame % 5 == 0;
+                            if do_update {
+                                // 读取整个 output 的像素（避免部分区域越界）
+                                let blur_scale = 12u32;
+                                let small_w = (ow as u32 / blur_scale).max(1);
+                                let small_h = ((oh - bar_h) as u32 / blur_scale).max(1);
+                                let region = Rectangle::from_loc_and_size((0, bar_h), (ow, oh - bar_h));
+                                if let Ok(mapping) = renderer.copy_framebuffer(&target, region, Fourcc::Abgr8888) {
+                                    if let Ok(pixels) = renderer.map_texture(&mapping) {
+                                        let full_w = (ow) as usize;
+                                        let full_h = (oh - bar_h) as usize;
+                                        let mut blurred = vec![0u8; (small_w * small_h * 4) as usize];
+                                        for sy in 0..small_h {
+                                            for sx in 0..small_w {
+                                                let src_x = (sx * blur_scale) as usize;
+                                                let src_y = (sy * blur_scale) as usize;
+                                                let mut r = 0u32; let mut g = 0u32; let mut b = 0u32; let mut count = 0u32;
+                                                for dy in 0..blur_scale {
+                                                    for dx in 0..blur_scale {
+                                                        let px = (src_x + dx as usize).min(full_w.saturating_sub(1));
+                                                        let py = (src_y + dy as usize).min(full_h.saturating_sub(1));
+                                                        let idx = (py * full_w + px) * 4;
+                                                        if idx + 3 < pixels.len() {
+                                                            r += pixels[idx] as u32;
+                                                            g += pixels[idx+1] as u32;
+                                                            b += pixels[idx+2] as u32;
+                                                            count += 1;
+                                                        }
                                                     }
                                                 }
-                                            }
-                                            if count > 0 {
-                                                let di = ((sy * small_w + sx) * 4) as usize;
-                                                blurred[di]   = (r / count * 7 / 10) as u8;
-                                                blurred[di+1] = (g / count * 7 / 10) as u8;
-                                                blurred[di+2] = (b / count * 7 / 10) as u8;
-                                                blurred[di+3] = 255;
+                                                if count > 0 {
+                                                    let di = ((sy * small_w + sx) * 4) as usize;
+                                                    blurred[di]   = (r / count * 6 / 10) as u8;
+                                                    blurred[di+1] = (g / count * 6 / 10) as u8;
+                                                    blurred[di+2] = (b / count * 6 / 10) as u8;
+                                                    blurred[di+3] = 255;
+                                                }
                                             }
                                         }
-                                    }
-                                    if let Ok(tex) = renderer.import_memory(
-                                        &blurred,
-                                        Fourcc::Abgr8888,
-                                        Size::new(small_w as i32, small_h as i32),
-                                        false,
-                                    ) {
-                                        state.launcher_blur_tex = Some(tex);
-                                        state.launcher_blur_size = (small_w, small_h);
+                                        if let Ok(tex) = renderer.import_memory(
+                                            &blurred,
+                                            Fourcc::Abgr8888,
+                                            Size::new(small_w as i32, small_h as i32),
+                                            false,
+                                        ) {
+                                            state.launcher_blur_tex = Some(tex);
+                                            state.launcher_blur_size = (small_w, small_h);
+                                        }
                                     }
                                 }
                             }
