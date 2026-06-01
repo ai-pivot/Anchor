@@ -1578,22 +1578,109 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gbm = GbmDevice::new(dev_fd.clone())?;
     info!("✅ GbmDevice");
 
-    // ─── EGL + GLES 渲染器 ───
-    // NVIDIA 上 EGL 初始化需要 DRM master，GDM 切换 session 时可能有延迟，加重试
-    let egl_display = {
-        let mut egl = None;
-        for attempt in 0..30 {
-            match unsafe { smithay::backend::egl::EGLDisplay::new(gbm.clone()) } {
-                Ok(d) => { egl = Some(d); break; }
-                Err(e) if attempt < 29 => {
-                    if attempt == 0 { info!("⏳ EGL 初始化等待 DRM master..."); }
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-                Err(e) => { return Err(e.into()); }
-            }
-        }
-        egl.unwrap()
+    // ─── Wayland 显示 + 座位 + 全局对象（不需要 EGL）───
+    let mut display: Display<App> = Display::new()?;
+    let dh = display.handle();
+    let mut seat_state = SeatState::new();
+    let mut seat = seat_state.new_wl_seat(&dh, "seat0");
+    let kbd = seat.add_keyboard(XkbConfig::default(), 200, 25)?;
+    let pointer = seat.add_pointer();
+    let _output_manager = OutputManagerState::new();
+    info!("✅ wl_output");
+    InputMethodManagerState::new::<App, _>(&dh, |_client| true);
+    TextInputManagerState::new::<App>(&dh);
+    VirtualKeyboardManagerState::new::<App, _>(&dh, |_client| true);
+    info!("✅ text-input / input-method / virtual-keyboard");
+    info!("✅ dmabuf handler ready");
+
+    // 加载光标
+    let cursor_img = if !cfg.cursor.theme.is_empty() {
+        cursor::CursorImage::load_from_theme(&cfg.cursor.theme, &cfg.cursor.name, cfg.cursor.size)
+            .unwrap_or_else(|| {
+                info!("⚠️  光标主题 '{}' 加载失败，使用内置光标", cfg.cursor.theme);
+                cursor::CursorImage::builtin(cfg.cursor.size)
+            })
+    } else {
+        let default_theme = std::env::var("XCURSOR_THEME").unwrap_or_else(|_| "default".into());
+        cursor::CursorImage::load_from_theme(&default_theme, &cfg.cursor.name, cfg.cursor.size)
+            .unwrap_or_else(|| cursor::CursorImage::builtin(cfg.cursor.size))
     };
+
+    // ─── 创建 App（显示相关字段用 dummy 值，显示枚举后更新）───
+    let mut state = App {
+        comp: CompositorState::new::<App>(&dh), xdg: XdgShellState::new::<App>(&dh),
+        shm: ShmState::new::<App>(&dh, vec![]), seat_state, seat,
+        dd: DataDeviceState::new::<App>(&dh),
+        primary_sel: PrimarySelectionState::new::<App>(&dh),
+        deco: XdgDecorationState::new::<App>(&dh),
+        popup_manager: PopupManager::default(),
+        osize: Size::new(0, 0),
+        workspaces: (0..NUM_WORKSPACES).map(|_| Workspace::new()).collect(),
+        active_ws: 0,
+        run: true, frame: 0,
+        dh: dh.clone(), active: false,
+        dirty: true,
+        kbd, pointer, cfg,
+        cursor_img,
+        pointer_pos: (0.0, 0.0),
+        window_titles: std::collections::HashMap::new(),
+        window_app_ids: std::collections::HashMap::new(),
+        vblank_crtcs: std::collections::HashSet::new(),
+        wallpaper_cache: wallpaper::WallpaperCache::new(),
+        wallpaper_texture: None,
+        notifications: Vec::new(),
+        scratchpad: None,
+        scratchpad_visible: false,
+        scratchpad_surface: None,
+        scratchpad_pending: false,
+        im_popup: None,
+        pending_tops: Vec::new(),
+        dbus_notifications: notify::start_notification_daemon(),
+        launcher_visible: false,
+        launcher_query: String::new(),
+        launcher_apps: Vec::new(),
+        launcher_selected: 0,
+        ws_anim: WsAnimation { start: None, from_ws: 0, to_ws: 0, duration_ms: 200, direction: 0 },
+        output_sizes: vec![],
+        xw: xwayland::XWaylandState::new::<App>(&dh),
+        xdisplay: None,
+        screenshot: screenshot::ScreenshotState::new(),
+    };
+    let listener = ListeningSocket::bind("wayland-anchor")?;
+    std::env::set_var("WAYLAND_DISPLAY", "wayland-anchor");
+    if std::env::var("XDG_RUNTIME_DIR").is_err() {
+        std::env::set_var("XDG_RUNTIME_DIR", format!("/run/user/{}", unsafe { libc::getuid() }));
+    }
+    info!("✅ wayland-anchor");
+
+    // ─── EventLoop + 等 DRM master 就绪（必须在 EGL 之前！）───
+    // NVIDIA 上 EGL 初始化需要 DRM master，GDM 切换 session 时需要 dispatch 才能收到 ActivateSession
+    let mut eloop: EventLoop<App> = EventLoop::try_new()?;
+    let mut clients: Vec<Client> = vec![];
+    eloop.handle().insert_source(dn, |e,_,state: &mut App| match e {
+        DrmEvent::VBlank(crtc) => { state.vblank_crtcs.insert(crtc); }
+        DrmEvent::Error(e) => error!("DRM:{e:?}"),
+    })?;
+    if let Some(notifier) = notifier {
+        eloop.handle().insert_source(notifier, |event, _, state: &mut App| match event {
+            SessionEvent::ActivateSession => { info!("▶️  会话激活"); state.active = true; }
+            SessionEvent::PauseSession => { info!("⏸️  会话暂停"); state.active = false; }
+        })?;
+    }
+    if let Some(session) = session.as_ref() {
+        state.active = session.lock().unwrap().is_active();
+        let t0 = Instant::now();
+        while !state.active && t0.elapsed() < Duration::from_secs(10) {
+            eloop.dispatch(Some(Duration::from_millis(100)), &mut state)?;
+            state.active = session.lock().unwrap().is_active();
+        }
+        if !state.active { return Err("libseat 会话 10s 内未激活".into()); }
+        device.activate(true)?;
+        info!("✅ DRM master");
+    } else { state.active = true; }
+
+    // ─── EGL + GLES 渲染器（现在已有 DRM master，NVIDIA 上可以正常初始化）───
+    let egl_display = unsafe { smithay::backend::egl::EGLDisplay::new(gbm.clone())? };
     info!("✅ EGLDisplay");
     let egl_context = smithay::backend::egl::EGLContext::new(&egl_display)?;
     info!("✅ EGLContext");
@@ -1648,16 +1735,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     if connector_infos.is_empty() { return Err("无可用显示器".into()); }
-
-    let mut display: Display<App> = Display::new()?;
-    let dh = display.handle();
-    let mut seat_state = SeatState::new();
-    let mut seat = seat_state.new_wl_seat(&dh, "seat0");
-    let kbd = seat.add_keyboard(XkbConfig::default(), 200, 25)?;
-    let pointer = seat.add_pointer();
-
-    let _output_manager = OutputManagerState::new();
-    info!("✅ wl_output");
 
     let fd_clones: Vec<_> = (0..connector_infos.len())
         .map(|_| dev_fd.clone())
@@ -1720,96 +1797,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let primary_size = anchor_outputs[0].size;
     info!("✅ {} 个输出已就绪", anchor_outputs.len());
 
-    InputMethodManagerState::new::<App, _>(&dh, |_client| true);
-    TextInputManagerState::new::<App>(&dh);
-    VirtualKeyboardManagerState::new::<App, _>(&dh, |_client| true);
-    info!("✅ text-input / input-method / virtual-keyboard");
-
-    // dmabuf: 为 GPU 渲染注册 global
-    info!("✅ dmabuf handler ready");
-
-    // 加载光标
-    let cursor_img = if !cfg.cursor.theme.is_empty() {
-        cursor::CursorImage::load_from_theme(&cfg.cursor.theme, &cfg.cursor.name, cfg.cursor.size)
-            .unwrap_or_else(|| {
-                info!("⚠️  光标主题 '{}' 加载失败，使用内置光标", cfg.cursor.theme);
-                cursor::CursorImage::builtin(cfg.cursor.size)
-            })
-    } else {
-        let default_theme = std::env::var("XCURSOR_THEME").unwrap_or_else(|_| "default".into());
-        cursor::CursorImage::load_from_theme(&default_theme, &cfg.cursor.name, cfg.cursor.size)
-            .unwrap_or_else(|| cursor::CursorImage::builtin(cfg.cursor.size))
-    };
-
-    let mut state = App {
-        comp: CompositorState::new::<App>(&dh), xdg: XdgShellState::new::<App>(&dh),
-        shm: ShmState::new::<App>(&dh, vec![]), seat_state, seat,
-        dd: DataDeviceState::new::<App>(&dh),
-        primary_sel: PrimarySelectionState::new::<App>(&dh),
-        deco: XdgDecorationState::new::<App>(&dh),
-        popup_manager: PopupManager::default(),
-        osize: primary_size,
-        workspaces: (0..NUM_WORKSPACES).map(|_| Workspace::new()).collect(),
-        active_ws: 0,
-        run: true, frame: 0,
-        dh: dh.clone(), active: false,
-        dirty: true,
-        kbd, pointer, cfg,
-        cursor_img,
-        pointer_pos: (0.0, 0.0),
-        window_titles: std::collections::HashMap::new(),
-        window_app_ids: std::collections::HashMap::new(),
-        vblank_crtcs: std::collections::HashSet::new(),
-        wallpaper_cache: wallpaper::WallpaperCache::new(),
-        wallpaper_texture: None,
-        notifications: Vec::new(),
-        scratchpad: None,
-        scratchpad_visible: false,
-        scratchpad_surface: None,
-        scratchpad_pending: false,
-        im_popup: None,
-        pending_tops: Vec::new(),
-        dbus_notifications: notify::start_notification_daemon(),
-        launcher_visible: false,
-        launcher_query: String::new(),
-        launcher_apps: Vec::new(),
-        launcher_selected: 0,
-        ws_anim: WsAnimation { start: None, from_ws: 0, to_ws: 0, duration_ms: 200, direction: 0 },
-        output_sizes,
-        xw: xwayland::XWaylandState::new::<App>(&dh),
-        xdisplay: None,
-        screenshot: screenshot::ScreenshotState::new(),
-    };
-    let listener = ListeningSocket::bind("wayland-anchor")?;
-    std::env::set_var("WAYLAND_DISPLAY", "wayland-anchor");
-    if std::env::var("XDG_RUNTIME_DIR").is_err() {
-        std::env::set_var("XDG_RUNTIME_DIR", format!("/run/user/{}", unsafe { libc::getuid() }));
-    }
-    info!("✅ wayland-anchor");
-
-    let mut eloop: EventLoop<App> = EventLoop::try_new()?;
-    let mut clients: Vec<Client> = vec![];
-    eloop.handle().insert_source(dn, |e,_,state: &mut App| match e {
-        DrmEvent::VBlank(crtc) => { state.vblank_crtcs.insert(crtc); }
-        DrmEvent::Error(e) => error!("DRM:{e:?}"),
-    })?;
-    if let Some(notifier) = notifier {
-        eloop.handle().insert_source(notifier, |event, _, state: &mut App| match event {
-            SessionEvent::ActivateSession => { info!("▶️  会话激活"); state.active = true; }
-            SessionEvent::PauseSession => { info!("⏸️  会话暂停"); state.active = false; }
-        })?;
-    }
-    if let Some(session) = session.as_ref() {
-        state.active = session.lock().unwrap().is_active();
-        let t0 = Instant::now();
-        while !state.active && t0.elapsed() < Duration::from_secs(10) {
-            eloop.dispatch(Some(Duration::from_millis(100)), &mut state)?;
-            state.active = session.lock().unwrap().is_active();
-        }
-        if !state.active { return Err("libseat 会话 10s 内未激活".into()); }
-        device.activate(true)?;
-        info!("✅ DRM master");
-    } else { state.active = true; }
+    // 更新 App 的显示相关字段（之前用 dummy 值创建）
+    state.osize = primary_size;
+    state.output_sizes = output_sizes;
 
     {
         struct SessionInputInterface { session: Arc<std::sync::Mutex<LibSeatSession>> }
