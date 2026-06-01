@@ -228,6 +228,8 @@ struct App {
     xdisplay: Option<u32>,
     // 截图状态（区域选择）
     screenshot: screenshot::ScreenshotState,
+    /// EventLoop handle（用于 XWM selection 转发等需要注册临时 source 的场景）
+    loop_handle: Option<smithay::reexports::calloop::LoopHandle<'static, App>>,
 }
 
 /// 工作区切换动画状态
@@ -286,13 +288,26 @@ impl App {
     }
 
     fn pointer_focus(&self) -> Option<(WlSurface, Point<f64, Logical>)> {
-        let px = self.pointer_pos.0;
-        let py = self.pointer_pos.1;
+        // 找到鼠标所在的 output，将全局坐标转为 output 局部坐标
+        let oi = self.output_at_pointer();
+        let (ox, oy, ow, oh) = self.output_sizes.get(oi).copied().unwrap_or((0, 0, self.osize.w, self.osize.h));
+        let px = self.pointer_pos.0 - ox as f64;
+        let py = self.pointer_pos.1 - oy as f64;
+
         let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
         if py < bar_h as f64 { return None; }
-        let ws = &self.workspaces[self.active_ws];
 
-        // Fullscreen: entire area below bar
+        // 使用此 output 的 active_ws（不是全局的）
+        let out_ws_idx = if let Some(out) = self.output_sizes.get(oi) {
+            // 需要找到 anchor_output 的 active_ws — 但 anchor_outputs 不在 self 上
+            // 暂时用全局 active_ws（后续重构时改进）
+            self.active_ws
+        } else {
+            self.active_ws
+        };
+        let ws = &self.workspaces[out_ws_idx];
+
+        // Fullscreen: 整个 output 区域都属于全屏窗口
         let order = ws.effective_order();
         if let Some(fi) = ws.fullscreen {
             if let Some(slot) = order.get(fi) {
@@ -315,11 +330,15 @@ impl App {
             }
         }
 
+        // 使用 output 局部尺寸做 slot 计算（不是 self.osize）
+        let screen_w = ow as f64;
+        let screen_h = oh as f64;
+
         // Check ALL toplevels' XDG popups first (they render on top of windows)
         for (i, slot) in order.iter().enumerate() {
             if let WindowSlot::Wl(idx) = slot {
                 if let Some(tl) = ws.tops.get(*idx) {
-                    let (x, y, _, _) = layout::slot(i, order.len(), self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
+                    let (x, y, _, _) = layout::slot(i, order.len(), ow, oh, bar_h, &self.cfg, ws.layout, ws.split);
                     let tl_pos = Point::from((x as f64, y as f64));
                     if let Some(r) = self.popup_at_pointer(tl, tl_pos) {
                         return Some(r);
@@ -331,7 +350,7 @@ impl App {
         // Hit-test window slots using unified order
         let n_all = order.len();
         for (i, slot) in order.iter().enumerate() {
-            let (x, y, w, h) = layout::slot(i, n_all, self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
+            let (x, y, w, h) = layout::slot(i, n_all, ow, oh, bar_h, &self.cfg, ws.layout, ws.split);
             if px >= x as f64 && px < (x + w) as f64 && py >= y as f64 && py < (y + h) as f64 {
                 let surf = match slot {
                     WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| tl.wl_surface().clone()),
@@ -1112,48 +1131,58 @@ impl App {
 
                 // 点击聚焦（仅 Press 时）
                 if event.state() == ButtonState::Pressed {
-                    let px = self.pointer_pos.0 as i32;
-                    let py = self.pointer_pos.1 as i32;
+                    let oi = self.output_at_pointer();
+                    let (ox, oy, ow, oh) = self.output_sizes.get(oi).copied().unwrap_or((0, 0, self.osize.w, self.osize.h));
+                    let px = self.pointer_pos.0 as i32 - ox;
+                    let py = self.pointer_pos.1 as i32 - oy;
                     let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
-                    if py >= bar_h {
-                        let order = self.workspaces[self.active_ws].effective_order();
-                        let ws = &self.workspaces[self.active_ws];
+                    
+                    // 同步全局 active_ws 到鼠标所在 output 的工作区
+                    self.active_ws = self.active_ws;
+                    let ws = &self.workspaces[self.active_ws];
 
-                        // Check if click is on an XDG popup — if so, don't steal focus
-                        let on_popup = {
-                            let mut found = false;
-                            for (i, slot) in order.iter().enumerate() {
-                                if let WindowSlot::Wl(idx) = slot {
-                                    if let Some(tl) = ws.tops.get(*idx) {
-                                        let (x, y, _, _) = layout::slot(i, order.len(), self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
-                                        let tl_pos = Point::from((x as f64, y as f64));
-                                        if self.popup_at_pointer(tl, tl_pos).is_some() {
-                                            found = true;
-                                            break;
+                    if py >= bar_h {
+                        // 全屏模式下：点击不切换焦点，只确保全屏窗口有焦点
+                        if ws.fullscreen.is_some() {
+                            // 全屏时整个区域都属于全屏窗口，不切换焦点
+                        } else {
+                            let order = ws.effective_order();
+
+                            // Check if click is on an XDG popup — if so, don't steal focus
+                            let on_popup = {
+                                let mut found = false;
+                                for (i, slot) in order.iter().enumerate() {
+                                    if let WindowSlot::Wl(idx) = slot {
+                                        if let Some(tl) = ws.tops.get(*idx) {
+                                            let (x, y, _, _) = layout::slot(i, order.len(), ow, oh, bar_h, &self.cfg, ws.layout, ws.split);
+                                            let tl_pos = Point::from((x as f64, y as f64));
+                                            if self.popup_at_pointer(tl, tl_pos).is_some() {
+                                                found = true;
+                                                break;
+                                            }
                                         }
                                     }
                                 }
-                            }
-                            found
-                        };
+                                found
+                            };
 
-                        if !on_popup {
-                            let order = self.workspaces[self.active_ws].effective_order();
-                            let n_all = order.len();
-                            for (i, slot) in order.iter().enumerate() {
-                                let (x, y, w, h) = layout::slot(i, n_all, self.osize.w, self.osize.h, bar_h, &self.cfg, self.workspaces[self.active_ws].layout, self.workspaces[self.active_ws].split);
-                                if px >= x && px < x + w && py >= y && py < y + h {
-                                    let surf = match slot {
-                                        WindowSlot::Wl(idx) => self.workspaces[self.active_ws].tops.get(*idx).map(|tl| tl.wl_surface().clone()),
-                                        WindowSlot::X11(idx) => self.workspaces[self.active_ws].x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()),
-                                    };
-                                    if let Some(surf) = surf {
-                                        self.workspaces[self.active_ws].focus = Some(surf.clone());
-                                        let kbd = self.kbd.clone();
-                                        let serial = SERIAL_COUNTER.next_serial();
-                                        kbd.set_focus(self, Some(surf), serial);
+                            if !on_popup {
+                                let n_all = order.len();
+                                for (i, slot) in order.iter().enumerate() {
+                                    let (x, y, w, h) = layout::slot(i, n_all, ow, oh, bar_h, &self.cfg, ws.layout, ws.split);
+                                    if px >= x && px < x + w && py >= y && py < y + h {
+                                        let surf = match slot {
+                                            WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| tl.wl_surface().clone()),
+                                            WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()),
+                                        };
+                                        if let Some(surf) = surf {
+                                            self.workspaces[self.active_ws].focus = Some(surf.clone());
+                                            let kbd = self.kbd.clone();
+                                            let serial = SERIAL_COUNTER.next_serial();
+                                            kbd.set_focus(self, Some(surf), serial);
+                                        }
+                                        break;
                                     }
-                                    break;
                                 }
                             }
                         }
@@ -1682,6 +1711,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         xw: xwayland::XWaylandState::new::<App>(&dh),
         xdisplay: None,
         screenshot: screenshot::ScreenshotState::new(),
+        loop_handle: None,
     };
     let listener = ListeningSocket::bind("wayland-anchor")?;
     std::env::set_var("WAYLAND_DISPLAY", "wayland-anchor");
@@ -1693,6 +1723,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // ─── EventLoop + 等 DRM master 就绪（必须在 EGL 之前！）───
     // NVIDIA 上 EGL 初始化需要 DRM master，GDM 切换 session 时需要 dispatch 才能收到 ActivateSession
     let mut eloop: EventLoop<App> = EventLoop::try_new()?;
+    state.loop_handle = Some(eloop.handle());
     let mut clients: Vec<Client> = vec![];
     eloop.handle().insert_source(dn, |e,_,state: &mut App| match e {
         DrmEvent::VBlank(crtc) => { state.vblank_crtcs.insert(crtc); }
@@ -2552,10 +2583,21 @@ impl smithay::xwayland::XwmHandler for App {
     fn send_selection(
         &mut self,
         _xwm: smithay::xwayland::xwm::XwmId,
-        _selection: smithay::wayland::selection::SelectionTarget,
-        _mime_type: String,
-        _fd: std::os::unix::io::OwnedFd,
+        selection: smithay::wayland::selection::SelectionTarget,
+        mime_type: String,
+        fd: std::os::unix::io::OwnedFd,
     ) {
+        // Wayland 客户端请求 X11 选区数据 → 转发给 X11Wm 从 X11 获取
+        if let (Some(xwm), Some(loop_handle)) = (self.xw.xwm.as_mut(), self.loop_handle.as_ref()) {
+            if let Err(e) = xwm.send_selection::<App>(
+                selection,
+                mime_type,
+                fd,
+                loop_handle.clone(),
+            ) {
+                tracing::warn!("X11 selection send failed: {:?}", e);
+            }
+        }
     }
 
     fn maximize_request(&mut self, _xwm: smithay::xwayland::xwm::XwmId, window: smithay::xwayland::X11Surface) {
@@ -2613,7 +2655,37 @@ impl smithay::xwayland::XwmHandler for App {
     fn unminimize_request(&mut self, _xwm: smithay::xwayland::xwm::XwmId, _window: smithay::xwayland::X11Surface) {}
 
     fn allow_selection_access(&mut self, _xwm: smithay::xwayland::xwm::XwmId, _selection: smithay::wayland::selection::SelectionTarget) -> bool {
-        false
+        // 允许 X11 客户端访问 Wayland 选区
+        true
+    }
+
+    fn new_selection(
+        &mut self,
+        _xwm: smithay::xwayland::xwm::XwmId,
+        selection: smithay::wayland::selection::SelectionTarget,
+        mime_types: Vec<String>,
+    ) {
+        // X11 客户端设置了新选区 → 通知 Wayland 端
+        tracing::info!("📋 X11 new {} selection: {:?}", if selection == smithay::wayland::selection::SelectionTarget::Primary { "primary" } else { "clipboard" }, mime_types);
+        if let Some(xwm) = self.xw.xwm.as_mut() {
+            if let Err(e) = xwm.new_selection(selection, Some(mime_types)) {
+                tracing::warn!("Failed to forward X11 selection to Wayland: {:?}", e);
+            }
+        }
+    }
+
+    fn cleared_selection(
+        &mut self,
+        _xwm: smithay::xwayland::xwm::XwmId,
+        selection: smithay::wayland::selection::SelectionTarget,
+    ) {
+        // X11 选区被清除
+        tracing::info!("📋 X11 {} selection cleared", if selection == smithay::wayland::selection::SelectionTarget::Primary { "primary" } else { "clipboard" });
+        if let Some(xwm) = self.xw.xwm.as_mut() {
+            if let Err(e) = xwm.new_selection(selection, None) {
+                tracing::warn!("Failed to clear X11 selection: {:?}", e);
+            }
+        }
     }
 
     fn property_notify(
