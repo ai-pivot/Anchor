@@ -460,21 +460,37 @@ impl App {
         });
     }
 
-    /// 将 PNG 图片数据设到 Wayland 剪贴板（image/png）
+    /// 将 PNG 图片数据设到剪贴板（image/png）
     ///
-    /// 仅设 Wayland data device。X11 客户端粘贴 image/png 在 XWayland
-    /// 桥接下支持不完整，但**绝不会阻塞主循环**——这是绝对的稳定性优先。
+    /// 设置 Wayland data device selection + 通知 X11 端（xwm.new_selection）。
+    /// X11 客户端粘贴时，XwmHandler::send_selection 会直接从 compositor selection
+    /// 读取 user_data 写入 fd（不经过 request_data_device_client_selection，
+    /// 因为该函数对 compositor-owned selection 返回 ServerSideSelection 错误）。
     fn set_clipboard_png(&mut self, _png_path: String, png_data: Vec<u8>) {
         use smithay::wayland::selection::data_device::set_data_device_selection;
         tracing::info!("📋 设置截图剪贴板: {} bytes", png_data.len());
         let user_data: Arc<[u8]> = Arc::from(png_data);
+        let mime_types = vec!["image/png".into()];
         set_data_device_selection::<App>(
             &self.dh,
             &self.seat,
-            vec!["image/png".into()],
+            mime_types.clone(),
             user_data,
         );
-        tracing::info!("📋 Screenshot copied to Wayland clipboard");
+        // 合成器 set_data_device_selection 不会触发 SelectionHandler::new_selection，
+        // 需要手动通知 X11 端让 XWM 成为 X11 CLIPBOARD owner
+        if let Some(ref mut xwm) = self.xw.xwm {
+            if let Err(e) = xwm.new_selection(
+                smithay::wayland::selection::SelectionTarget::Clipboard,
+                Some(mime_types),
+            ) {
+                tracing::warn!("📋 XWM new_selection failed: {:?}", e);
+            } else {
+                tracing::info!("📋 Screenshot copied to Wayland + X11 clipboard");
+            }
+        } else {
+            tracing::info!("📋 Screenshot copied to Wayland clipboard (no XWM)");
+        }
     }
 
     fn drain_notifications(&mut self) {
@@ -2344,17 +2360,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Step 1: Wallpaper
                         // ── Lock screen: skip all normal rendering ──
                         if state.lock_state.locked {
+                            // 计算锁屏激活以来的时间（用于基于时间的动画）
+                            let lock_elapsed = state.lock_state.time
+                                .map(|t| t.elapsed().as_secs_f32())
+                                .unwrap_or(0.0);
                             if is_focused_output {
                                 // 焦点屏幕：完整锁屏 UI（时钟 + 密码输入框）
                                 layout::render_lock_screen(
                                     &mut f, &state.cfg, ow, oh,
-                                    time_secs, state.frame,
+                                    time_secs, lock_elapsed,
                                     &state.lock_state.input, state.lock_state.wrong, state.lock_state.shake,
                                     state.lock_state.style,
                                 );
                             } else {
                                 // 其他屏幕：暗色覆盖 + 同风格背景
-                                layout::render_lock_screen_dim(&mut f, &state.cfg, ow, oh, state.frame, state.lock_state.style);
+                                layout::render_lock_screen_dim(&mut f, &state.cfg, ow, oh, lock_elapsed, state.lock_state.style);
                             }
                             let sync = f.finish()?;
                             drop(target);
@@ -2599,6 +2619,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if state.ws_anim.start.map(|s| (s.elapsed().as_millis() as u64) < state.ws_anim.duration_ms).unwrap_or(false) {
                 state.dirty = true;
             }
+            // 锁屏动画需要持续重绘（frame 驱动动画，必须保证 dirty 始终为 true）
+            if state.lock_state.locked {
+                state.dirty = true;
+            }
             state.frame += 1;
             // Drain D-Bus notifications into toast system
             {
@@ -2818,13 +2842,40 @@ impl smithay::xwayland::XwmHandler for App {
         mime_type: String,
         fd: std::os::unix::io::OwnedFd,
     ) {
-        // X11 客户端请求 Wayland 选区 → 通过 DataDevice 获取数据写入 fd
-        use smithay::wayland::selection::data_device::request_data_device_client_selection;
-        let _ = request_data_device_client_selection::<App>(
+        // X11 客户端请求 Wayland 选区数据
+        // 两种情况：
+        //   1) Wayland 客户端拥有选区 → request_data_device_client_selection 转发请求
+        //   2) 合成器自身拥有选区（如截图剪贴板）→ request_data_device_client_selection
+        //      返回 ServerSideSelection 错误，需要手动从 seat user_data 读取并写入 fd
+        use smithay::wayland::selection::data_device::{request_data_device_client_selection, current_data_device_selection_userdata};
+
+        if selection == smithay::wayland::selection::SelectionTarget::Clipboard {
+            // 先检查合成器是否拥有选区（截图等 compositor-provided selection）
+            if let Some(user_data) = current_data_device_selection_userdata::<App>(&self.seat) {
+                tracing::info!("📋 XwmHandler::send_selection: compositor owns clipboard, writing {} bytes to fd", user_data.len());
+                let buf: Arc<[u8]> = user_data.clone();
+                std::thread::spawn(move || {
+                    use std::io::Write;
+                    if let Err(err) = smithay::reexports::rustix::fs::fcntl_setfl(&fd, smithay::reexports::rustix::fs::OFlags::empty()) {
+                        tracing::warn!("error clearing flags on selection fd: {:?}", err);
+                    }
+                    if let Err(err) = std::fs::File::from(fd).write_all(&buf) {
+                        tracing::warn!("error writing compositor selection to X11 fd: {:?}", err);
+                    }
+                });
+                return;
+            }
+        }
+
+        // Wayland 客户端拥有选区 → 请求客户端发送数据
+        match request_data_device_client_selection::<App>(
             &self.seat,
             mime_type,
             fd,
-        );
+        ) {
+            Ok(()) => tracing::info!("📋 XwmHandler::send_selection: forwarded to Wayland client"),
+            Err(e) => tracing::warn!("📋 XwmHandler::send_selection: request failed: {:?}", e),
+        }
     }
 
     fn maximize_request(&mut self, _xwm: smithay::xwayland::xwm::XwmId, window: smithay::xwayland::X11Surface) {

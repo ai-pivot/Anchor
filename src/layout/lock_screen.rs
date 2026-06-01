@@ -10,13 +10,13 @@ use super::util::{opaque, rect};
 
 /// 渲染锁屏覆盖层 — 非焦点屏幕（暗色覆盖 + 同风格背景）
 pub fn render_lock_screen_dim(
-    f: &mut impl Frame, cfg: &Config, ow: i32, oh: i32, frame: u32, style: u8,
+    f: &mut impl Frame, cfg: &Config, ow: i32, oh: i32, elapsed: f32, style: u8,
 ) {
     let accent = parse_color(&cfg.colors.focus_border);
     f.clear(opaque(0.02, 0.02, 0.04), &[rect(0, 0, ow, oh)]).ok();
 
     // 渲染对应风格的暗色版背景
-    render_lock_bg(f, accent, ow, oh, frame, style, 0.25);
+    render_lock_bg(f, accent, ow, oh, elapsed, style, 0.25);
 
     let lock_str = "LOCKED";
     let lock_w = text_render::text_width(lock_str, 18.0);
@@ -43,11 +43,14 @@ fn hash_rand(seed: u32, i: u32) -> u32 {
 }
 
 /// 渲染锁屏背景（可缩放亮度用于非焦点屏幕）
+/// `elapsed` = 锁屏激活以来的秒数（基于 Instant，与帧率无关）
 fn render_lock_bg(
     f: &mut impl Frame, accent: (f32, f32, f32), ow: i32, oh: i32,
-    frame: u32, style: u8, brightness_scale: f32,
+    elapsed: f32, style: u8, brightness_scale: f32,
 ) {
-    let t = frame as f32 * 0.012;
+    // 基于 elapsed 的动画时间，使用整数帧计数保持 hash_rand 确定性
+    let t = elapsed;
+    let frame = (elapsed * 60.0) as u32; // 假设 60fps 基准的虚拟帧计数（用于确定性随机）
 
     match style {
         // ── Style 0: Nebula 星云 ──
@@ -113,8 +116,8 @@ fn render_lock_bg(
                     f.clear(opaque(accent.0 * b, accent.1 * b, accent.2 * b), &wave_rects).ok();
                 }
             }
-            // 扫描线
-            let scan_y = (frame as i32 * 2) % oh;
+            // 扫描线（基于时间的平滑移动）
+            let scan_y = (elapsed * 120.0) as i32 % oh;
             let b = 0.30 * brightness_scale;
             f.clear(opaque(accent.0 * b, accent.1 * b, accent.2 * b),
                 &[rect(0, scan_y, ow, 3)]).ok();
@@ -156,8 +159,9 @@ fn render_lock_bg(
             if !dots.is_empty() {
                 f.clear(opaque(accent.0 * b2, accent.1 * b2, accent.2 * b2), &dots).ok();
             }
-            // 垂直扫描线（来回）
-            let scan_x = ((frame as i32 * 3) % (ow * 2)).min(ow).max(0);
+            // 垂直扫描线（来回，基于时间）
+            let scan_raw = (elapsed * 180.0) as i32 % (ow * 2);
+            let scan_x = if scan_raw > ow { ow * 2 - scan_raw } else { scan_raw };
             let sb = 0.40 * brightness_scale;
             // 扫描线本体
             f.clear(opaque(accent.0 * sb, accent.1 * sb, accent.2 * sb),
@@ -250,7 +254,7 @@ fn render_lock_bg(
 /// 渲染锁屏覆盖层（全屏暗色覆盖 + 居中密码输入框 + 大时钟）
 pub fn render_lock_screen(
     f: &mut impl Frame, cfg: &Config, ow: i32, oh: i32,
-    time_secs: u64, frame: u32,
+    time_secs: u64, elapsed: f32,
     password: &str, wrong: bool, shake: Option<std::time::Instant>,
     style: u8,
 ) {
@@ -260,7 +264,7 @@ pub fn render_lock_screen(
     f.clear(opaque(0.03, 0.03, 0.06), &[rect(0, 0, ow, oh)]).ok();
 
     // ── 背景动画效果 ──
-    render_lock_bg(f, accent, ow, oh, frame, style, 1.0);
+    render_lock_bg(f, accent, ow, oh, elapsed, style, 1.0);
 
     // ── Shake 偏移（密码错误时抖动） ──
     let mut shake_x = 0i32;
@@ -378,8 +382,8 @@ pub fn render_lock_screen(
         f.clear(dot_color, &[rect(dx, dy, dot_radius * 2, dot_radius * 2)]).ok();
     }
 
-    // ── 闪烁光标 ──
-    let cursor_visible = (frame / 30) % 2 == 0;
+    // ── 闪烁光标（基于时间的 ~1Hz 闪烁） ──
+    let cursor_visible = (elapsed * 1.0).sin() > 0.0;
     if cursor_visible {
         let cursor_x = dots_start + n_dots as i32 * dot_gap + 4;
         f.clear(dot_color, &[rect(cursor_x, box_y + 10, 2, box_h - 20)]).ok();
