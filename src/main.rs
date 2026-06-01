@@ -460,18 +460,55 @@ impl App {
         });
     }
 
-    /// 将 PNG 图片数据设到 Wayland 剪贴板（image/png）
-    fn set_clipboard_png(&mut self, png_data: Vec<u8>) {
+    /// 将 PNG 图片数据设到 Wayland + X11 共享剪贴板（image/png）
+    ///
+    /// 关键：仅调用 set_data_device_selection 只设 Wayland data device，
+    /// X11 客户端（飞书、Chrome 等）通过 XWayland 桥接访问 image/png
+    /// mime 经常失败（特别是 GTK 客户端走 text/uri-list 路径）。
+    ///
+    /// 修复：通过 wl-copy 子进程 pipe PNG 数据，wl-copy 内部用 XFixes
+    /// 同步设 X11 CLIPBOARD atom —— 这是 wl-clipboard 工具链的标准做法，
+    /// 保证 Wayland 和 X11 客户端都能粘贴。
+    fn set_clipboard_png(&mut self, _png_path: String, png_data: Vec<u8>) {
         use smithay::wayland::selection::data_device::set_data_device_selection;
         tracing::info!("📋 设置截图剪贴板: {} bytes", png_data.len());
-        let user_data: Arc<[u8]> = Arc::from(png_data);
+        // 1) 设 Wayland data device（让 Wayland 客户端能粘贴）
+        let user_data: Arc<[u8]> = Arc::from(png_data.clone());
         set_data_device_selection::<App>(
             &self.dh,
             &self.seat,
             vec!["image/png".into()],
             user_data,
         );
-        tracing::info!("📋 Screenshot copied to Wayland clipboard");
+        // 2) 通过 wl-copy pipe 设 X11 剪贴板（让 X11 客户端能粘贴）
+        //    wl-copy 通过 wl-clipboard 协议 + XFixes 桥接，
+        //    image/png mime 在 X11 端被识别为 image/png。
+        //    用 spawn 异步执行不阻塞渲染主循环。
+        let result = std::process::Command::new("wl-copy")
+            .arg("--type")
+            .arg("image/png")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        match result {
+            Ok(mut child) => {
+                if let Some(mut stdin) = child.stdin.take() {
+                    use std::io::Write;
+                    let _ = stdin.write_all(&png_data);
+                    let _ = stdin.flush();
+                    drop(stdin);
+                }
+                // 异步等 wl-copy 退出（不阻塞主循环）
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+                tracing::info!("📋 Screenshot copied to Wayland + X11 clipboard (via wl-copy)");
+            }
+            Err(e) => {
+                tracing::warn!("📋 wl-copy 启动失败 (X11 剪贴板可能无法粘贴): {}", e);
+            }
+        }
     }
 
     fn drain_notifications(&mut self) {
@@ -2553,10 +2590,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 if path.is_empty() {
                     state.notify("Screenshot failed".to_string());
                 } else if let Some(png) = png_data {
-                    state.set_clipboard_png(png);
-                    state.notify("Screenshot saved & copied".to_string());
+                    state.set_clipboard_png(path.clone(), png);
+                    state.notify(format!("Saved: {} (copied to clipboard)", path));
                 } else {
-                    state.notify("Screenshot saved (clipboard failed)".to_string());
+                    state.notify(format!("Saved: {} (clipboard failed)", path));
                 }
                 state.dirty = true;
             }
