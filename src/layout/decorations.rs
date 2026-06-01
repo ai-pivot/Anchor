@@ -7,16 +7,16 @@ use super::geom::{slot, LayoutPreset, SplitDir};
 use super::util::{color_hex, opaque, rect};
 
 pub fn render_window_bg(f: &mut impl Frame, cfg: &Config, n: usize, ow: i32, oh: i32, bar_h: i32, layout: LayoutPreset, split: SplitDir) {
-    render_window_bg_anim(f, cfg, n, ow, oh, bar_h, layout, split, 0);
+    render_window_bg_anim(f, cfg, n, ow, oh, bar_h, layout, split, 0, 0);
 }
 
-pub fn render_window_bg_anim(f: &mut impl Frame, cfg: &Config, n: usize, ow: i32, oh: i32, bar_h: i32, layout: LayoutPreset, split: SplitDir, offset_x: i32) {
+pub fn render_window_bg_anim(f: &mut impl Frame, cfg: &Config, n: usize, ow: i32, oh: i32, bar_h: i32, layout: LayoutPreset, split: SplitDir, offset_x: i32, offset_y: i32) {
     if n == 0 { return; }
     let bw = cfg.layout.border_width;
     let bg = color_hex(&cfg.colors.background);
     for i in 0..n {
         let (x, y, w, h) = slot(i, n, ow, oh, bar_h, cfg, layout, split);
-        f.clear(bg, &[rect(x - bw + offset_x, y - bw, w + 2 * bw, h + 2 * bw)]).ok();
+        f.clear(bg, &[rect(x - bw + offset_x, y - bw + offset_y, w + 2 * bw, h + 2 * bw)]).ok();
     }
 }
 
@@ -26,19 +26,21 @@ pub fn render_window_decorations(
     ow: i32, oh: i32, bar_h: i32,
     layout: LayoutPreset, split: SplitDir,
 ) {
-    render_window_decorations_anim(f, cfg, i, n, focus_idx, ow, oh, bar_h, layout, split, 0);
+    render_window_decorations_anim(f, cfg, i, n, focus_idx, ow, oh, bar_h, layout, split, 0, 0);
 }
 
 pub fn render_window_decorations_anim(
     f: &mut impl Frame, cfg: &Config,
     i: usize, n: usize, focus_idx: Option<usize>,
     ow: i32, oh: i32, bar_h: i32,
-    layout: LayoutPreset, split: SplitDir, offset_x: i32,
+    layout: LayoutPreset, split: SplitDir,
+    offset_x: i32, offset_y: i32,
 ) {
     if n == 0 { return; }
     let bw = cfg.layout.border_width;
     let (x, y, w, h) = slot(i, n, ow, oh, bar_h, cfg, layout, split);
     let x = x + offset_x;
+    let y = y + offset_y;
     let is_focused = focus_idx == Some(i);
 
     if is_focused {

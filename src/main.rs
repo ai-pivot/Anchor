@@ -145,6 +145,8 @@ struct App {
     launcher: LauncherState,
     // 工作区切换动画
     ws_anim: WsAnimation,
+    // 窗口布局动画（macOS 风格）
+    layout_anim: LayoutAnimation,
     // 多显示器尺寸信息（用于鼠标穿越）
     output_sizes: Vec<(i32, i32, i32, i32)>, // (x, y, w, h) per output
     /// 每个 output 当前活跃的工作区索引（独立切换）
@@ -184,6 +186,48 @@ struct WsAnimation {
     duration_ms: u64,
     /// 方向: -1=左, 1=右
     direction: i32,
+}
+
+/// 窗口布局动画状态（macOS 风格：窗口从旧位置滑到新位置）
+struct LayoutAnimation {
+    /// 动画开始时间
+    start: Option<std::time::Instant>,
+    /// 动画时长（ms）
+    duration_ms: u64,
+    /// 每个窗口 slot 的旧位置 (x, y)
+    old_slots: Vec<(i32, i32)>,
+}
+
+impl LayoutAnimation {
+    fn new() -> Self {
+        Self { start: None, duration_ms: 250, old_slots: Vec::new() }
+    }
+
+    /// 开始动画：记录当前 slot 位置
+    fn begin(&mut self, current_slots: &[(i32, i32)]) {
+        self.old_slots = current_slots.to_vec();
+        self.start = Some(std::time::Instant::now());
+    }
+
+    /// 计算给定 slot 的动画偏移量（返回偏移到目标位置的差值）
+    /// 返回 None 表示动画未激活或 slot 无旧位置
+    fn offset_for(&self, slot_idx: usize, target: (i32, i32)) -> Option<(i32, i32)> {
+        let start = self.start?;
+        let elapsed = start.elapsed().as_millis() as u64;
+        if elapsed >= self.duration_ms { return None; }
+        let old = self.old_slots.get(slot_idx)?;
+        let t = elapsed as f32 / self.duration_ms as f32;
+        // ease-out cubic (macOS 风格)
+        let t_ease = 1.0 - (1.0 - t).powi(3);
+        let dx = (old.0 - target.0) as f32 * (1.0 - t_ease);
+        let dy = (old.1 - target.1) as f32 * (1.0 - t_ease);
+        Some((dx as i32, dy as i32))
+    }
+
+    /// 动画是否仍在进行中
+    fn is_active(&self) -> bool {
+        self.start.map(|s| (s.elapsed().as_millis() as u64) < self.duration_ms).unwrap_or(false)
+    }
 }
 
 impl BufferHandler for App { fn buffer_destroyed(&mut self, _: &wl_buffer::WlBuffer) {} }
@@ -458,6 +502,32 @@ impl App {
         self.layout_workspace(self.active_ws);
     }
 
+    /// 触发布局动画 + 重新布局
+    /// 在调用此方法前，必须已经确定了窗口变化（add/remove/move/layout change）
+    fn do_layout_animated(&mut self) {
+        // 记录当前 slot 位置（动画起点）
+        let ws = &self.workspaces[self.active_ws];
+        let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
+        let order = ws.effective_order();
+        let n = order.len();
+        let old_slots: Vec<(i32, i32)> = if n > 0 {
+            (0..n).map(|i| {
+                layout::slot(i, n, self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split)
+            }).map(|(x, y, _, _)| (x, y)).collect()
+        } else {
+            Vec::new()
+        };
+
+        // 执行布局
+        self.layout_workspace(self.active_ws);
+
+        // 启动动画
+        if !old_slots.is_empty() {
+            self.layout_anim.begin(&old_slots);
+            self.dirty = true;
+        }
+    }
+
     fn notify(&mut self, text: impl Into<String>) {
         self.notifications.push(Notification {
             text: text.into(),
@@ -575,7 +645,7 @@ impl App {
             }
             _ => return,
         }
-        self.do_layout();
+        self.do_layout_animated();
         self.dirty = true;
     }
 
@@ -724,7 +794,7 @@ impl App {
 
         // 4. 布局源工作区
         self.active_ws = ws_idx;
-        self.do_layout();
+        self.do_layout_animated();
 
         // 布局目标工作区
         self.layout_workspace(target);
@@ -809,7 +879,7 @@ impl App {
         }
 
         drop(ws);
-        self.do_layout();
+        self.do_layout_animated();
         self.dirty = true;
     }
 
@@ -1332,7 +1402,7 @@ impl XdgShellHandler for App {
                 if tl.wl_surface() == &wl_surf {
                     info!("🔳 客户端请求全屏 #{} (工作区 {})", i, ws_idx + 1);
                     ws.fullscreen = Some(i);
-                    self.do_layout();
+                    self.do_layout_animated();
                     self.dirty = true;
                     return;
                 }
@@ -1349,7 +1419,7 @@ impl XdgShellHandler for App {
                     if tl.wl_surface() == &wl_surf {
                         info!("🔳 客户端取消全屏 #{} (工作区 {})", i, ws_idx + 1);
                         ws.fullscreen = None;
-                        self.do_layout();
+                        self.do_layout_animated();
                         self.dirty = true;
                         return;
                     }
@@ -1387,7 +1457,7 @@ impl XdgShellHandler for App {
                 }
                 let idx = self.workspaces[self.active_ws].tops.len() - 1;
                 info!("➕ 窗口 #{} (工作区 {})", idx, self.active_ws + 1);
-                self.do_layout();
+                self.do_layout_animated();
                 if let Some(tl) = self.workspaces[self.active_ws].tops.get(idx) {
                     let s = tl.wl_surface().clone();
                     self.workspaces[self.active_ws].focus = Some(s.clone());
@@ -1435,7 +1505,7 @@ impl XdgShellHandler for App {
                             self.workspaces[target_ws].tops.push(top);
                             self.workspaces[target_ws].rebuild_order();
                             self.switch_workspace(target_ws);
-                            self.do_layout();
+                            self.do_layout_animated();
                         }
                     }
                     break;
@@ -1612,7 +1682,7 @@ impl CompositorHandler for App {
                     });
                 }
                 if ws_idx == self.active_ws {
-                    self.do_layout();
+                    self.do_layout_animated();
                     self.dirty = true;
                     // 更新键盘焦点
                     if let Some(ref s) = self.workspaces[self.active_ws].focus {
@@ -1645,7 +1715,7 @@ impl CompositorHandler for App {
                     WindowSlot::X11(idx) => self.workspaces[ws_idx].x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()),
                 });
                 if ws_idx == self.active_ws {
-                    self.do_layout();
+                    self.do_layout_animated();
                     self.dirty = true;
                     if let Some(ref s) = self.workspaces[self.active_ws].focus {
                         let kbd = self.kbd.clone();
@@ -1849,6 +1919,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         dbus_notifications: notify::start_notification_daemon(),
         launcher: LauncherState::new(),
         ws_anim: WsAnimation { start: None, from_ws: 0, to_ws: 0, duration_ms: 200, direction: 0 },
+        layout_anim: LayoutAnimation::new(),
         output_sizes: vec![],
         output_active_ws: vec![],
         focused_output: 0,
@@ -2300,6 +2371,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let order = out_ws.effective_order();
                                 for (i, slot) in order.iter().enumerate() {
                                     let (x, y, _w, _h) = layout::slot(i, n_total, ow, oh, bar_h, &state.cfg, state.workspaces[out_ws_idx].layout, state.workspaces[out_ws_idx].split);
+                                    // 布局动画偏移（macOS 风格：从旧位置滑到新位置）
+                                    let (layout_dx, layout_dy) = state.layout_anim.offset_for(i, (x, y)).unwrap_or((0, 0));
                                     match slot {
                                         WindowSlot::Wl(idx) => {
                                             if let Some(tl) = out_ws.tops.get(*idx) {
@@ -2307,9 +2380,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
                                                 }).unwrap_or_default();
                                                 // 减去 geometry.loc 偏移（CSD 阴影/边框），使内容区精确对齐 slot
-                                                let bx = x - tl_geo.loc.x;
-                                                let by = y - tl_geo.loc.y;
-                                                let tl_render_pos = Point::<i32, Physical>::from((bx + ws_offset, by));
+                                                let bx = x - tl_geo.loc.x + ws_offset + layout_dx;
+                                                let by = y - tl_geo.loc.y + layout_dy;
+                                                let tl_render_pos = Point::<i32, Physical>::from((bx, by));
                                                 win_elems.push(
                                                     render_elements_from_surface_tree(&mut renderer, tl.wl_surface(), tl_render_pos, 1.0, 1.0, Kind::Unspecified)
                                                 );
@@ -2328,7 +2401,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         WindowSlot::X11(idx) => {
                                             if let Some(xs) = out_ws.x11_surfaces.get(*idx) {
                                                 if let Some(wl) = xs.wl_surface() {
-                                                    let render_pos = Point::<i32, Physical>::from((x + ws_offset, y));
+                                                    let render_pos = Point::<i32, Physical>::from((x + ws_offset + layout_dx, y + layout_dy));
                                                     win_elems.push(
                                                         render_elements_from_surface_tree(&mut renderer, &wl, render_pos, 1.0, 1.0, Kind::Unspecified)
                                                     );
@@ -2504,9 +2577,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         if fullscreen.is_none() {
                             let order = out_ws.effective_order();
                             for (i, _) in order.iter().enumerate() {
+                                let (x, y, _, _) = layout::slot(i, n_total, ow, oh, bar_h, &state.cfg, state.workspaces[out_ws_idx].layout, state.workspaces[out_ws_idx].split);
+                                let (dx, dy) = state.layout_anim.offset_for(i, (x, y)).unwrap_or((0, 0));
                                 layout::render_window_decorations_anim(
                                     &mut f, &state.cfg, i, n_total, out_ws_focus_idx,
-                                    ow, oh, bar_h, state.workspaces[out_ws_idx].layout, state.workspaces[out_ws_idx].split, ws_offset
+                                    ow, oh, bar_h, state.workspaces[out_ws_idx].layout, state.workspaces[out_ws_idx].split,
+                                    ws_offset + dx, dy
                                 );
                             }
                         }
@@ -2683,6 +2759,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if state.ws_anim.start.map(|s| (s.elapsed().as_millis() as u64) < state.ws_anim.duration_ms).unwrap_or(false) {
                 state.dirty = true;
             }
+            // 布局动画进行中时持续请求渲染
+            if state.layout_anim.is_active() {
+                state.dirty = true;
+            }
             // 锁屏动画需要持续重绘（frame 驱动动画，必须保证 dirty 始终为 true）
             if state.lock_state.locked {
                 state.dirty = true;
@@ -2796,7 +2876,7 @@ impl smithay::xwayland::XwmHandler for App {
             let serial = SERIAL_COUNTER.next_serial();
             kbd.set_focus(self, Some(wl), serial);
         }
-        self.do_layout();
+        self.do_layout_animated();
         self.dirty = true;
     }
 
@@ -2818,7 +2898,7 @@ impl smithay::xwayland::XwmHandler for App {
             ws.rebuild_order();
         }
         self.xw.or_surfaces.retain(|s| s.window_id() != wid);
-        self.do_layout();
+        self.do_layout_animated();
         // Refocus — find the last window in effective_order
         let order = self.workspaces[self.active_ws].effective_order();
         if let Some((_, slot)) = order.iter().enumerate().last() {
@@ -2844,7 +2924,7 @@ impl smithay::xwayland::XwmHandler for App {
             ws.rebuild_order();
         }
         self.xw.or_surfaces.retain(|s| s.window_id() != wid);
-        self.do_layout();
+        self.do_layout_animated();
         // Refocus
         let order = self.workspaces[self.active_ws].effective_order();
         if let Some((_, slot)) = order.iter().enumerate().last() {
@@ -2982,7 +3062,7 @@ impl smithay::xwayland::XwmHandler for App {
                     if let Some(wl) = focus_surf {
                         self.workspaces[ws_idx].focus = Some(wl);
                     }
-                    self.do_layout();
+                    self.do_layout_animated();
                     self.dirty = true;
                     return;
                 }
@@ -3003,7 +3083,7 @@ impl smithay::xwayland::XwmHandler for App {
                 };
                 if matches {
                     self.workspaces[ws_idx].fullscreen = None;
-                    self.do_layout();
+                    self.do_layout_animated();
                     self.dirty = true;
                     return;
                 }
