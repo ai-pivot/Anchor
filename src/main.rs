@@ -148,7 +148,7 @@ struct App {
     // 窗口布局动画（macOS 风格）
     layout_anim: LayoutAnimation,
     /// 上一次 layout_workspace 的 slot 位置（动画起点，在每次 layout 后更新）
-    prev_slots: Vec<(i32, i32)>,
+    prev_positions: Vec<(crate::workspace::WindowSlot, (i32, i32))>,
     // 多显示器尺寸信息（用于鼠标穿越）
     output_sizes: Vec<(i32, i32, i32, i32)>, // (x, y, w, h) per output
     /// 每个 output 当前活跃的工作区索引（独立切换）
@@ -192,43 +192,42 @@ struct WsAnimation {
 
 /// 窗口布局动画状态（macOS 风格：窗口从旧位置滑到新位置）
 struct LayoutAnimation {
-    /// 动画开始时间
     start: Option<std::time::Instant>,
-    /// 动画时长（ms）
     duration_ms: u64,
-    /// 每个窗口 slot 的旧位置 (x, y)
-    old_slots: Vec<(i32, i32)>,
+    /// 每个窗口身份 -> 旧位置
+    old_positions: Vec<(crate::workspace::WindowSlot, (i32, i32))>,
 }
 
 impl LayoutAnimation {
     fn new() -> Self {
-        Self { start: None, duration_ms: 350, old_slots: Vec::new() }
+        Self { start: None, duration_ms: 350, old_positions: Vec::new() }
     }
 
-    /// 开始动画：记录当前 slot 位置
-    fn begin(&mut self, current_slots: &[(i32, i32)]) {
-        self.old_slots = current_slots.to_vec();
+    fn begin(&mut self, positions: &[(crate::workspace::WindowSlot, (i32, i32))]) {
+        self.old_positions = positions.to_vec();
         self.start = Some(std::time::Instant::now());
     }
 
-    /// 计算给定 slot 的动画偏移量（返回偏移到目标位置的差值）
-    /// 返回 None 表示动画未激活或 slot 无旧位置
-    fn offset_for(&self, slot_idx: usize, target: (i32, i32)) -> Option<(i32, i32)> {
+    fn offset_for(&self, slot: &crate::workspace::WindowSlot, target: (i32, i32)) -> Option<(i32, i32)> {
         let start = self.start?;
         let elapsed = start.elapsed().as_millis() as u64;
         if elapsed >= self.duration_ms { return None; }
-        let old = self.old_slots.get(slot_idx)?;
+        let old = self.old_positions.iter().find(|(s, _)| {
+            match (s, slot) {
+                (crate::workspace::WindowSlot::Wl(a), crate::workspace::WindowSlot::Wl(b)) => a == b,
+                (crate::workspace::WindowSlot::X11(a), crate::workspace::WindowSlot::X11(b)) => a == b,
+                _ => false,
+            }
+        })?.1;
         let t = elapsed as f32 / self.duration_ms as f32;
-        // ease-out cubic (macOS 风格)
         let t_ease = 1.0 - (1.0 - t).powi(3);
         let dx = (old.0 - target.0) as f32 * (1.0 - t_ease);
         let dy = (old.1 - target.1) as f32 * (1.0 - t_ease);
         Some((dx as i32, dy as i32))
     }
 
-    /// 动画是否仍在进行中
     fn is_active(&self) -> bool {
-        self.start.map(|s| (s.elapsed().as_millis() as u64) < self.duration_ms).unwrap_or(false)
+        match self.start { Some(s) => { let ms: u64 = s.elapsed().as_millis() as u64; ms < self.duration_ms }, None => false }
     }
 }
 
@@ -499,12 +498,13 @@ impl App {
             }
         }
 
-        // 保存本次 layout 的 slot 位置（供下次动画使用）
+        // 保存每个窗口的身份 + 位置（供下次动画使用）
         if ws_idx == self.active_ws {
             let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
-            self.prev_slots = (0..n).map(|i| {
+            let order = self.workspaces[ws_idx].effective_order();
+            self.prev_positions = (0..n).map(|i| {
                 let (x, y, _, _) = layout::slot(i, n, self.osize.w, self.osize.h, bar_h, &self.cfg, self.workspaces[ws_idx].layout, self.workspaces[ws_idx].split);
-                (x, y)
+                (order[i].clone(), (x, y))
             }).collect();
         }
     }
@@ -515,35 +515,39 @@ impl App {
 
     /// 触发布局动画 + 重新布局
     fn do_layout_animated(&mut self) {
-        // 使用上次 layout 保存的位置作为动画起点
-        let old_slots = self.prev_slots.clone();
+        // 保存动画起点（每个窗口的身份 + 位置）
+        let old_positions = self.prev_positions.clone();
 
         // 执行布局
         self.layout_workspace(self.active_ws);
 
-        // 为新窗口填充假的旧位置，方向由 split 决定
+        // 为新窗口（在 prev_positions 中没有记录的）填充假的旧位置
         let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
         let split = self.workspaces[self.active_ws].split;
-        let mut anim_slots = old_slots;
-        let n_new = self.prev_slots.len(); // layout_workspace 刚更新了 prev_slots
-        if anim_slots.len() < n_new {
-            for i in anim_slots.len()..n_new {
-                let (nx, ny, nw, nh) = layout::slot(i, n_new, self.osize.w, self.osize.h, bar_h, &self.cfg, self.workspaces[self.active_ws].layout, self.workspaces[self.active_ws].split);
+        let new_positions = self.prev_positions.clone(); // layout_workspace 刚更新
+        let mut anim_positions = old_positions;
+
+        // 为新增的窗口添加假旧位置（从 split 方向滑入）
+        for (slot, new_pos) in &new_positions {
+            let already_tracked = anim_positions.iter().any(|(s, _)| {
+                match (s, slot) {
+                    (WindowSlot::Wl(a), WindowSlot::Wl(b)) => a == b,
+                    (WindowSlot::X11(a), WindowSlot::X11(b)) => a == b,
+                    _ => false,
+                }
+            });
+            if !already_tracked {
                 let fake_pos = match split {
-                    // Horizontal split: 新窗口在右边 → 从右边滑入
-                    layout::SplitDir::Horizontal => (nx + nw + 100, ny),
-                    // Vertical split: 新窗口在下方 → 从下方滑入
-                    layout::SplitDir::Vertical => (nx, ny + nh + 100),
+                    layout::SplitDir::Horizontal => (new_pos.0 + self.osize.w + 100, new_pos.1),
+                    layout::SplitDir::Vertical => (new_pos.0, new_pos.1 + self.osize.h + 100),
                 };
-                anim_slots.push(fake_pos);
+                anim_positions.push((slot.clone(), fake_pos));
             }
         }
-        // 窗口减少时（关闭窗口），old_slots 比 n_new 多
-        // 多余的 old_slots 直接忽略（不再渲染的窗口）
 
         // 启动动画
-        if !anim_slots.is_empty() {
-            self.layout_anim.begin(&anim_slots);
+        if !anim_positions.is_empty() {
+            self.layout_anim.begin(&anim_positions);
             self.dirty = true;
         }
     }
@@ -2005,7 +2009,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         launcher: LauncherState::new(),
         ws_anim: WsAnimation { start: None, from_ws: 0, to_ws: 0, duration_ms: 200, direction: 0 },
         layout_anim: LayoutAnimation::new(),
-        prev_slots: Vec::new(),
+        prev_positions: Vec::new(),
         output_sizes: vec![],
         output_active_ws: vec![],
         focused_output: 0,
@@ -2320,7 +2324,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 state.lock_state.poll_unlock();
                 if !state.lock_state.locked {
                     // 刚解锁！立即重新布局窗口
-                    state.do_layout();
+                    state.do_layout_animated();
                 }
             }
 
@@ -2458,7 +2462,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 for (i, slot) in order.iter().enumerate() {
                                     let (x, y, _w, _h) = layout::slot(i, n_total, ow, oh, bar_h, &state.cfg, state.workspaces[out_ws_idx].layout, state.workspaces[out_ws_idx].split);
                                     // 布局动画偏移（macOS 风格：从旧位置滑到新位置）
-                                    let (layout_dx, layout_dy) = state.layout_anim.offset_for(i, (x, y)).unwrap_or((0, 0));
+                                    let (layout_dx, layout_dy) = state.layout_anim.offset_for(slot, (x, y)).unwrap_or((0, 0));
                                     match slot {
                                         WindowSlot::Wl(idx) => {
                                             if let Some(tl) = out_ws.tops.get(*idx) {
@@ -2664,7 +2668,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let order = out_ws.effective_order();
                             for (i, _) in order.iter().enumerate() {
                                 let (x, y, _, _) = layout::slot(i, n_total, ow, oh, bar_h, &state.cfg, state.workspaces[out_ws_idx].layout, state.workspaces[out_ws_idx].split);
-                                let (dx, dy) = state.layout_anim.offset_for(i, (x, y)).unwrap_or((0, 0));
+                                let (dx, dy) = state.layout_anim.offset_for(&order[i], (x, y)).unwrap_or((0, 0));
                                 layout::render_window_decorations_anim(
                                     &mut f, &state.cfg, i, n_total, out_ws_focus_idx,
                                     ow, oh, bar_h, state.workspaces[out_ws_idx].layout, state.workspaces[out_ws_idx].split,
