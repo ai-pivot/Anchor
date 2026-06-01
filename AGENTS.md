@@ -268,3 +268,16 @@ For SDDM: Create `/usr/share/wayland-sessions/anchor.desktop` with same content.
     --type image/png` (external process, async spawn), which uses
     XFixes to set the X11 CLIPBOARD atom directly. wl-copy is
     standard on most Wayland distros (`wl-clipboard` package).
+21. **🚫 NEVER spawn external processes (wl-copy, xclip, etc.) in compositor
+    callback paths.** A previous fix for X11 clipboard paste spawned
+    `wl-copy` from `set_clipboard_png` and the user reported the entire
+    desktop froze on every screenshot, requiring reboot. The hang happens
+    because: (a) `wl-copy` needs `WAYLAND_DISPLAY` env which anchor-session
+    doesn't export, so it retries indefinitely; (b) `stdin.write_all(&png)`
+    blocks when the pipe buffer fills while wl-copy is hung;
+    (c) `std::thread::spawn(child.wait())` accumulates zombie threads;
+    (d) eventually the calloop event loop starves and the compositor
+    freezes. **Rule**: compositor code MUST be self-contained. Any
+    clipboard interop with X11 must be done through Smithay's own
+    selection APIs (`XwmHandler::send_selection`, `X11Wm::set_selection`),
+    NEVER via external CLI tools.
