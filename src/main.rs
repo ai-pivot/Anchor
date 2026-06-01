@@ -302,13 +302,7 @@ impl App {
         if py < bar_h as f64 { return None; }
 
         // 使用此 output 的 active_ws（不是全局的）
-        let out_ws_idx = if let Some(out) = self.output_sizes.get(oi) {
-            // 需要找到 anchor_output 的 active_ws — 但 anchor_outputs 不在 self 上
-            // 暂时用全局 active_ws（后续重构时改进）
-            self.active_ws
-        } else {
-            self.active_ws
-        };
+        let out_ws_idx = self.output_active_ws.get(oi).copied().unwrap_or(self.active_ws);
         let ws = &self.workspaces[out_ws_idx];
 
         // Fullscreen: 整个 output 区域都属于全屏窗口
@@ -1182,9 +1176,10 @@ impl App {
                     let py = self.pointer_pos.1 as i32 - oy;
                     let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
                     
-                    // 同步全局 active_ws 到鼠标所在 output 的工作区
-                    self.active_ws = self.active_ws;
-                    let ws = &self.workspaces[self.active_ws];
+                    // 使用鼠标所在 output 的工作区
+                    let ws_idx = self.output_active_ws.get(oi).copied().unwrap_or(self.active_ws);
+                    self.active_ws = ws_idx;
+                    let ws = &self.workspaces[ws_idx];
 
                     if py >= bar_h {
                         // 全屏模式下：点击不切换焦点，只确保全屏窗口有焦点
