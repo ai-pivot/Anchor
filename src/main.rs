@@ -756,15 +756,20 @@ impl App {
         self.dirty = true;
     }
 
-    /// 将当前焦点窗口移动到目标工作区
+    /// 将当前焦点窗口移动到目标工作区（操作 focused output 的工作区）
     fn move_window_to_workspace(&mut self, target: usize) {
-        if target >= NUM_WORKSPACES || target == self.active_ws { return; }
+        if target >= NUM_WORKSPACES { return; }
+        // 只在目标工作区是当前 focused output 正在显示的工作区时跳过
+        let out_idx = self.focused_output;
+        if target == self.output_active_ws.get(out_idx).copied().unwrap_or(0) { return; }
         let fi = match self.focus_idx() {
             Some(i) => i,
             None => return,
         };
 
-        let tl = match self.workspaces[self.active_ws].tops.get(fi) {
+        let ws_idx = self.output_active_ws.get(out_idx).copied().unwrap_or(0);
+
+        let tl = match self.workspaces[ws_idx].tops.get(fi) {
             Some(tl) => tl.clone(),
             None => return,
         };
@@ -774,14 +779,14 @@ impl App {
         self.notify(format!("Moved → WS {}", target + 1));
 
         // 从当前工作区移除
-        self.workspaces[self.active_ws].tops.remove(fi);
+        self.workspaces[ws_idx].tops.remove(fi);
         // 修正 fullscreen
-        if let Some(fs) = self.workspaces[self.active_ws].fullscreen {
-            if fs == fi { self.workspaces[self.active_ws].fullscreen = None; }
-            else if fs > fi { self.workspaces[self.active_ws].fullscreen = Some(fs - 1); }
+        if let Some(fs) = self.workspaces[ws_idx].fullscreen {
+            if fs == fi { self.workspaces[ws_idx].fullscreen = None; }
+            else if fs > fi { self.workspaces[ws_idx].fullscreen = Some(fs - 1); }
         }
-        if self.workspaces[self.active_ws].focus.as_ref() == Some(&surf) {
-            self.workspaces[self.active_ws].focus = self.workspaces[self.active_ws].tops.last()
+        if self.workspaces[ws_idx].focus.as_ref() == Some(&surf) {
+            self.workspaces[ws_idx].focus = self.workspaces[ws_idx].tops.last()
                 .map(|t| t.wl_surface().clone());
         }
 
@@ -796,6 +801,7 @@ impl App {
         self.workspaces[target].tops.push(tl);
 
         // 重新布局当前工作区
+        self.active_ws = ws_idx;
         self.do_layout();
         // 更新焦点
         if let Some(ref s) = self.workspaces[self.active_ws].focus {
@@ -2226,7 +2232,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }
                                     }
                                     im_popup_pos = popup_pos;
-                                    im_elems = render_elements_from_surface_tree(&mut renderer, im_popup.wl_surface(), popup_pos, 1.0, 1.0, Kind::Unspecified);
+                                    if is_focused_output {
+                                        im_elems = render_elements_from_surface_tree(&mut renderer, im_popup.wl_surface(), popup_pos, 1.0, 1.0, Kind::Unspecified);
+                                    }
                                 }
                             }
                         }
@@ -2236,9 +2244,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Some(wl) = xs.wl_surface() {
                                 let geo = xs.geometry();
                                 let render_pos = Point::<i32, Physical>::from((geo.loc.x, geo.loc.y));
-                                or_elems.extend(
-                                    render_elements_from_surface_tree(&mut renderer, &wl, render_pos, 1.0, 1.0, Kind::Unspecified)
-                                );
+                                if is_focused_output {
+                                    or_elems.extend(
+                                        render_elements_from_surface_tree(&mut renderer, &wl, render_pos, 1.0, 1.0, Kind::Unspecified)
+                                    );
+                                }
                             }
                         }
 
@@ -2300,8 +2310,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
 
-                        // Step 2.5: IM popup (on top of ALL windows)
-                        if !im_elems.is_empty() {
+                        // Step 2.5: IM popup (只在焦点屏幕上显示)
+                        if is_focused_output && !im_elems.is_empty() {
                             draw_render_elements(&mut f, 1.0, &im_elems, &[dmg])?;
                         }
 
@@ -2335,9 +2345,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             draw_render_elements(&mut f, 1.0, &sp_elems, &[dmg])?;
                         }
 
-                        // Step 4.5: X11 override-redirect windows (input method popups, tooltips)
+                        // Step 4.5: X11 override-redirect windows (只在焦点屏幕)
                         // Must render on top of window content but below headbar
-                        if !or_elems.is_empty() {
+                        if is_focused_output && !or_elems.is_empty() {
                             draw_render_elements(&mut f, 1.0, &or_elems, &[dmg])?;
                         }
 
