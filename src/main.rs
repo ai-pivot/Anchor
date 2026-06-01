@@ -1644,15 +1644,17 @@ impl CompositorHandler for App {
             self.workspaces[ws_idx].tops.retain(|tl| tl.wl_surface() != surface);
             if self.workspaces[ws_idx].tops.len() < before {
                 info!("🗑️ 窗口关闭 (工作区 {})", ws_idx + 1);
-                if let Some(ci) = closed_idx {
-                    if let Some(fs) = self.workspaces[ws_idx].fullscreen {
-                        if fs == ci { self.workspaces[ws_idx].fullscreen = None; }
-                        else if fs > ci { self.workspaces[ws_idx].fullscreen = Some(fs - 1); }
-                    }
-                }
+                // 清理 fullscreen（fullscreen 存的是 effective_order 索引）
+                self.workspaces[ws_idx].fullscreen = None;
+                // 重建窗口顺序
+                self.workspaces[ws_idx].rebuild_order();
+                // 更新 focus
                 if self.workspaces[ws_idx].focus.as_ref() == Some(surface) {
-                    self.workspaces[ws_idx].focus = self.workspaces[ws_idx].tops.last()
-                        .map(|t| t.wl_surface().clone());
+                    let order = self.workspaces[ws_idx].effective_order();
+                    self.workspaces[ws_idx].focus = order.last().and_then(|s| match s {
+                        WindowSlot::Wl(idx) => self.workspaces[ws_idx].tops.get(*idx).map(|tl| tl.wl_surface().clone()),
+                        WindowSlot::X11(idx) => self.workspaces[ws_idx].x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()),
+                    });
                 }
                 if ws_idx == self.active_ws {
                     self.do_layout();
@@ -1674,13 +1676,28 @@ impl CompositorHandler for App {
             return;
         }
         // Check if destroyed surface is an X11 window
-        for ws in &mut self.workspaces {
-            let before = ws.x11_surfaces.len();
-            ws.x11_surfaces.retain(|s| s.wl_surface().as_ref() != Some(surface));
-            if ws.x11_surfaces.len() < before {
-                info!("🗑️ X11 窗口 wl_surface 销毁");
-                self.do_layout();
-                self.dirty = true;
+        for ws_idx in 0..self.workspaces.len() {
+            let before = self.workspaces[ws_idx].x11_surfaces.len();
+            self.workspaces[ws_idx].x11_surfaces.retain(|s| s.wl_surface().as_ref() != Some(surface));
+            if self.workspaces[ws_idx].x11_surfaces.len() < before {
+                info!("🗑️ X11 窗口 wl_surface 销毁 (工作区 {})", ws_idx + 1);
+                self.workspaces[ws_idx].fullscreen = None;
+                self.workspaces[ws_idx].rebuild_order();
+                // 更新 focus
+                let order = self.workspaces[ws_idx].effective_order();
+                self.workspaces[ws_idx].focus = order.last().and_then(|s| match s {
+                    WindowSlot::Wl(idx) => self.workspaces[ws_idx].tops.get(*idx).map(|tl| tl.wl_surface().clone()),
+                    WindowSlot::X11(idx) => self.workspaces[ws_idx].x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()),
+                });
+                if ws_idx == self.active_ws {
+                    self.do_layout();
+                    self.dirty = true;
+                    if let Some(ref s) = self.workspaces[self.active_ws].focus {
+                        let kbd = self.kbd.clone();
+                        let serial = SERIAL_COUNTER.next_serial();
+                        kbd.set_focus(self, Some(s.clone()), serial);
+                    }
+                }
                 return;
             }
         }
