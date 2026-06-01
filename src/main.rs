@@ -236,17 +236,17 @@ impl App {
         let out_ws_idx = self.output_active_ws.get(oi).copied().unwrap_or(self.active_ws);
         let ws = &self.workspaces[out_ws_idx];
 
-        // Fullscreen: 整个 output 区域都属于全屏窗口
+        // Fullscreen: 整个 output 区域（除 headbar 外）都属于全屏窗口
+        // ── 关键修复：全屏时跳过所有非全屏窗口的 hit-test 和 focus fallback ──
+        // 否则当 ws.focus 指向被全屏遮蔽的下方窗口时，鼠标事件会"穿透"到那个窗口
         let order = ws.effective_order();
         if let Some(fi) = ws.fullscreen {
             if let Some(slot) = order.get(fi) {
                 match slot {
                     WindowSlot::Wl(idx) => {
                         if let Some(tl) = ws.tops.get(*idx) {
-                            let tl_geo = smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
-                                states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
-                            }).unwrap_or_default();
-                            let tl_pos = Point::from((-tl_geo.loc.x as f64, bar_h as f64 - tl_geo.loc.y as f64));
+                            // 先检查 toplevel 的 XDG popup（候选词、菜单等）
+                            let tl_pos = Point::from((0.0_f64, bar_h as f64));
                             if let Some(r) = self.popup_at_pointer(tl, tl_pos) { return Some(r); }
                             return Some((tl.wl_surface().clone(), tl_pos));
                         }
@@ -260,6 +260,9 @@ impl App {
                     }
                 }
             }
+            // 全屏 slot 已设置但 slot 自身无效（被关闭）→ 仍处于全屏状态，
+            // 兜底返回 None 而非 fallback 到 ws.focus（防止穿透到底层窗口）
+            return None;
         }
 
         // 使用 output 局部尺寸做 slot 计算（不是 self.osize）
@@ -313,30 +316,6 @@ impl App {
                     WindowSlot::X11(idx) => {
                         if let Some(s) = ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()) {
                             return Some((s, Point::from((x as f64, y as f64))));
-                        }
-                    }
-                }
-            }
-        }
-
-        // Fallback: focused window
-        if let Some(ref focus_surf) = ws.focus {
-            for (i, slot) in order.iter().enumerate() {
-                let matches = match slot {
-                    WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| tl.wl_surface() == focus_surf),
-                    WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface().map(|wl| &wl == focus_surf)),
-                };
-                if matches == Some(true) {
-                    let (x, y, _w, _h) = layout::slot(i, order.len(), self.osize.w, self.osize.h, bar_h, &self.cfg, ws.layout, ws.split);
-                    match slot {
-                        WindowSlot::Wl(_) => {
-                            let geo = smithay::wayland::compositor::with_states(focus_surf, |states| {
-                                states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
-                            }).unwrap_or_default();
-                            return Some((focus_surf.clone(), Point::from((x as f64 - geo.loc.x as f64, y as f64 - geo.loc.y as f64))));
-                        }
-                        WindowSlot::X11(_) => {
-                            return Some((focus_surf.clone(), Point::from((x as f64, y as f64))));
                         }
                     }
                 }
@@ -511,6 +490,19 @@ impl App {
             (Some(idx), _) => {
                 info!("🔳 全屏 #{}", idx);
                 self.workspaces[self.active_ws].fullscreen = Some(idx);
+                // 关键修复：全屏时强制把 ws.focus 指向全屏窗口，
+                // 避免后续 pointer_focus 的 ws.focus fallback 把鼠标事件转发到被遮蔽的下方窗口
+                let focus_surf = {
+                    let ws = &self.workspaces[self.active_ws];
+                    let order = ws.effective_order();
+                    order.get(idx).and_then(|slot| match slot {
+                        WindowSlot::Wl(i) => ws.tops.get(*i).map(|tl| tl.wl_surface().clone()),
+                        WindowSlot::X11(i) => ws.x11_surfaces.get(*i).and_then(|xs| xs.wl_surface()),
+                    })
+                };
+                if let Some(surf) = focus_surf {
+                    self.workspaces[self.active_ws].focus = Some(surf);
+                }
             }
             _ => return,
         }
@@ -2820,13 +2812,27 @@ impl smithay::xwayland::XwmHandler for App {
             let ws = &self.workspaces[ws_idx];
             let order = ws.effective_order();
             for (i, slot) in order.iter().enumerate() {
-                let matches = match slot {
-                    WindowSlot::Wl(_) => false,
-                    WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).map(|s| s.window_id() == wid).unwrap_or(false),
+                // 在内层作用域完成所有不可变借用，结束后再可变借用 self.workspaces
+                let (is_match, focus_surf) = {
+                    let m = match slot {
+                        WindowSlot::Wl(_) => false,
+                        WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).map(|s| s.window_id() == wid).unwrap_or(false),
+                    };
+                    let focus = if m {
+                        order.get(i).and_then(|s2| match s2 {
+                            WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()),
+                            _ => None,
+                        })
+                    } else { None };
+                    (m, focus)
                 };
-                if matches {
+                if is_match {
                     self.workspaces[ws_idx].fullscreen = Some(i);
                     if ws_idx != self.active_ws { self.active_ws = ws_idx; }
+                    // 同步 ws.focus 到全屏 X11 窗口（防穿透）
+                    if let Some(wl) = focus_surf {
+                        self.workspaces[ws_idx].focus = Some(wl);
+                    }
                     self.do_layout();
                     self.dirty = true;
                     return;
