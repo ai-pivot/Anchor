@@ -2937,6 +2937,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         }
 
+                        // 屏幕录制帧捕获
+                        if state.record_state.recording && is_focused_output {
+                            use smithay::backend::allocator::Fourcc;
+                            use smithay::backend::renderer::Renderer;
+                            let region = Rectangle::from_size((ow, oh).into());
+                            match renderer.copy_framebuffer(&target, region, Fourcc::Abgr8888) {
+                                Ok(mapping) => {
+                                    match renderer.map_texture(&mapping) {
+                                        Ok(pixels) => {
+                                            // 取 bar 以下的区域
+                                            let bar_h_usize = bar_h as usize;
+                                            let rec_w = ow as usize;
+                                            let rec_h = (oh - bar_h) as usize;
+                                            let row_len = rec_w * 4;
+                                            let frame_size = rec_w * rec_h * 4;
+                                            let start = bar_h_usize * row_len;
+                                            if start + frame_size <= pixels.len() {
+                                                state.record_state.write_frame(&pixels[start..start + frame_size]);
+                                            }
+                                        }
+                                        Err(_) => {}
+                                    }
+                                }
+                                Err(_) => {}
+                            }
+                        }
+
                         drop(target);
 
                         out.buf_surf.queue_buffer(Some(sync), None, ())?;
