@@ -29,7 +29,8 @@ jobs:
             wayland \
             clang \
             pkgconf \
-            git
+            git \
+            seatd
 
       - name: Build release
         run: cargo build --release --verbose

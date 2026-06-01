@@ -30,7 +30,9 @@ jobs:
             wayland \
             clang \
             pkgconf \
-            git
+            seatd \
+            git \
+            seatd
 
       - name: Cache cargo registry
         uses: actions/cache@v4
