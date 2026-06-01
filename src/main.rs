@@ -1111,7 +1111,7 @@ impl App {
                                     return FilterResult::Intercept(());
                                 }
                                 // Super+Shift+R: reload config & restart
-                                Keysym::r => {
+                                Keysym::r if mods.shift => {
                                     info!("🔄 Reloading Anchor...");
                                     std::process::Command::new("kill")
                                         .arg("-SIGUSR1")
@@ -2857,7 +2857,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
                         // 屏幕录制帧捕获（每 6 帧采样一次 ≈ 10fps，降低 GPU→CPU 压力）
-                        if state.record_state.recording && is_focused_output && state.frame % 6 == 0 {
+                        if state.record_state.recording && is_focused_output && state.frame % 3 == 0 {
                             use smithay::backend::allocator::Fourcc;
                             use smithay::backend::renderer::Renderer;
                             let region = Rectangle::from_size((ow, oh).into());

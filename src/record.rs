@@ -23,7 +23,7 @@ impl RecordState {
             recording: false,
             width: 0,
             height: 0,
-            fps: 10,
+            fps: 20,
             frame_tx: None,
         }
     }
