@@ -281,3 +281,15 @@ For SDDM: Create `/usr/share/wayland-sessions/anchor.desktop` with same content.
     clipboard interop with X11 must be done through Smithay's own
     selection APIs (`XwmHandler::send_selection`, `X11Wm::set_selection`),
     NEVER via external CLI tools.
+22. **Session restart MUST restore critical D-Bus daemons.** When anchor
+    dies and is restarted (e.g. after a crash, `kill $(pgrep anchor)`),
+    the GDM login flow does NOT re-run — anchor is restarted in place.
+    But gnome-keyring-daemon, dbus-update-activation-environment state,
+    and any other session-level D-Bus services that were children of
+    anchor (or inherited via login) are now gone. Without restarting
+    them, browsers will see an empty Secret Service (login state
+    appears as a fresh user) and D-Bus auto-launch services won't
+    activate. `scripts/anchor-session` must always run
+    `dbus-update-activation-environment --systemd` and
+    `gnome-keyring-daemon --start --replace` before `exec anchor`
+    to keep the session consistent across compositor restarts.
