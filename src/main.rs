@@ -2028,33 +2028,48 @@ impl App {
                               self.dirty = true;
                          }
                         } else if self.overview.is_overview() {
-                            // Overview 3D：用水平卡片布局计算点击区域
-                            let card_margin = 80i32;
-                            let card_gap = 24i32;
-                            let card_h = oh - card_margin * 2;
-                            let card_scale = card_h as f32 / oh as f32;
-                            let card_w = (ow as f32 * card_scale) as i32;
+                            // Overview Cover Flow：计算点击区域
+                            // 和 Phase 1.5 完全相同的布局计算
                             let active_wss: Vec<usize> = (0..NUM_WORKSPACES)
                                 .filter(|&i| self.workspaces[i].tops.len() + self.workspaces[i].x11_surfaces.len() > 0)
                                 .collect();
                             let n_cards = active_wss.len().max(1);
-                            let total_w = n_cards as i32 * card_w + (n_cards as i32 - 1) * card_gap;
-                            let start_x = (ow - total_w) / 2;
+                            let hover_ws = self.overview.hover_ws();
+                            let hover_idx = hover_ws
+                                .and_then(|h| active_wss.iter().position(|&w| w == h))
+                                .or_else(|| active_wss.iter().position(|&w| w == self.active_ws))
+                                .unwrap_or(0);
+
+                            let base_scale: f32 = 0.55;
+                            let base_w = (ow as f32 * base_scale) as i32;
+                            let base_h = (oh as f32 * base_scale) as i32;
+                            let center_x = ow / 2;
+                            let spacing = base_w as f32 * 0.55;
 
                             for (ci, &ws_i) in active_wss.iter().enumerate() {
-                                let cx = start_x + ci as i32 * (card_w + card_gap);
-                                let cy = card_margin;
-                                if px >= cx && px < cx + card_w && py >= cy && py < cy + card_h {
-                                    // 命中工作区 → 切换并关闭 Overview
-                                    self.overview.close();
-                                    self.switch_workspace(ws_i);
-                                    return;
+                                let dist = (ci as i32 - hover_idx as i32).abs();
+                                let scale = if dist == 0 { base_scale } else { base_scale * (1.0 - 0.12 * dist as f32).max(0.3) };
+                                let cw = (ow as f32 * scale) as i32;
+                                let ch = (oh as f32 * scale) as i32;
+                                let offset = (ci as i32 - hover_idx as i32) as f32;
+                                let card_x = if offset == 0.0 {
+                                   center_x - cw / 2
+                                } else {
+                                   let card_center = center_x as f32 + offset * spacing;
+                                   (card_center - cw as f32 / 2.0) as i32
+                                };
+                                let card_y = (oh - ch) / 2;
+
+                                if px >= card_x && px < card_x + cw && py >= card_y && py < card_y + ch {
+                                   self.overview.close();
+                                   self.switch_workspace(ws_i);
+                                   return;
                                 }
                             }
                             // 点击卡片外 → 关闭
                             self.overview.close();
                             self.dirty = true;
-                        }
+                         }
                     }
                     return; // ← 无论什么鼠标事件都拦截，不穿透到下层窗口
                 }
@@ -3582,7 +3597,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             scale: f64,
                         }
                         let mut task_panel_thumbs: Vec<ThumbItem> = Vec::new();
-                        let mut overview_thumbs: Vec<(usize, Vec<ThumbItem>)> = Vec::new(); // (ws_idx, thumbs)
+                        let mut overview_thumbs: Vec<(usize, Vec<ThumbItem>, i32, i32, i32, i32, i32, bool, bool)> = Vec::new(); // (ws_idx, thumbs, cx, cy, cw, ch, dist, is_active, is_hover)
                         let mut scratchpad_data: Option<(i32, i32, i32, i32)> = None; // (x, y, w, h)
 
                         // 每个 output 都渲染自己工作区的窗口（不再限制 is_primary）
@@ -3972,9 +3987,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let tx = thumb_ox + (sx as f32 * thumb_scale) as i32;
                                     let ty = panel_y + 20 + (sy as f32 * thumb_scale) as i32;
 
-                                    // location 传反缩放位置
-                                    let loc_x = (tx as f32 / thumb_scale) as i32;
-                                    let loc_y = (ty as f32 / thumb_scale) as i32;
+                                    // CSD 偏移修正
+                                    let geo_offset = match slot {
+                                        WindowSlot::Wl(idx) => {
+                                            ws.tops.get(*idx).map(|tl| {
+                                                smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
+                                                    let g = states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry.unwrap_or_default();
+                                                    (g.loc.x, g.loc.y)
+                                                })
+                                            }).unwrap_or((0, 0))
+                                        }
+                                        WindowSlot::X11(_) => (0, 0),
+                                    };
+
+                                    // location = (target_pos - geo_offset * scale) / scale
+                                    let loc_x = ((tx as f32 - geo_offset.0 as f32 * thumb_scale) / thumb_scale) as i32;
+                                    let loc_y = ((ty as f32 - geo_offset.1 as f32 * thumb_scale) / thumb_scale) as i32;
 
                                     if let Some(elems) = match slot {
                                         WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| {
@@ -4004,12 +4032,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 }
                             }
                             else if state.overview.is_overview() && progress > 0.15 {
-                                // Overview 3D 俯瞰：水平卡片排列
-                                let card_margin = 80i32;
-                                let card_gap = 24i32;
-                                let card_h = oh - card_margin * 2;
-                                let card_scale = card_h as f32 / oh as f32;
-                                let card_w = (ow as f32 * card_scale) as i32;
+                                // ── Overview Cover Flow ──
+                                // 3D 效果：选中卡片居中放大，两侧缩小渐隐
                                 let active_wss: Vec<usize> = (0..NUM_WORKSPACES)
                                     .filter(|&i| {
                                         let ws = &state.workspaces[i];
@@ -4017,22 +4041,69 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     })
                                     .collect();
                                 let n_cards = active_wss.len().max(1);
-                                let total_cards_w = n_cards as i32 * card_w + (n_cards as i32 - 1) * card_gap;
-                                let start_x = (ow - total_cards_w) / 2;
 
                                 let hover_ws = match &state.overview {
                                     OverviewState::Overview { hover_ws, .. } => *hover_ws,
                                     _ => None,
                                 };
+                                // 选中卡片的索引（默认 active_ws）
+                                let hover_idx = hover_ws
+                                    .and_then(|h| active_wss.iter().position(|&w| w == h))
+                                    .or_else(|| active_wss.iter().position(|&w| w == state.active_ws))
+                                    .unwrap_or(0);
+
+                                // 基础卡片尺寸
+                                let base_scale = 0.55; // 选中卡片的缩放
+                                let base_w = (ow as f32 * base_scale) as i32;
+                                let base_h = (oh as f32 * base_scale) as i32;
+                                let card_y = (oh - base_h) / 2;
+                                let side_gap = 16i32;
 
                                 for (ci, &ws_i) in active_wss.iter().enumerate() {
-                                    let is_hover = hover_ws == Some(ws_i);
+                                    let dist = (ci as i32 - hover_idx as i32).abs();
+                                    let is_hover = ci == hover_idx;
                                     let is_active = ws_i == state.active_ws;
-                                    let scale = if is_hover { card_scale * 1.08 } else { card_scale };
+
+                                    // Cover Flow: 距离越远越小越暗
+                                    let scale = if dist == 0 {
+                                        base_scale
+                                    } else {
+                                        base_scale * (1.0 - 0.12 * dist as f32).max(0.3)
+                                    };
                                     let cw = (ow as f32 * scale) as i32;
                                     let ch = (oh as f32 * scale) as i32;
-                                    let cx = start_x + ci as i32 * (card_w + card_gap) + (card_w - cw) / 2;
-                                    let cy = card_margin + (card_h - ch) / 2;
+
+                                    // 水平位置：hover 居中，其他在两侧
+                                    let center_x = ow / 2;
+                                    let card_x = if ci == hover_idx {
+                                        center_x - cw / 2
+                                    } else if ci < hover_idx {
+                                        // 左侧卡片：hover 左边界往左排列
+                                        let left_edge = center_x - base_w / 2;
+                                        let mut x = left_edge - side_gap;
+                                        for k in (ci..hover_idx).rev() {
+                                            let k_dist = (k as i32 - hover_idx as i32).abs();
+                                            let k_scale = base_scale * (1.0 - 0.12 * k_dist as f32).max(0.3);
+                                            let k_w = (ow as f32 * k_scale) as i32;
+                                            x -= k_w + side_gap;
+                                        }
+                                        x + cw + side_gap // 反向累计修正
+                                    } else {
+                                        // 右侧卡片：hover 右边界往右排列
+                                        let right_edge = center_x + base_w / 2;
+                                        right_edge + side_gap + (ci - hover_idx - 1) as i32 * (cw + side_gap) + (cw + side_gap) // 简化
+                                    };
+                                    // 简化计算：统一从 hover 中心出发
+                                    let offset_from_center = (ci as i32 - hover_idx as i32) as f32;
+                                    let card_x = if offset_from_center == 0.0 {
+                                        (center_x - cw / 2) as i32
+                                    } else {
+                                        // 每张卡片中心 = 屏幕中心 + offset * (base_w * 0.7)
+                                        let spacing = base_w as f32 * 0.55;
+                                        let card_center = center_x as f32 + offset_from_center * spacing;
+                                        (card_center - cw as f32 / 2.0) as i32
+                                    };
+                                    let card_y_pos = (oh - ch) / 2;
 
                                     let ws = &state.workspaces[ws_i];
                                     let order = ws.effective_order();
@@ -4044,12 +4115,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             wi, n, ow, oh, bar_h, &state.cfg,
                                             ws.layout, ws.split,
                                         );
-                                        let tx = cx + (sx as f32 * scale) as i32;
-                                        let ty = cy + (sy as f32 * scale) as i32;
+                                        // 缩略图位置 = 卡片位置 + slot位置 * 缩放
+                                        let tx = card_x + (sx as f32 * scale) as i32;
+                                        let ty = card_y_pos + (sy as f32 * scale) as i32;
 
-                                        // location 传反缩放位置
-                                        let loc_x = (tx as f32 / scale) as i32;
-                                        let loc_y = (ty as f32 / scale) as i32;
+                                        // CSD 偏移修正：获取窗口 geometry 偏移
+                                        let geo_offset = match wslot {
+                                            WindowSlot::Wl(idx) => {
+                                                ws.tops.get(*idx).map(|tl| {
+                                                    smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
+                                                        let g = states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry.unwrap_or_default();
+                                                        (g.loc.x, g.loc.y)
+                                                    })
+                                                }).unwrap_or((0, 0))
+                                            }
+                                            WindowSlot::X11(_) => (0, 0),
+                                        };
+
+                                        // location = (target_pos - geo_offset * scale) / scale
+                                        let loc_x = ((tx as f32 - geo_offset.0 as f32 * scale) / scale) as i32;
+                                        let loc_y = ((ty as f32 - geo_offset.1 as f32 * scale) / scale) as i32;
 
                                         if let Some(elems) = match wslot {
                                             WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| {
@@ -4077,9 +4162,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }
                                         }
                                     }
-                                    if !ws_thumbs.is_empty() {
-                                        overview_thumbs.push((ws_i, ws_thumbs));
-                                    }
+                                    overview_thumbs.push((ws_i, ws_thumbs, card_x, card_y_pos, cw, ch, dist, is_active, is_hover));
                                 }
                             }
                         }
@@ -4326,77 +4409,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                             } else if state.overview.is_overview() {
-                                let hover_ws = match &state.overview {
-                                    OverviewState::Overview { hover_ws, .. } => *hover_ws,
-                                    _ => None,
-                                };
-                                // ── 3D 俯瞰：全屏暗色遮罩 + 卡片背景 + ws 标签 ──
-                                let alpha = (progress * 0.85).min(0.85) as f32;
+                                // ── Cover Flow 3D ──
+                                // 全屏暗色遮罩
+                                let alpha = (progress * 0.9).min(0.9) as f32;
                                 f.clear(
                                     Color32F::new(0.02, 0.02, 0.06, alpha),
                                     &[Rectangle::from_size((ow, oh).into())],
                                 ).ok();
 
-                                // 画每个 ws 卡片的背景和标签
-                                let card_margin = 80i32;
-                                let card_gap = 24i32;
-                                let card_h = oh - card_margin * 2;
-                                let card_scale = card_h as f32 / oh as f32;
-                                let card_w = (ow as f32 * card_scale) as i32;
-                                let active_wss: Vec<usize> = (0..NUM_WORKSPACES)
-                                    .filter(|&i| state.workspaces[i].tops.len() + state.workspaces[i].x11_surfaces.len() > 0)
-                                    .collect();
-                                let n_cards = active_wss.len().max(1);
-                                let total_w = n_cards as i32 * card_w + (n_cards as i32 - 1) * card_gap;
-                                let start_x = (ow - total_w) / 2;
                                 let focus_color = layout::color_hex(&state.cfg.colors.focus_border);
 
-                                for (ci, &ws_i) in active_wss.iter().enumerate() {
-                                    let is_hover = hover_ws == Some(ws_i);
-                                    let is_active = ws_i == state.active_ws;
-                                    let scale = if is_hover { card_scale * 1.08 } else { card_scale };
-                                    let cw = (ow as f32 * scale) as i32;
-                                    let ch = (oh as f32 * scale) as i32;
-                                    let cx = start_x + ci as i32 * (card_w + card_gap) + (card_w - cw) / 2;
-                                    let cy = card_margin + (card_h - ch) / 2;
-
-                                    // 卡片背景
-                                    let bg_alpha: f32 = if is_hover { 0.4 } else if is_active { 0.3 } else { 0.15 };
-                                    let bg_color = if is_active {
+                                // 用 overview_thumbs 中的元数据画卡片背景和缩略图
+                                // overview_thumbs: (ws_idx, thumbs, cx, cy, cw, ch, dist, is_active, is_hover)
+                                for (_ws_i, thumbs, cx, cy, cw, ch, dist, is_active, is_hover) in &overview_thumbs {
+                                    // 卡片背景——距离越远越暗
+                                    let bg_alpha: f32 = if *dist == 0 { 0.35 } else if *dist == 1 { 0.2 } else { 0.1 };
+                                    let bg_color = if *is_active {
                                         Color32F::new(0.16, 0.20, 0.30, bg_alpha)
                                     } else {
                                         Color32F::new(0.10, 0.10, 0.16, bg_alpha)
                                     };
-                                    f.clear(bg_color, &[Rectangle::from_loc_and_size((cx, cy), (cw, ch))]).ok();
+                                    f.clear(bg_color, &[Rectangle::from_loc_and_size((*cx, *cy), (*cw, *ch))]).ok();
+
                                     // 卡片边框
-                                    let border_color = if is_active || is_hover {
+                                    let border_color = if *is_hover {
                                         focus_color
+                                    } else if *is_active {
+                                        Color32F::new(0.4, 0.45, 0.6, 0.7)
                                     } else {
-                                        Color32F::new(0.15, 0.15, 0.22, 0.5)
+                                        Color32F::new(0.15, 0.15, 0.22, 0.3)
                                     };
-                                    let bw = 2i32;
-                                    f.clear(border_color, &[layout::rect(cx, cy - bw, cw, bw)]).ok();
-                                    f.clear(border_color, &[layout::rect(cx, cy + ch, cw, bw)]).ok();
-                                    f.clear(border_color, &[layout::rect(cx - bw, cy, bw, ch)]).ok();
-                                    f.clear(border_color, &[layout::rect(cx + cw, cy, bw, ch)]).ok();
+                                    let bw = if *is_hover { 3 } else { 2 };
+                                    f.clear(border_color, &[layout::rect(*cx, *cy - bw, *cw, bw)]).ok();
+                                    f.clear(border_color, &[layout::rect(*cx, *cy + *ch, *cw, bw)]).ok();
+                                    f.clear(border_color, &[layout::rect(*cx - bw, *cy, bw, *ch)]).ok();
+                                    f.clear(border_color, &[layout::rect(*cx + *cw, *cy, bw, *ch)]).ok();
+
                                     // WS 标签
-                                    let label_color = if is_active {
-                                        focus_color
+                                    let label_color = if *is_hover {
+                                        (focus_color.r(), focus_color.g(), focus_color.b())
+                                    } else if *is_active {
+                                        (0.7, 0.7, 0.8)
                                     } else {
-                                        Color32F::new(0.6, 0.6, 0.7, 0.8)
+                                        (0.4, 0.4, 0.5)
                                     };
                                     crate::text_render::draw_text(
                                         &mut f,
-                                        &format!("Workspace {}", ws_i + 1),
-                                        cx + 8,
-                                        cy - 22,
+                                        &format!("WS {}", _ws_i + 1),
+                                        *cx + 8,
+                                        *cy - 22,
                                         14.0,
-                                        if is_active { (focus_color.r(), focus_color.g(), focus_color.b()) } else { (0.6, 0.6, 0.7) },
+                                        label_color,
                                     );
-                                }
 
-                                // 画真窗口缩略图
-                                for (_ws_i, thumbs) in &overview_thumbs {
+                                    // 画真窗口缩略图
                                     for thumb in thumbs {
                                         if !thumb.elems.is_empty() {
                                             let _ = draw_render_elements(
