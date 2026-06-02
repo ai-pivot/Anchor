@@ -3958,12 +3958,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Phase 1.5: collect thumbnail elements for Task Panel / Overview
                         // ═══════════════════════════════════════════════
                         //
-                        // 缩略图渲染原理：
-                        // render_elements_from_surface_tree 产生原始尺寸的 element
-                        // draw_render_elements(f, scale, ...) 会把 element 的 geometry 按 scale 缩放
-                        // 包括位置和尺寸。所以 location 要传 (target_pos / scale)，这样
-                        // 渲染后位置 = (target_pos / scale * scale) = target_pos
-                        // 渲染后尺寸 = original_size * scale
+                        // 缩略图渲染原理（已验证）：
+                        // draw_render_elements(f, scale, ...) 只缩放 buffer 尺寸，不缩放位置。
+                        // 所以 location 直接传目标屏幕位置！scale 只控制渲染尺寸缩小。
                         //
                         if is_focused_output && state.overview.is_active() {
                             let progress = state.overview.progress();
@@ -3971,38 +3968,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 // Task Panel: 用真实 slot 布局
                                 let panel_h = (oh as f32 * 0.35) as i32;
                                 let thumb_scale = (panel_h as f32 - 40.0) / oh as f32;
+                                let thumb_ow = (ow as f32 * thumb_scale) as i32;
+                                let thumb_ox = (ow - thumb_ow) / 2;
+                                let panel_y = oh - panel_h;
 
                                 let ws = &state.workspaces[state.active_ws];
                                 let order = ws.effective_order();
                                 let n = order.len();
                                 for (i, slot) in order.iter().enumerate() {
-                                    let (sx, sy, _sw, _sh) = layout::slot(
+                                    let (sx, sy, sw, sh) = layout::slot(
                                         i, n, ow, oh, bar_h, &state.cfg,
                                         ws.layout, ws.split,
                                     );
-                                    // 缩略图在面板中的目标位置（居中）
-                                    let thumb_ow = (ow as f32 * thumb_scale) as i32;
-                                    let thumb_ox = (ow - thumb_ow) / 2;
-                                    let panel_y = oh - panel_h;
                                     let tx = thumb_ox + (sx as f32 * thumb_scale) as i32;
                                     let ty = panel_y + 20 + (sy as f32 * thumb_scale) as i32;
 
-                                    // CSD 偏移修正
-                                    let geo_offset = match slot {
-                                        WindowSlot::Wl(idx) => {
-                                            ws.tops.get(*idx).map(|tl| {
-                                                smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
-                                                    let g = states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry.unwrap_or_default();
-                                                    (g.loc.x, g.loc.y)
-                                                })
-                                            }).unwrap_or((0, 0))
-                                        }
+                                    // CSD 偏移（和桌面渲染一样：减去 geo.loc * scale）
+                                    let (gx, gy) = match slot {
+                                        WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| {
+                                            let g = smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
+                                                states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry.unwrap_or_default()
+                                            });
+                                            (g.loc.x, g.loc.y)
+                                        }).unwrap_or((0, 0)),
                                         WindowSlot::X11(_) => (0, 0),
                                     };
-
-                                    // location = (target_pos - geo_offset * scale) / scale
-                                    let loc_x = ((tx as f32 - geo_offset.0 as f32 * thumb_scale) / thumb_scale) as i32;
-                                    let loc_y = ((ty as f32 - geo_offset.1 as f32 * thumb_scale) / thumb_scale) as i32;
+                                    let loc_x = tx - (gx as f32 * thumb_scale) as i32;
+                                    let loc_y = ty - (gy as f32 * thumb_scale) as i32;
 
                                     if let Some(elems) = match slot {
                                         WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| {
@@ -4023,8 +4015,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         if !elems.is_empty() {
                                             task_panel_thumbs.push(ThumbItem {
                                                 elems, tx, ty,
-                                                tw: (_sw as f32 * thumb_scale) as i32,
-                                                th: (_sh as f32 * thumb_scale) as i32,
+                                                tw: (sw as f32 * thumb_scale) as i32,
+                                                th: (sh as f32 * thumb_scale) as i32,
                                                 scale: thumb_scale as f64,
                                             });
                                         }
@@ -4033,77 +4025,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             else if state.overview.is_overview() && progress > 0.15 {
                                 // ── Overview Cover Flow ──
-                                // 3D 效果：选中卡片居中放大，两侧缩小渐隐
                                 let active_wss: Vec<usize> = (0..NUM_WORKSPACES)
                                     .filter(|&i| {
-                                        let ws = &state.workspaces[i];
-                                        ws.tops.len() + ws.x11_surfaces.len() > 0
+                                        state.workspaces[i].tops.len() + state.workspaces[i].x11_surfaces.len() > 0
                                     })
                                     .collect();
-                                let n_cards = active_wss.len().max(1);
 
                                 let hover_ws = match &state.overview {
                                     OverviewState::Overview { hover_ws, .. } => *hover_ws,
                                     _ => None,
                                 };
-                                // 选中卡片的索引（默认 active_ws）
                                 let hover_idx = hover_ws
                                     .and_then(|h| active_wss.iter().position(|&w| w == h))
                                     .or_else(|| active_wss.iter().position(|&w| w == state.active_ws))
                                     .unwrap_or(0);
 
-                                // 基础卡片尺寸
-                                let base_scale = 0.55; // 选中卡片的缩放
+                                let base_scale: f32 = 0.55;
                                 let base_w = (ow as f32 * base_scale) as i32;
-                                let base_h = (oh as f32 * base_scale) as i32;
-                                let card_y = (oh - base_h) / 2;
-                                let side_gap = 16i32;
+                                let spacing = base_w as f32 * 0.55;
+                                let center_x = ow as f32 / 2.0;
 
                                 for (ci, &ws_i) in active_wss.iter().enumerate() {
                                     let dist = (ci as i32 - hover_idx as i32).abs();
                                     let is_hover = ci == hover_idx;
                                     let is_active = ws_i == state.active_ws;
-
-                                    // Cover Flow: 距离越远越小越暗
-                                    let scale = if dist == 0 {
-                                        base_scale
+                                    let card_scale = if dist == 0 { base_scale } else { base_scale * (1.0 - 0.12 * dist as f32).max(0.3) };
+                                    let cw = (ow as f32 * card_scale) as i32;
+                                    let ch = (oh as f32 * card_scale) as i32;
+                                    let offset = (ci as i32 - hover_idx as i32) as f32;
+                                    let card_x = if offset == 0.0 {
+                                        (center_x - cw as f32 / 2.0) as i32
                                     } else {
-                                        base_scale * (1.0 - 0.12 * dist as f32).max(0.3)
-                                    };
-                                    let cw = (ow as f32 * scale) as i32;
-                                    let ch = (oh as f32 * scale) as i32;
-
-                                    // 水平位置：hover 居中，其他在两侧
-                                    let center_x = ow / 2;
-                                    let card_x = if ci == hover_idx {
-                                        center_x - cw / 2
-                                    } else if ci < hover_idx {
-                                        // 左侧卡片：hover 左边界往左排列
-                                        let left_edge = center_x - base_w / 2;
-                                        let mut x = left_edge - side_gap;
-                                        for k in (ci..hover_idx).rev() {
-                                            let k_dist = (k as i32 - hover_idx as i32).abs();
-                                            let k_scale = base_scale * (1.0 - 0.12 * k_dist as f32).max(0.3);
-                                            let k_w = (ow as f32 * k_scale) as i32;
-                                            x -= k_w + side_gap;
-                                        }
-                                        x + cw + side_gap // 反向累计修正
-                                    } else {
-                                        // 右侧卡片：hover 右边界往右排列
-                                        let right_edge = center_x + base_w / 2;
-                                        right_edge + side_gap + (ci - hover_idx - 1) as i32 * (cw + side_gap) + (cw + side_gap) // 简化
-                                    };
-                                    // 简化计算：统一从 hover 中心出发
-                                    let offset_from_center = (ci as i32 - hover_idx as i32) as f32;
-                                    let card_x = if offset_from_center == 0.0 {
-                                        (center_x - cw / 2) as i32
-                                    } else {
-                                        // 每张卡片中心 = 屏幕中心 + offset * (base_w * 0.7)
-                                        let spacing = base_w as f32 * 0.55;
-                                        let card_center = center_x as f32 + offset_from_center * spacing;
+                                        let card_center = center_x + offset * spacing;
                                         (card_center - cw as f32 / 2.0) as i32
                                     };
-                                    let card_y_pos = (oh - ch) / 2;
+                                    let card_y = (oh - ch) / 2;
 
                                     let ws = &state.workspaces[ws_i];
                                     let order = ws.effective_order();
@@ -4115,26 +4071,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             wi, n, ow, oh, bar_h, &state.cfg,
                                             ws.layout, ws.split,
                                         );
-                                        // 缩略图位置 = 卡片位置 + slot位置 * 缩放
-                                        let tx = card_x + (sx as f32 * scale) as i32;
-                                        let ty = card_y_pos + (sy as f32 * scale) as i32;
+                                        let tx = card_x + (sx as f32 * card_scale) as i32;
+                                        let ty = card_y + (sy as f32 * card_scale) as i32;
 
-                                        // CSD 偏移修正：获取窗口 geometry 偏移
-                                        let geo_offset = match wslot {
-                                            WindowSlot::Wl(idx) => {
-                                                ws.tops.get(*idx).map(|tl| {
-                                                    smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
-                                                        let g = states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry.unwrap_or_default();
-                                                        (g.loc.x, g.loc.y)
-                                                    })
-                                                }).unwrap_or((0, 0))
-                                            }
+                                        let (gx, gy) = match wslot {
+                                            WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| {
+                                                let g = smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
+                                                    states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry.unwrap_or_default()
+                                                });
+                                                (g.loc.x, g.loc.y)
+                                            }).unwrap_or((0, 0)),
                                             WindowSlot::X11(_) => (0, 0),
                                         };
-
-                                        // location = (target_pos - geo_offset * scale) / scale
-                                        let loc_x = ((tx as f32 - geo_offset.0 as f32 * scale) / scale) as i32;
-                                        let loc_y = ((ty as f32 - geo_offset.1 as f32 * scale) / scale) as i32;
+                                        let loc_x = tx - (gx as f32 * card_scale) as i32;
+                                        let loc_y = ty - (gy as f32 * card_scale) as i32;
 
                                         if let Some(elems) = match wslot {
                                             WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| {
@@ -4155,14 +4105,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             if !elems.is_empty() {
                                                 ws_thumbs.push(ThumbItem {
                                                     elems, tx, ty,
-                                                    tw: (sw as f32 * scale) as i32,
-                                                    th: (sh as f32 * scale) as i32,
-                                                    scale: scale as f64,
+                                                    tw: (sw as f32 * card_scale) as i32,
+                                                    th: (sh as f32 * card_scale) as i32,
+                                                    scale: card_scale as f64,
                                                 });
                                             }
                                         }
                                     }
-                                    overview_thumbs.push((ws_i, ws_thumbs, card_x, card_y_pos, cw, ch, dist, is_active, is_hover));
+                                    overview_thumbs.push((ws_i, ws_thumbs, card_x, card_y, cw, ch, dist, is_active, is_hover));
                                 }
                             }
                         }
