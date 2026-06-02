@@ -28,17 +28,22 @@ src/
   cursor.rs      — XCursor theme loading and rendering
   notify.rs      — DBus notification listener (org.freedesktop.Notifications)
   screenshot.rs  — Screenshot capture (area selection, DRM framebuffer dump)
+  overview.rs    — Overview/Task Panel state machine (Cover Flow, animation)
+  physics.rs     — Spring physics engine (scroll snap, momentum)
+  record.rs      — Screen recording state
   block_linear.rs — Block-linear memory layout helpers (NVIDIA)
   layout/
     mod.rs        — Module entry point, re-exports all public API
     geom.rs       — Layout geometry (LayoutPreset, SplitDir, slot calculation)
     util.rs       — Shared helpers (opaque, color_hex, rect, spacing constants)
-    wallpaper.rs  — Wallpaper rendering (gradient grid, animated glow spots)
-    decorations.rs — Window border decorations (focused/unfocused)
-    headbar.rs    — Top bar (workspace indicators, clock, date, window info)
-    notifications.rs — Toast notification rendering
-    launcher.rs   — Launcher overlay rendering
+    wallpaper.rs  — Wallpaper rendering (gradient grid, 5 glow spots, breathing pulse)
+    decorations.rs — Window border decorations (multi-layer glow, gradient, corners)
+    headbar.rs    — Top bar (gradient ws, sliding indicator, pulse clock, CPU/MEM glow)
+    notifications.rs — Toast notification rendering (shadow, fade animation)
+    launcher.rs   — Launcher overlay rendering (blinking cursor, glow border)
     lock_screen.rs — Lock screen rendering (5 animated styles + dim overlay)
+    overview.rs   — Overview/Task Panel background rendering (shadow, dim)
+```
 scripts/
   anchor-session   — DM session wrapper (auto-detects GPU, sets env vars conditionally)
   anchor-launcher  — App launcher script (dmenu/wmenu based)
@@ -47,40 +52,45 @@ Cargo.toml        — Dependencies (smithay, fontdue, libc, chrono, image, zbus,
 build.rs          — Build script (links libpam)
 ```
 
-## Features (v29)
+## Features (v30)
 
 | Feature | Keybinding | Description |
 |---------|-----------|-------------|
 | Layout presets | `Super+Space` | MasterStack / Columns / Center / Grid per-workspace |
-| Notifications | Auto | Toast overlay with fade-in/out, 3s duration |
-| Window animations | Auto | Workspace switch slide (200ms ease-out cubic) |
-| Scratchpad | `Super+`` | Quake-style dropdown terminal (floating overlay) |
+| Notifications | Auto | Toast overlay with fade-in/out, 3s duration, shadow |
+| Window animations | Auto | Layout slide (350ms ease), appear flash (350ms accent pulse) |
+| Workspace scroll | Touchpad/Scroll | Infinite scroll with spring physics, adjacent ws visible |
+| Scratchpad | `Super+`` | Quake-style dropdown terminal (glow border + shadow) |
 | Window rules | config.toml | Auto-assign apps to workspaces by app_id |
 | Screenshot | `Super+P` | DRM framebuffer dump → `$HOME/Pictures/Screenshots/` |
-| App launcher | `Super+D` | Built-in launcher with search filter |
+| App launcher | `Super+D` | Built-in launcher with search filter, blinking cursor |
 | Fullscreen | `Super+F` | Per-window fullscreen |
 | Move window | `Super+Shift+1-9` | Move focused window to workspace |
 | Close | `Super+Q` | Close focused window |
 | XWayland | Auto | X11 app support (Feishu, Chrome, Edge, etc.) |
-| Lock screen | `Super+Esc` | 5 random animated styles, PAM password auth |
+| Lock screen | `Super+Esc` | 5 random animated styles, PAM password auth, shake on error |
+| Task Panel | `Super+Tab` | Real window thumbnails with titles + borders |
+| Overview | `Super+A` | Cover Flow 3D with hover pulse + window titles |
 
 ## Rendering Pipeline
 
-8-step layered pipeline, all rendered via GlesRenderer (GPU OpenGL ES):
+10-step layered pipeline, all rendered via GlesRenderer (GPU OpenGL ES):
 
 ```
-Step 1: Wallpaper (gradient/solid/image texture)
-Step 2: Window content (all elements, single draw call)
+Step 1:   Wallpaper (gradient/solid/image texture + 5 glow spots + breathing pulse)
+Step 2:   Window content (all elements, single draw call)
 Step 2.5: IM popup (Wayland input method)
-Step 3: Window decorations (border lines)
-Step 4: Scratchpad overlay (opaque background + border + content)
+Step 2.6: Window appear flash (accent pulse on new window, 350ms)
+Step 3:   Window decorations (multi-layer glow + gradient borders + corner highlights)
+Step 4:   Scratchpad overlay (glow border + shadow + content)
 Step 4.5: X11 override-redirect windows (input method popups, tooltips)
-Step 5: Headbar (workspace indicators, clock, date, CPU/MEM)
-Step 6: Notifications (toast overlay)
-Step 7: App launcher (search + list)
-Step 8: Cursor
-Step 9: Screenshot area selection overlay
-Step 10: Screenshot capture (copy_framebuffer after finish, before drop target)
+Step 4.8: Overview/Task Panel (Cover Flow 3D / real thumbnails + titles + shadows)
+Step 5:   Headbar (gradient ws blocks + sliding indicator + pulse clock + CPU/MEM glow)
+Step 6:   Notifications (toast overlay with shadow)
+Step 7:   App launcher (search with blinking cursor + glow border)
+Step 8:   Cursor
+Step 9:   Screenshot area selection overlay
+Step 10:  Screenshot capture (copy_framebuffer after finish, before drop target)
 ```
 
 **Key principle**: Window elements are collected in order (0→N) into a single vec,
