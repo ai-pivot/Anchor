@@ -199,6 +199,8 @@ struct App {
     loop_handle: Option<smithay::reexports::calloop::LoopHandle<'static, App>>,
     // 锁屏状态
     lock_state: LockState,
+    // X11 辅助窗口（候选框等）出现前保存的原应用焦点
+    x11_saved_focus: Option<WlSurface>,
     // CPU/MEM 统计（headbar 显示用）
     cpu_usage: f32, // 0.0 ~ 1.0
     mem_usage: f32, // 0.0 ~ 1.0
@@ -878,7 +880,10 @@ impl App {
                     })
                 };
                 if let Some(surf) = focus_surf {
-                    self.workspaces[self.active_ws].focus = Some(surf);
+                    self.workspaces[self.active_ws].focus = Some(surf.clone());
+                    let kbd = self.kbd.clone();
+                    let serial = SERIAL_COUNTER.next_serial();
+                    kbd.set_focus(self, Some(surf), serial);
                 }
             }
             _ => return,
@@ -1975,10 +1980,19 @@ impl XdgShellHandler for App {
         // Client (e.g. browser video) requests fullscreen
         let wl_surf = surface.wl_surface().clone();
         for (ws_idx, ws) in self.workspaces.iter_mut().enumerate() {
-            for (i, tl) in ws.tops.iter().enumerate() {
-                if tl.wl_surface() == &wl_surf {
+            let order = ws.effective_order();
+            for (i, slot) in order.iter().enumerate() {
+                let matched = match slot {
+                    WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| tl.wl_surface() == &wl_surf).unwrap_or(false),
+                    WindowSlot::X11(_) => false,
+                };
+                if matched {
                     info!("🔳 客户端请求全屏 #{} (工作区 {})", i, ws_idx + 1);
                     ws.fullscreen = Some(i);
+                    ws.focus = Some(wl_surf.clone());
+                    let kbd = self.kbd.clone();
+                    let serial = SERIAL_COUNTER.next_serial();
+                    kbd.set_focus(self, Some(wl_surf.clone()), serial);
                     self.do_layout_animated();
                     self.dirty = true;
                     return;
@@ -2654,6 +2668,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         screenshot_result: None,
         loop_handle: None,
         lock_state: LockState::new(),
+        x11_saved_focus: None,
         cpu_usage: 0.0,
         mem_usage: 0.0,
         cpu_prev_idle: 0,
@@ -3666,7 +3681,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &state.cfg,
                                 ow,
                                 oh,
-                                n_windows,
+                                n_total,
                                 out_ws_focus_idx,
                                 time_secs,
                                 &out_window_title,
@@ -4046,6 +4061,8 @@ impl smithay::xwayland::XwmHandler for App {
 
         // Focus the new X11 window
         if let Some(wl) = window.wl_surface() {
+            // 保存当前焦点（原应用），辅助窗口消失后恢复
+            self.x11_saved_focus = self.workspaces[self.active_ws].focus.clone();
             self.workspaces[self.active_ws].focus = Some(wl.clone());
             let kbd = self.kbd.clone();
             let serial = SERIAL_COUNTER.next_serial();
@@ -4076,30 +4093,48 @@ impl smithay::xwayland::XwmHandler for App {
     ) {
         tracing::info!("🗑️  X11 unmapped: class='{}'", window.class());
         let wid = window.window_id();
+
+        // 检查这个窗口是否在平铺布局中（x11_surfaces 里）
+        let was_in_layout = self.workspaces.iter().any(|ws| {
+            ws.x11_surfaces.iter().any(|s| s.window_id() == wid)
+        });
+
         for ws in &mut self.workspaces {
             ws.x11_surfaces.retain(|s| s.window_id() != wid);
             ws.rebuild_order();
         }
         self.xw.or_surfaces.retain(|s| s.window_id() != wid);
-        self.do_layout_animated();
-        // Refocus — find the last window in effective_order
-        let order = self.workspaces[self.active_ws].effective_order();
-        if let Some((_, slot)) = order.iter().enumerate().last() {
-            let surf = match slot {
-                WindowSlot::Wl(idx) => self.workspaces[self.active_ws]
-                    .tops
-                    .get(*idx)
-                    .map(|tl| tl.wl_surface().clone()),
-                WindowSlot::X11(idx) => self.workspaces[self.active_ws]
-                    .x11_surfaces
-                    .get(*idx)
-                    .and_then(|xs| xs.wl_surface()),
-            };
-            if let Some(surf) = surf {
-                self.workspaces[self.active_ws].focus = Some(surf.clone());
+
+        if was_in_layout {
+            // 平铺窗口关闭：需要重新布局和 refocus
+            self.do_layout_animated();
+            let order = self.workspaces[self.active_ws].effective_order();
+            if let Some((_, slot)) = order.iter().enumerate().last() {
+                let surf = match slot {
+                    WindowSlot::Wl(idx) => self.workspaces[self.active_ws]
+                        .tops
+                        .get(*idx)
+                        .map(|tl| tl.wl_surface().clone()),
+                    WindowSlot::X11(idx) => self.workspaces[self.active_ws]
+                        .x11_surfaces
+                        .get(*idx)
+                        .and_then(|xs| xs.wl_surface()),
+                };
+                if let Some(surf) = surf {
+                    self.workspaces[self.active_ws].focus = Some(surf.clone());
+                    let kbd = self.kbd.clone();
+                    let serial = SERIAL_COUNTER.next_serial();
+                    kbd.set_focus(self, Some(surf), serial);
+                }
+            }
+        } else {
+            // 辅助窗口（候选框、tooltip 等）消失：恢复到辅助窗口出现前的原应用焦点
+            // 不做 layout 避免所有 X11 窗口收到不必要的 ConfigureWindow
+            if let Some(saved) = self.x11_saved_focus.take() {
+                self.workspaces[self.active_ws].focus = Some(saved.clone());
                 let kbd = self.kbd.clone();
                 let serial = SERIAL_COUNTER.next_serial();
-                kbd.set_focus(self, Some(surf), serial);
+                kbd.set_focus(self, Some(saved), serial);
             }
         }
         self.dirty = true;
@@ -4112,40 +4147,57 @@ impl smithay::xwayland::XwmHandler for App {
     ) {
         tracing::info!("💥 X11 destroyed: class='{}'", window.class());
         let wid = window.window_id();
-        // 重新映射 prev_positions（X11 窗口索引移位）
-        for ws_idx in 0..self.workspaces.len() {
-            if let Some(removed_idx) = self.workspaces[ws_idx]
-                .x11_surfaces
-                .iter()
-                .position(|s| s.window_id() == wid)
-            {
-                self.remap_prev_after_remove(&WindowSlot::X11(removed_idx));
-            }
-        }
-        for ws in &mut self.workspaces {
-            ws.x11_surfaces.retain(|s| s.window_id() != wid);
-            ws.rebuild_order();
-        }
-        self.xw.or_surfaces.retain(|s| s.window_id() != wid);
-        self.do_layout_animated();
-        // Refocus
-        let order = self.workspaces[self.active_ws].effective_order();
-        if let Some((_, slot)) = order.iter().enumerate().last() {
-            let surf = match slot {
-                WindowSlot::Wl(idx) => self.workspaces[self.active_ws]
-                    .tops
-                    .get(*idx)
-                    .map(|tl| tl.wl_surface().clone()),
-                WindowSlot::X11(idx) => self.workspaces[self.active_ws]
+
+        // 检查这个窗口是否在平铺布局中
+        let was_in_layout = self.workspaces.iter().any(|ws| {
+            ws.x11_surfaces.iter().any(|s| s.window_id() == wid)
+        });
+
+        if was_in_layout {
+            // 重新映射 prev_positions（X11 窗口索引移位）
+            for ws_idx in 0..self.workspaces.len() {
+                if let Some(removed_idx) = self.workspaces[ws_idx]
                     .x11_surfaces
-                    .get(*idx)
-                    .and_then(|xs| xs.wl_surface()),
-            };
-            if let Some(surf) = surf {
-                self.workspaces[self.active_ws].focus = Some(surf.clone());
+                    .iter()
+                    .position(|s| s.window_id() == wid)
+                {
+                    self.remap_prev_after_remove(&WindowSlot::X11(removed_idx));
+                }
+            }
+            for ws in &mut self.workspaces {
+                ws.x11_surfaces.retain(|s| s.window_id() != wid);
+                ws.rebuild_order();
+            }
+            self.xw.or_surfaces.retain(|s| s.window_id() != wid);
+            self.do_layout_animated();
+            // Refocus
+            let order = self.workspaces[self.active_ws].effective_order();
+            if let Some((_, slot)) = order.iter().enumerate().last() {
+                let surf = match slot {
+                    WindowSlot::Wl(idx) => self.workspaces[self.active_ws]
+                        .tops
+                        .get(*idx)
+                        .map(|tl| tl.wl_surface().clone()),
+                    WindowSlot::X11(idx) => self.workspaces[self.active_ws]
+                        .x11_surfaces
+                        .get(*idx)
+                        .and_then(|xs| xs.wl_surface()),
+                };
+                if let Some(surf) = surf {
+                    self.workspaces[self.active_ws].focus = Some(surf.clone());
+                    let kbd = self.kbd.clone();
+                    let serial = SERIAL_COUNTER.next_serial();
+                    kbd.set_focus(self, Some(surf), serial);
+                }
+            }
+        } else {
+            // 辅助窗口销毁：恢复到辅助窗口出现前的原应用焦点
+            self.xw.or_surfaces.retain(|s| s.window_id() != wid);
+            if let Some(saved) = self.x11_saved_focus.take() {
+                self.workspaces[self.active_ws].focus = Some(saved.clone());
                 let kbd = self.kbd.clone();
                 let serial = SERIAL_COUNTER.next_serial();
-                kbd.set_focus(self, Some(surf), serial);
+                kbd.set_focus(self, Some(saved), serial);
             }
         }
         self.dirty = true;
