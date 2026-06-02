@@ -3294,10 +3294,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         state.workspaces[out_ws_idx].split,
                                     );
                                     // 布局动画偏移（macOS 风格：从旧位置滑到新位置）
-                                    let (layout_dx, layout_dy) = state
-                                        .layout_anim
-                                        .offset_for(slot, (x, y))
-                                        .unwrap_or((0, 0));
+                                    // 只对触发动画的 output 播放，避免双屏下另一个屏幕的窗口也跟着动
+                                    let (layout_dx, layout_dy) = if is_focused_output {
+                                        state
+                                            .layout_anim
+                                            .offset_for(slot, (x, y))
+                                            .unwrap_or((0, 0))
+                                    } else {
+                                        (0, 0)
+                                    };
                                     match slot {
                                         WindowSlot::Wl(idx) => {
                                             if let Some(tl) = out_ws.tops.get(*idx) {
