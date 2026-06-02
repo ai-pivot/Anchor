@@ -19,9 +19,9 @@ pub fn render_wallpaper(f: &mut impl Frame, cfg: &Config, ow: i32, oh: i32, fram
     // Batch grid lines: one draw call for all horizontal, one for all vertical
     let grid = opaque(accent.0 * 0.03, accent.1 * 0.03, accent.2 * 0.03);
     let h_lines: Vec<Rectangle<i32, Physical>> =
-        (0..oh).step_by(64).map(|y| rect(0, y, ow, 1)).collect();
+        (0..oh).step_by(48).map(|y| rect(0, y, ow, 1)).collect();
     let v_lines: Vec<Rectangle<i32, Physical>> =
-        (0..ow).step_by(64).map(|x| rect(x, 0, 1, oh)).collect();
+        (0..ow).step_by(48).map(|x| rect(x, 0, 1, oh)).collect();
     if !h_lines.is_empty() {
         f.clear(grid, &h_lines).ok();
     }
@@ -32,8 +32,8 @@ pub fn render_wallpaper(f: &mut impl Frame, cfg: &Config, ow: i32, oh: i32, fram
     // Batch all dots into a single draw call
     let dot = opaque(accent.0 * 0.05, accent.1 * 0.05, accent.2 * 0.05);
     let dots: Vec<Rectangle<i32, Physical>> = (0..oh)
-        .step_by(64)
-        .flat_map(|y| (0..ow).step_by(64).map(move |x| rect(x, y, 2, 2)))
+        .step_by(48)
+        .flat_map(|y| (0..ow).step_by(48).map(move |x| rect(x, y, 2, 2)))
         .collect();
     if !dots.is_empty() {
         f.clear(dot, &dots).ok();

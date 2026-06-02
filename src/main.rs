@@ -4461,6 +4461,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     } else {
                                         thumb.title.clone()
                                     };
+                                    // 标题背景条（增加可读性）
+                                    f.clear(
+                                        layout::opaque(0.03, 0.03, 0.06),
+                                        &[layout::rect(thumb.tx - 2, thumb.ty + thumb.th + 1, thumb.tw + 4, 14)],
+                                    ).ok();
                                     crate::text_render::draw_text(
                                         &mut f,
                                         &display_title,
