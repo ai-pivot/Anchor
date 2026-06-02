@@ -181,6 +181,8 @@ struct App {
     layout_anim: LayoutAnimation,
     /// 上一次 layout_workspace 的 slot 位置（动画起点，在每次 layout 后更新）
     prev_positions: Vec<(crate::workspace::WindowSlot, (i32, i32))>,
+    /// 新窗口渐入动画：记录窗口创建时间（用于在渲染时画渐隐覆盖层）
+    window_appear: Vec<(usize, std::time::Instant)>, // (ws_idx, time) — 最近有窗口出现的 ws
     // 屏幕录制
     record_state: record::RecordState,
     // 多显示器尺寸信息（用于鼠标穿越）
@@ -789,6 +791,13 @@ impl App {
         });
 
         // 4. 构建 anim_positions
+        // 记录窗口出现事件（用于渐入动画）
+        if new_n > old_n {
+            self.window_appear.retain(|(ws, t)| {
+                *ws == self.active_ws && t.elapsed().as_millis() < 400
+            });
+            self.window_appear.push((self.active_ws, std::time::Instant::now()));
+        }
         let split = self.workspaces[self.active_ws].split;
         let mut anim_positions = Vec::new();
 
@@ -2995,6 +3004,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         scratchpad: ScratchpadState::new(),
         im_popup: None,
         pending_tops: Vec::new(),
+        window_appear: Vec::new(),
         dbus_notifications: notify::start_notification_daemon(),
         launcher: LauncherState::new(),
         ws_anim: WsAnimation {
@@ -4231,6 +4241,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Step 2.5: IM popup (只在焦点屏幕上显示)
                         if is_focused_output && !im_elems.is_empty() {
                             draw_render_elements(&mut f, 1.0, &im_elems, &[dmg])?;
+                        }
+
+                        // Step 2.6: 窗口出现闪光效果（新窗口创建时的微妙 accent 闪光）
+                        {
+                            let ws_idx = out_ws_idx;
+                            let flash_entries: Vec<_> = state.window_appear.iter()
+                                .filter(|(ws, _)| *ws == ws_idx)
+                                .collect();
+                            if let Some((_, time)) = flash_entries.first() {
+                                let elapsed = time.elapsed().as_millis() as f32;
+                                let duration = 350.0;
+                                if elapsed < duration {
+                                    let progress = elapsed / duration;
+                                    // 快速亮起 → 慢慢消退
+                                    let flash_alpha = if progress < 0.15 {
+                                        progress / 0.15 * 0.06
+                                    } else {
+                                        0.06 * (1.0 - (progress - 0.15) / 0.85)
+                                    };
+                                    let fc = layout::color_hex(&state.cfg.colors.focus_border);
+                                    f.clear(
+                                        Color32F::new(fc.r() * flash_alpha, fc.g() * flash_alpha, fc.b() * flash_alpha, 1.0),
+                                        &[layout::rect(0, 0, ow, oh)],
+                                    ).ok();
+                                    state.dirty = true;
+                                }
+                            }
+                            // 清理过期的 appear 记录
+                            state.window_appear.retain(|(_, t)| t.elapsed().as_millis() < 500);
                         }
 
                         // Step 3: Window decorations — 每个 output 都渲染自己工作区的装饰

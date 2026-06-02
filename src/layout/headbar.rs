@@ -74,6 +74,11 @@ pub fn render_headbar(
         )
         .ok();
     }
+    // 顶部高亮线（与底部呼应，更细更暗）
+    f.clear(
+        opaque(accent.0 * 0.3, accent.1 * 0.3, accent.2 * 0.3),
+        &[rect(0, 0, ow, 1)],
+    ).ok();
 
     let mut x = S4;
 
