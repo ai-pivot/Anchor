@@ -4549,7 +4549,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         (label_color.0 * 0.6, label_color.1 * 0.6, label_color.2 * 0.6),
                                     );
 
-                                    // 画真窗口缩略图
+                                    // 画真窗口缩略图 + 窗口标题标签
                                     for thumb in thumbs {
                                         if !thumb.elems.is_empty() {
                                             let _ = draw_render_elements(
@@ -4557,6 +4557,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 thumb.scale,
                                                 &thumb.elems,
                                                 &[dmg],
+                                            );
+                                        }
+                                        // 每个缩略图下方显示窗口标题
+                                        if *is_hover || *is_active {
+                                            let display_title = if thumb.title.len() > 15 {
+                                                format!("{}…", &thumb.title[..15])
+                                            } else {
+                                                thumb.title.clone()
+                                            };
+                                            crate::text_render::draw_text(
+                                                &mut f,
+                                                &display_title,
+                                                thumb.tx,
+                                                thumb.ty + thumb.th + 2,
+                                                9.0,
+                                                (label_color.0 * 0.5, label_color.1 * 0.5, label_color.2 * 0.5),
                                             );
                                         }
                                     }
