@@ -28,6 +28,8 @@ pub struct Config {
     pub cursor: Cursor,
     #[serde(default)]
     pub outputs: Vec<OutputConfig>,
+    #[serde(default)]
+    pub scroll: ScrollConfig,
 }
 
 /// 窗口规则：根据 app-id 或 title 自动分配工作区/布局
@@ -211,6 +213,46 @@ impl OutputConfig {
     }
 }
 
+/// 无限滚动工作区配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScrollConfig {
+    /// 是否启用无限滚动（弹簧吸附 + 惯性 + 触摸板手势）
+    #[serde(default = "ScrollConfig::default_enabled")]
+    pub enabled: bool,
+    /// 弹簧刚度（k）— 越大吸附越快。默认 300
+    #[serde(default = "ScrollConfig::default_stiffness")]
+    pub spring_stiffness: f64,
+    /// 弹簧阻尼（c）— 越大振荡越少。默认 30
+    #[serde(default = "ScrollConfig::default_damping")]
+    pub spring_damping: f64,
+    /// 惯性摩擦系数（per-frame @60fps）— 0.92 = 保留92%速度每帧
+    #[serde(default = "ScrollConfig::default_friction")]
+    pub friction: f64,
+    /// 触摸板滑动触发阈值（屏幕宽度的比例）
+    #[serde(default = "ScrollConfig::default_swipe_threshold")]
+    pub swipe_threshold: f64,
+}
+
+impl Default for ScrollConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            spring_stiffness: 300.0,
+            spring_damping: 30.0,
+            friction: 0.92,
+            swipe_threshold: 0.15,
+        }
+    }
+}
+
+impl ScrollConfig {
+    fn default_enabled() -> bool { true }
+    fn default_stiffness() -> f64 { 300.0 }
+    fn default_damping() -> f64 { 30.0 }
+    fn default_friction() -> f64 { 0.92 }
+    fn default_swipe_threshold() -> f64 { 0.15 }
+}
+
 pub fn parse_color(hex: &str) -> (f32, f32, f32) {
     let hex = hex.trim_start_matches('#');
     if hex.len() < 6 {
@@ -296,6 +338,7 @@ impl Default for Config {
             window_rules: Vec::new(),
             gpu: Gpu::default(),
             cursor: Cursor::default(),
+            scroll: ScrollConfig::default(),
             outputs: Vec::new(),
         }
     }

@@ -15,13 +15,17 @@ mod text_render;
 mod wallpaper;
 mod workspace;
 mod xwayland;
-use workspace::{WindowSlot, Workspace, NUM_WORKSPACES};
 mod lock;
 use lock::LockState;
 mod launcher;
 use launcher::LauncherState;
 mod scratchpad;
 use scratchpad::ScratchpadState;
+mod physics;
+use physics::{Spring, Momentum};
+use workspace::{WindowSlot, Workspace, NUM_WORKSPACES};
+mod overview;
+use overview::OverviewState;
 
 use std::{
     os::fd::AsRawFd,
@@ -206,6 +210,24 @@ struct App {
     mem_usage: f32, // 0.0 ~ 1.0
     cpu_prev_idle: u64,
     cpu_prev_total: u64,
+    // ── 无限滚动工作区（弹簧物理驱动）──
+    /// 连续滚动偏移量（0.0 = ws0 居中，1.0 = ws1 居中）
+    scroll_offset: f64,
+    /// 每个显示器的独立滚动偏移（多显示器各自独立）
+    scroll_offsets: Vec<f64>,
+    /// 吸附弹簧
+    scroll_spring: Spring,
+    /// 惯性滚动
+    scroll_momentum: Momentum,
+    // ── 触摸板手势状态 ──
+    gesture_active: bool,
+    gesture_dx: f64,
+    gesture_dy: f64,
+    gesture_fingers: u32,
+    /// 上一次渲染帧的时间戳（帧率无关的物理计算）
+    last_frame_time: std::time::Instant,
+    // ── Overview 状态机（任务面板 + 鸟瞰视图）──
+    overview: OverviewState,
 }
 
 /// 工作区切换动画状态
@@ -904,6 +926,7 @@ impl App {
     }
 
     /// 切换到指定工作区（只替换鼠标所在 output 的工作区）
+    /// 支持无限滚动：通过弹簧动画平滑过渡到目标工作区
     fn switch_workspace(&mut self, target: usize) {
         if target >= NUM_WORKSPACES {
             return;
@@ -912,7 +935,6 @@ impl App {
         let out_idx = self.focused_output;
 
         // 检查目标工作区是否已经在某个 output 上显示
-        // 如果是，把鼠标移到那个 output 即可
         for (oi, ws) in self.output_active_ws.iter().enumerate() {
             if *ws == target {
                 if oi != out_idx {
@@ -921,6 +943,11 @@ impl App {
                     self.pointer_pos = (ox as f64 + ow as f64 / 2.0, oy as f64 + oh as f64 / 2.0);
                     self.focused_output = oi;
                     self.active_ws = target;
+                    // 同步 scroll 状态到目标 output
+                    self.scroll_offset = self.scroll_offsets.get(oi).copied().unwrap_or(target as f64);
+                    self.scroll_spring.set(self.scroll_offset);
+                    self.scroll_spring.set_target(self.scroll_offset);
+                    self.scroll_momentum.reset();
                     self.notify(format!("Workspace {} (screen {})", target + 1, oi + 1));
                     self.dirty = true;
                     // 设置焦点
@@ -949,15 +976,11 @@ impl App {
             target + 1
         );
 
-        // 触发切换动画
-        let dir = if target > old_ws { 1 } else { -1 };
-        self.ws_anim = WsAnimation {
-            start: Some(std::time::Instant::now()),
-            from_ws: old_ws,
-            to_ws: target,
-            duration_ms: 200,
-            direction: dir,
-        };
+        // ── 弹簧动画驱动切换 ──
+        // 先同步 spring.x 到当前位置，再设 target（零延迟，无跳变）
+        self.scroll_spring.x = self.scroll_offset;
+        self.scroll_spring.set_target(target as f64);
+        self.scroll_momentum.reset();
 
         // 隐藏旧工作区的窗口（最小化到 1x1）
         for tl in &self.workspaces[old_ws].tops {
@@ -987,6 +1010,13 @@ impl App {
             }
         }
         self.dirty = true;
+    }
+
+    /// 切换到相邻工作区（带弹簧动画，用于方向键和手势结束）
+    fn switch_workspace_direction(&mut self, direction: i32) {
+        let current = self.active_ws as i32;
+        let next = (current + direction).rem_euclid(NUM_WORKSPACES as i32) as usize;
+        self.switch_workspace(next);
     }
 
     /// 将当前焦点窗口移动到目标工作区，然后跟随窗口切换到目标工作区
@@ -1095,6 +1125,10 @@ impl App {
             self.pointer_pos = (ox as f64 + ow as f64 / 2.0, oy as f64 + oh as f64 / 2.0);
             self.focused_output = t_oi;
             self.active_ws = target;
+            self.scroll_offset = self.scroll_offsets.get(t_oi).copied().unwrap_or(target as f64);
+            self.scroll_spring.set(self.scroll_offset);
+            self.scroll_spring.set_target(self.scroll_offset);
+            self.scroll_momentum.reset();
         } else {
             self.switch_workspace(target);
         }
@@ -1397,6 +1431,16 @@ impl App {
                             }
                         }
 
+                        // ── 非 Super 键的全局处理 ──
+                        // Escape 关闭 overview（不需要按住 Super）
+                        if state == KeyState::Pressed && keysym.modified_sym() == Keysym::Escape {
+                            if data.overview.is_active() {
+                                data.overview.close();
+                                data.dirty = true;
+                                return FilterResult::Intercept(());
+                            }
+                        }
+
                         if state == KeyState::Pressed && mods.logo {
                             let uid = unsafe { libc::getuid() };
                             match keysym.modified_sym() {
@@ -1511,6 +1555,26 @@ impl App {
                                     data.do_layout_animated();
                                     return FilterResult::Intercept(());
                                 }
+                                // Super+Tab: 切换任务面板（Task Panel）
+                                Keysym::Tab => {
+                                    if data.overview.is_task_panel() {
+                                        data.overview.close();
+                                    } else {
+                                        data.overview.open_task_panel();
+                                    }
+                                    data.dirty = true;
+                                    return FilterResult::Intercept(());
+                                }
+                                // Super+Down (Ctrl): 切换鸟瞰视图（Overview）
+                                Keysym::Down if mods.ctrl => {
+                                    if data.overview.is_overview() {
+                                        data.overview.close();
+                                    } else {
+                                        data.overview.open_overview();
+                                    }
+                                    data.dirty = true;
+                                    return FilterResult::Intercept(());
+                                }
                                 // Super+1-9：切换工作区
                                 Keysym::_1 => {
                                     data.switch_workspace(0);
@@ -1552,6 +1616,21 @@ impl App {
                                 Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down => {
                                     if mods.shift {
                                         data.swap_window(keysym.modified_sym());
+                                    } else if mods.ctrl {
+                                        // Super+Ctrl+Left/Right: 切换到相邻工作区（无限滚动）
+                                        match keysym.modified_sym() {
+                                            Keysym::Left => {
+                                                data.switch_workspace_direction(-1);
+                                                return FilterResult::Intercept(());
+                                            }
+                                            Keysym::Right => {
+                                                data.switch_workspace_direction(1);
+                                                return FilterResult::Intercept(());
+                                            }
+                                            _ => {
+                                                data.focus_direction(keysym.modified_sym());
+                                            }
+                                        }
                                     } else {
                                         data.focus_direction(keysym.modified_sym());
                                     }
@@ -1623,6 +1702,42 @@ impl App {
                         FilterResult::Forward
                     },
                 );
+            }
+            // ── 触摸板手势处理 ──
+            InputEvent::GestureSwipeBegin { event } => {
+                use smithay::backend::input::GestureBeginEvent as _;
+                self.gesture_dx = 0.0;
+                self.gesture_dy = 0.0;
+                self.gesture_fingers = event.fingers();
+                self.gesture_active = true;
+            }
+            InputEvent::GestureSwipeUpdate { event } => {
+                use smithay::backend::input::GestureSwipeUpdateEvent as _;
+                if !self.gesture_active { return; }
+                self.gesture_dx += event.delta_x();
+                self.gesture_dy += event.delta_y();
+                // 3指水平滑动 → 连续滚动
+                if self.gesture_fingers == 3 {
+                    let delta_normalized = event.delta_x() / {
+                        let (_ox, _oy, ow, _oh) = self.output_sizes.get(self.focused_output)
+                            .copied().unwrap_or((0, 0, self.osize.w, self.osize.h));
+                        ow as f64
+                    };
+                    self.scroll_offset += delta_normalized;
+                    self.scroll_spring.set_target(self.scroll_offset);
+                    self.dirty = true;
+                }
+            }
+            InputEvent::GestureSwipeEnd { event } => {
+                use smithay::backend::input::GestureEndEvent as _;
+                if !event.cancelled() && self.gesture_fingers == 3 {
+                    // 同步 spring.x 到当前位置，然后弹簧吸附到最近工作区
+                    self.scroll_spring.x = self.scroll_offset;
+                    self.scroll_spring.set_target(self.scroll_offset.round());
+                }
+                self.gesture_active = false;
+                self.gesture_dx = 0.0;
+                self.gesture_dy = 0.0;
             }
             InputEvent::PointerMotion { event } => {
                 self.pointer_pos.0 += event.delta_x();
@@ -2688,6 +2803,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         mem_usage: 0.0,
         cpu_prev_idle: 0,
         cpu_prev_total: 0,
+        // 无限滚动
+        scroll_offset: 0.0,
+        scroll_offsets: Vec::new(),
+        scroll_spring: Spring::from_damping_ratio(17.3, 0.866),
+        scroll_momentum: Momentum::new(0.92),
+        gesture_active: false,
+        gesture_dx: 0.0,
+        gesture_dy: 0.0,
+        gesture_fingers: 0,
+        last_frame_time: std::time::Instant::now(),
+        // Overview 状态机
+        overview: OverviewState::default(),
     };
     let listener = ListeningSocket::bind("wayland-anchor")?;
     std::env::set_var("WAYLAND_DISPLAY", "wayland-anchor");
@@ -2931,8 +3058,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     state.output_sizes = output_sizes;
     // 初始化每个 output 的活跃工作区（从 anchor_outputs 读取）
     state.output_active_ws = anchor_outputs.iter().map(|o| o.active_ws).collect();
-    // 初始全局 active_ws 跟踪第一个 output 的工作区
+    // 初始化每个 output 的独立滚动偏移
+    state.scroll_offsets = state.output_active_ws.iter().map(|ws| *ws as f64).collect();
+    // 初始全局 active_ws / scroll_offset 跟踪第一个 output
     state.active_ws = state.output_active_ws.first().copied().unwrap_or(0);
+    state.scroll_offset = state.active_ws as f64;
 
     {
         struct SessionInputInterface {
@@ -3142,6 +3272,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ws_anim_duration = state.ws_anim.duration_ms;
             let ws_anim_elapsed = state.ws_anim.start.map(|s| s.elapsed().as_millis() as u64);
 
+            // ── 物理引擎更新：弹簧吸附 ──
+            {
+                let now = std::time::Instant::now();
+                let dt = now.duration_since(state.last_frame_time).as_secs_f64();
+                state.last_frame_time = now;
+                let dt = dt.min(0.1);
+
+                if !state.gesture_active {
+                    state.scroll_offset = state.scroll_spring.update(dt);
+                    if state.scroll_momentum.is_stopped(0.5) && state.scroll_spring.is_settled(0.001) {
+                        let snapped = state.scroll_offset.round();
+                        state.scroll_spring.set(snapped);
+                        state.scroll_offset = snapped;
+                    }
+                }
+
+                // 同步回 per-output
+                if state.focused_output < state.scroll_offsets.len() {
+                    state.scroll_offsets[state.focused_output] = state.scroll_offset;
+                }
+            }
+
+            // ── Overview 状态更新 ──
+            if state.overview.is_active() {
+                state.overview.update_progress(0.0);
+            }
+
             for oi in 0..anchor_outputs.len() {
                 let out = &mut anchor_outputs[oi];
                 if out.pending_flip {
@@ -3278,19 +3435,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                             } else {
-                                // 工作区切换动画只对鼠标所在的 output 生效
-                                ws_offset = if is_focused_output && ws_anim_active {
-                                    if let Some(elapsed) = ws_anim_elapsed {
-                                        if elapsed < ws_anim_duration {
-                                            let t = elapsed as f32 / ws_anim_duration as f32;
-                                            let t_ease = 1.0 - (1.0 - t).powi(3);
-                                            (ws_anim_dir as f32 * ow as f32 * (1.0 - t_ease)) as i32
-                                        } else {
-                                            0
-                                        }
-                                    } else {
-                                        0
-                                    }
+                                // ── 无限滚动：弹簧驱动的连续 ws_offset ──
+                                // scroll_offset: 连续值（0.0=ws0, 1.0=ws1, etc.）
+                                // out_ws_idx: 当前 output 的整数工作区索引
+                                // 符号: out_ws_idx - scroll_offset
+                                //   过渡期 offset > 0 → 新窗口从右侧滑入（与原始 WsAnimation dir=+1 一致）
+                                // clamp ±1.5：安全网，防 desync
+                                ws_offset = if is_focused_output {
+                                    let offset_normalized = out_ws_idx as f64 - state.scroll_offset;
+                                    let clamped = offset_normalized.clamp(-1.5, 1.5);
+                                    (clamped * ow as f64) as i32
                                 } else {
                                     0
                                 };
@@ -3553,13 +3707,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             out.pending_flip = true;
                             continue; // skip all other rendering for this output
                         }
+                        // ── 视差偏移：壁纸层移动较慢（×0.3）产生深度感 ──
+                        let parallax_wallpaper = if is_focused_output {
+                            let fractional = state.scroll_offset - (state.scroll_offset.round() as f64);
+                            (fractional * ow as f64 * 0.3) as i32
+                        } else { 0 };
+
                         if let Some(ref _tex) = state.wallpaper_texture {
                             if let Some(ref wp) = state.wallpaper_cache.pixels {
                                 let (ww, wh) = state.wallpaper_cache.size;
-                                // Direct GPU texture blit — no element system, no flicker
+                                // clamp 源坐标到纹理边界内
+                                let wp_offset_x = (parallax_wallpaper as f64)
+                                    .max(0.0)
+                                    .min((ww as f64 - ow as f64).max(0.0));
+                                let wp_src = Rectangle::<f64, _>::from_loc_and_size(
+                                    smithay::utils::Point::from((wp_offset_x, 0.0)),
+                                    Size::from((ww as f64, wh as f64)),
+                                );
                                 let _ = f.render_texture_from_to(
                                     _tex,
-                                    Rectangle::from_size(Size::from((ww as f64, wh as f64))),
+                                    wp_src,
                                     Rectangle::from_size((ow, oh).into()),
                                     &[Rectangle::from_size((ow, oh).into())],
                                     &[Rectangle::from_size((ow, oh).into())],
@@ -3697,6 +3864,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             draw_render_elements(&mut f, 1.0, &or_elems, &[dmg])?;
                         }
 
+                        // Step 4.8: Overview overlay (Task Panel / Bird's Eye View)
+                        if is_focused_output && state.overview.is_active() {
+                            let ws_counts: Vec<usize> = state
+                                .workspaces
+                                .iter()
+                                .map(|w| w.tops.len() + w.x11_surfaces.len())
+                                .collect();
+                            let titles: Vec<String> = (0..state.workspaces[state.active_ws].tops.len() + state.workspaces[state.active_ws].x11_surfaces.len())
+                                .map(|i| state.window_titles.get(&i).cloned().unwrap_or_default())
+                                .collect();
+                            if state.overview.is_task_panel() {
+                                layout::render_task_panel(
+                                    &mut f,
+                                    &state.cfg,
+                                    ow,
+                                    oh,
+                                    state.overview.progress(),
+                                    state.active_ws,
+                                    &titles,
+                                    out_ws_focus_idx,
+                                    n_total,
+                                );
+                            } else if state.overview.is_overview() {
+                                let hover_ws = match &state.overview {
+                                    OverviewState::Overview { hover_ws, .. } => *hover_ws,
+                                    _ => None,
+                                };
+                                layout::render_overview(
+                                    &mut f,
+                                    &state.cfg,
+                                    ow,
+                                    oh,
+                                    state.overview.progress(),
+                                    state.active_ws,
+                                    &ws_counts,
+                                    hover_ws,
+                                );
+                            }
+                        }
+
                         // Step 5: Headbar — 每个 output 显示自己的活跃工作区
                         {
                             let ws_counts: Vec<usize> = state
@@ -3704,6 +3911,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .iter()
                                 .map(|w| w.tops.len() + w.x11_surfaces.len())
                                 .collect();
+                            // ── 视差偏移：headbar 层移动稍快（×0.1）产生前景感 ──
+                            let parallax_headbar = if is_focused_output {
+                                let fractional = state.scroll_offset - (state.scroll_offset.round() as f64);
+                                (fractional * ow as f64 * 0.1) as i32
+                            } else { 0 };
                             layout::render_headbar(
                                 &mut f,
                                 &state.cfg,
@@ -3719,6 +3931,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 state.cpu_usage,
                                 state.mem_usage,
                                 state.record_state.recording,
+                                state.scroll_offset,
                             );
                         }
 
@@ -3977,6 +4190,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             // 布局动画进行中时持续请求渲染
             if state.layout_anim.is_active() {
+                state.dirty = true;
+            }
+            // Overview 动画进行中时持续请求渲染（与 ws_anim/layout_anim 同模式）
+            if state.overview.is_active() {
                 state.dirty = true;
             }
             // 锁屏动画需要持续重绘（frame 驱动动画，必须保证 dirty 始终为 true）

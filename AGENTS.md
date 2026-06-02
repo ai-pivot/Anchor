@@ -295,3 +295,45 @@ For SDDM: Create `/usr/share/wayland-sessions/anchor.desktop` with same content.
       2. 物理重启后 GDM 显示登录页
       3. 输入密码 → GDM 用密码解锁 GNOME Keyring（密码=keyring 密码）
       4. 浏览器、TLS 证书、密码管理器全部恢复
+
+## 渲染循环与动画架构
+
+### ⚠️ dirty 持久化 — 逐帧动画的生命线
+
+Anchor 的渲染循环是**按需驱动**的：只有 `dirty = true` 时才进入渲染管线，渲染完成后 `dirty = false`。
+
+**这意味着任何逐帧动画（弹簧物理、Instant+ease、连续滚动等）必须自己维持 dirty 标记**，否则只有第一帧被渲染，后续帧永远不会被触发。
+
+```rust
+// ❌ 错误：动画只有第一帧被渲染，看起来像"延迟几秒后突然出现"
+if animation_active {
+    animation.update(dt);
+    dirty = true;  // ← 渲染前设 dirty，渲染后被 dirty=false 覆盖，没有后续帧
+}
+
+// ✅ 正确：在 dirty=false 之后重新设 dirty，触发下一帧（与 ws_anim/layout_anim 同模式）
+// 渲染管线末尾：
+state.dirty = false;
+// 动画持续渲染守卫：
+if state.ws_anim_active() { state.dirty = true; }
+if state.layout_anim.is_active() { state.dirty = true; }
+if state.scroll_spring_active() { state.dirty = true; }  // ← 弹簧动画必须加这个！
+if state.overview.is_active() { state.dirty = true; }   // ← overview 动画必须加这个！
+```
+
+**已有的参考模式**：`ws_anim`（4131行）和 `layout_anim`（4140行）的 dirty 持久化。
+
+**经验教训**：2026-06-02 实现 Overview/Task Panel 和弹簧滚动时，遗漏了 dirty 持久化。
+弹簧物理引擎和 Instant+ease 动画被误认为"有 bug"（延迟、卡顿、方向反），实际原因是：
+- 弹簧每帧被 `update(dt)` 推进，但只有第一帧渲染到屏幕
+- 等到某个不相关事件（surface damage）偶然触发渲染时，动画已跳到末态 → 看起来像"突然出现"
+- 连续快速切换时看到的是中间状态的单帧 → 看起来像"方向反了"
+
+### 动画模式选择
+
+| 模式 | 适用场景 | 优点 | 缺点 |
+|------|---------|------|------|
+| `Instant + ease_out_cubic` | 一次性过渡（ws切换、布局动画） | 确定性、无状态、零抖动 | 不适合连续交互 |
+| 弹簧物理（`Spring`） | 连续交互（滚动吸附、手势跟随） | 物理感、可中断、惯性 | 需要精确的 dirty 持久化 |
+
+**选择原则**：如果动画是"从 A 到 B 的一次性过渡"用 Instant+ease；如果动画需要"持续响应输入/有惯性/可中断"用弹簧。

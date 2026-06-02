@@ -10,7 +10,7 @@ use crate::config::{parse_color, Config};
 use crate::text_render;
 use smithay::{backend::renderer::Frame, utils::Size};
 
-/// 渲染 headbar（v24 — 赛博朋克发光风格 + CPU/MEM）
+/// 渲染 headbar（v29 — 赛博朋克发光风格 + CPU/MEM + 无限滚动指示器）
 pub fn render_headbar(
     f: &mut impl Frame,
     cfg: &Config,
@@ -26,6 +26,7 @@ pub fn render_headbar(
     cpu_usage: f32,
     mem_usage: f32,
     recording: bool,
+    scroll_offset: f64,
 ) {
     if !cfg.bar.enabled {
         return;
@@ -98,7 +99,7 @@ pub fn render_headbar(
     .ok();
     x += S3;
 
-    // ── 工作区指示器（赛博朋克方块风格）──
+    // ── 工作区指示器（赛博朋克方块风格 + 无限滚动视差）──
     let ws_pad = 6;
     let ws_gap = 3;
     let max_show = total_workspaces.min(9);
