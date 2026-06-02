@@ -3793,36 +3793,45 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // drop f 释放对 target 的借用
 
                         // Step 10: 执行待处理的截图请求（finish 后 framebuffer 完整，target 仍可用）
-                        if is_focused_output {
-                            if let Some(req) = state.pending_screenshot.take() {
-                                let area = match &req {
-                                    screenshot::ScreenshotRequest::Area(x, y, w, h) => {
-                                        Some((*x, *y, *w, *h))
-                                    }
-                                    screenshot::ScreenshotRequest::Full => None,
-                                };
-                                use smithay::backend::allocator::Fourcc;
-                                use smithay::backend::renderer::Renderer;
-                                let region = Rectangle::from_size((ow, oh).into());
-                                // 关键：使用 Abgr8888 而非 Xrgb8888。
-                                // Abgr8888 在 little-endian 内存中 = R,G,B,A 字节序（RGBA），
-                                // 避免 XRGB 格式的 BGR/RGB 字节序歧义。
-                                // 同时 GlesRenderer 会自动做 Y-flip（bottom-up → top-down），
-                                // 所以这里不再做行反转。
-                                match renderer.copy_framebuffer(&target, region, Fourcc::Abgr8888) {
-                                    Ok(mapping) => {
-                                        match renderer.map_texture(&mapping) {
+                        // 截图截鼠标所在的 output
+                        {
+                            let (out_ox, out_oy, _, _) = state
+                                .output_sizes
+                                .get(oi)
+                                .copied()
+                                .unwrap_or((0, 0, ow, oh));
+                            let px = state.pointer_pos.0 as i32;
+                            let py = state.pointer_pos.1 as i32;
+                            let pointer_on_this_output = px >= out_ox
+                                && px < out_ox + ow
+                                && py >= out_oy
+                                && py < out_oy + oh;
+                            if pointer_on_this_output {
+                                if let Some(req) = state.pending_screenshot.take() {
+                                    let area = match &req {
+                                        screenshot::ScreenshotRequest::Area(x, y, w, h) => {
+                                            Some((*x, *y, *w, *h))
+                                        }
+                                        screenshot::ScreenshotRequest::Full => None,
+                                    };
+                                    use smithay::backend::allocator::Fourcc;
+                                    use smithay::backend::renderer::Renderer;
+                                    let region = Rectangle::from_size((ow, oh).into());
+                                    match renderer.copy_framebuffer(
+                                        &target,
+                                        region,
+                                        Fourcc::Abgr8888,
+                                    ) {
+                                        Ok(mapping) => match renderer.map_texture(&mapping) {
                                             Ok(pixels) => {
                                                 let w = ow as u32;
                                                 let h = oh as u32;
                                                 let row_len = w as usize * 4;
-                                                // Abgr8888 little-endian = R,G,B,A 像素序
                                                 let mut rgba = Vec::with_capacity(pixels.len());
                                                 for row in 0..h as usize {
                                                     let start = row * row_len;
                                                     let end = start + row_len;
                                                     if end <= pixels.len() {
-                                                        // 字节序: R,G,B,A → R,G,B,A (无需翻转)
                                                         rgba.extend_from_slice(&pixels[start..end]);
                                                     }
                                                 }
@@ -3835,32 +3844,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 state.screenshot_result =
                                                     Some((String::new(), None));
                                             }
+                                        },
+                                        Err(e) => {
+                                            tracing::warn!("📸 copy_framebuffer failed: {:?}", e);
+                                            state.screenshot_result = Some((String::new(), None));
                                         }
-                                    }
-                                    Err(e) => {
-                                        tracing::warn!("📸 copy_framebuffer failed: {:?}", e);
-                                        state.screenshot_result = Some((String::new(), None));
                                     }
                                 }
                             }
                         }
 
                         // 屏幕录制帧捕获（每 6 帧采样一次 ≈ 10fps，降低 GPU→CPU 压力）
-                        if state.record_state.recording && is_focused_output && state.frame % 3 == 0
+                        // 录屏也只录鼠标所在的 output
                         {
-                            use smithay::backend::allocator::Fourcc;
-                            use smithay::backend::renderer::Renderer;
-                            let region = Rectangle::from_size((ow, oh).into());
-                            match renderer.copy_framebuffer(&target, region, Fourcc::Abgr8888) {
-                                Ok(mapping) => match renderer.map_texture(&mapping) {
-                                    Ok(pixels) => {
-                                        state
-                                            .record_state
-                                            .write_frame(&pixels, ow as u32, oh as u32);
-                                    }
+                            let (out_ox, out_oy, _, _) = state
+                                .output_sizes
+                                .get(oi)
+                                .copied()
+                                .unwrap_or((0, 0, ow, oh));
+                            let px = state.pointer_pos.0 as i32;
+                            let py = state.pointer_pos.1 as i32;
+                            let pointer_on_this_output = px >= out_ox
+                                && px < out_ox + ow
+                                && py >= out_oy
+                                && py < out_oy + oh;
+                            if state.record_state.recording
+                                && pointer_on_this_output
+                                && state.frame % 3 == 0
+                            {
+                                use smithay::backend::allocator::Fourcc;
+                                use smithay::backend::renderer::Renderer;
+                                let region = Rectangle::from_size((ow, oh).into());
+                                match renderer.copy_framebuffer(&target, region, Fourcc::Abgr8888) {
+                                    Ok(mapping) => match renderer.map_texture(&mapping) {
+                                        Ok(pixels) => {
+                                            state
+                                                .record_state
+                                                .write_frame(&pixels, ow as u32, oh as u32);
+                                        }
+                                        Err(_) => {}
+                                    },
                                     Err(_) => {}
-                                },
-                                Err(_) => {}
+                                }
                             }
                         }
 
