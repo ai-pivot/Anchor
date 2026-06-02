@@ -1,4 +1,4 @@
-//! Overview state machine — Task Panel + Bird's Eye View.
+//! Overview state machine — Task Panel (niri-style horizontal strip) + Bird's Eye View.
 //!
 //! Uses Instant + ease-based animation (same pattern as LayoutAnimation/WsAnimation),
 //! guaranteeing deterministic, smooth, zero-jitter animation.
@@ -8,7 +8,8 @@
 pub enum OverviewState {
     /// No overlay visible.
     Inactive,
-    /// Task Panel — bottom drawer with window thumbnails for current workspace.
+    /// Task Panel — niri-style horizontal strip with all workspaces side by side.
+    /// Scroll with left/right, auto-snap on close.
     TaskPanel {
         /// Animation start time
         start: std::time::Instant,
@@ -16,8 +17,12 @@ pub enum OverviewState {
         opening: bool,
         /// Duration in ms
         duration_ms: u64,
+        /// Continuous scroll position (0.0 = ws0 centered, 1.0 = ws1 centered)
+        scroll_offset: f64,
+        /// Target scroll position for snap animation
+        target_offset: f64,
     },
-    /// Bird's Eye View — all workspaces as thumbnails in a grid.
+    /// Bird's Eye View — Cover Flow 3D of all workspaces.
     Overview {
         /// Animation start time
         start: std::time::Instant,
@@ -51,11 +56,11 @@ impl OverviewState {
             | Self::Overview { start, opening, duration_ms, .. } => {
                 let elapsed = start.elapsed().as_millis() as u64;
                 let t = (elapsed as f32 / *duration_ms as f32).min(1.0);
-                let eased = 1.0 - (1.0 - t).powi(3); // ease_out_cubic — same as WsAnimation
+                let eased = 1.0 - (1.0 - t).powi(3); // ease_out_cubic
                 if *opening {
                     eased as f64
                 } else {
-                    1.0 - eased as f64 // reverse for closing
+                    1.0 - eased as f64
                 }
             }
         }
@@ -71,12 +76,14 @@ impl OverviewState {
         matches!(self, Self::Overview { .. })
     }
 
-    /// Open task panel.
-    pub fn open_task_panel(&mut self) {
+    /// Open task panel at the current active workspace.
+    pub fn open_task_panel(&mut self, current_ws: usize) {
         *self = Self::TaskPanel {
             start: std::time::Instant::now(),
             opening: true,
-            duration_ms: 250, // slightly faster than ws switch for snappy feel
+            duration_ms: 250,
+            scroll_offset: current_ws as f64,
+            target_offset: current_ws as f64,
         };
     }
 
@@ -86,7 +93,7 @@ impl OverviewState {
             start: std::time::Instant::now(),
             opening: true,
             duration_ms: 300,
-            hover_ws: None, // 首次方向键按下时初始化
+            hover_ws: None,
         };
     }
 
@@ -94,11 +101,14 @@ impl OverviewState {
     pub fn close(&mut self) {
         match self {
             Self::Inactive => return,
-            Self::TaskPanel { .. } => {
+            Self::TaskPanel { scroll_offset, .. } => {
+                let snap = scroll_offset.round();
                 *self = Self::TaskPanel {
                     start: std::time::Instant::now(),
                     opening: false,
-                    duration_ms: 200, // faster close
+                    duration_ms: 200,
+                    scroll_offset: *scroll_offset,
+                    target_offset: snap,
                 };
             }
             Self::Overview { .. } => {
@@ -110,6 +120,46 @@ impl OverviewState {
                     hover_ws,
                 };
             }
+        }
+    }
+
+    /// Get the workspace index that the task panel is currently snapped to.
+    /// Returns the nearest integer workspace index.
+    pub fn task_panel_ws(&self) -> usize {
+        match self {
+            Self::TaskPanel { scroll_offset, .. } => {
+                scroll_offset.round().max(0.0) as usize
+            }
+            _ => 0,
+        }
+    }
+
+    /// Scroll task panel left/right by one workspace.
+    /// Clamps to valid workspace range.
+    pub fn task_panel_scroll(&mut self, delta: i32, max_ws: usize) {
+        if let Self::TaskPanel { scroll_offset, target_offset, .. } = self {
+            let new = (*scroll_offset + delta as f64)
+                .max(0.0)
+                .min((max_ws - 1) as f64);
+            *scroll_offset = new;
+            *target_offset = new;
+        }
+    }
+
+    /// Update task panel snap animation (spring towards target).
+    /// Returns true if animation is still running.
+    pub fn update_snap(&mut self, dt: f64) -> bool {
+        if let Self::TaskPanel { scroll_offset, target_offset, .. } = self {
+            let diff = *target_offset - *scroll_offset;
+            if diff.abs() < 0.001 {
+                *scroll_offset = *target_offset;
+                return false;
+            }
+            // Simple exponential ease towards target
+            *scroll_offset += diff * (1.0 - (-12.0 * dt).exp());
+            true
+        } else {
+            false
         }
     }
 
@@ -138,15 +188,13 @@ impl OverviewState {
                 let elapsed = start.elapsed().as_millis() as u64;
                 if elapsed >= *duration_ms {
                     if *opening {
-                        // 打开动画完成 — 保持打开状态，等用户手动关闭
-                        false // 动画结束但状态保持活跃
+                        false // animation done, stay open
                     } else {
-                        // 关闭动画完成 — 切回 Inactive
                         *self = Self::Inactive;
                         false
                     }
                 } else {
-                    true // 动画进行中
+                    true
                 }
             }
         }
