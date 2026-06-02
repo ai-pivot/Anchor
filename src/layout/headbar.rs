@@ -328,6 +328,16 @@ pub fn render_headbar(
         let date_str = format!("{}-{}-{}", tm.tm_year + 1900, month, day);
         let dw = text_render::text_width(&date_str, DATE_SIZE);
         let dy = h / 2 - DATE_SIZE as i32 / 2 - 1;
+        // 日期背景发光
+        f.clear(
+            opaque(accent.0 * 0.03, accent.1 * 0.03, accent.2 * 0.03),
+            &[rect(rx - dw - S2, S2, dw + S4, h - S4)],
+        ).ok();
+        // 底部发光线
+        f.clear(
+            opaque(accent.0 * 0.12, accent.1 * 0.12, accent.2 * 0.12),
+            &[rect(rx - dw - S2, h - 3, dw + S4, 1)],
+        ).ok();
         text_render::draw_text(
             f,
             &date_str,

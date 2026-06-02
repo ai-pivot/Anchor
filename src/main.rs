@@ -4289,7 +4289,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 )],
                             )
                             .ok();
-                            // Border (top accent line)
+                            // Border (accent lines)
                             f.clear(
                                 border,
                                 &[layout::rect(sp_x - bw, sp_y - bw, sp_w + 2 * bw, bw)],
@@ -4302,6 +4302,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .ok();
                             f.clear(border, &[layout::rect(sp_x - bw, sp_y, bw, sp_h)])
                                 .ok();
+                            f.clear(border, &[layout::rect(sp_x + sp_w, sp_y, bw, sp_h)])
+                                .ok();
+                            // 顶部发光扩散
+                            for (off, br) in [(1, 0.3f32), (2, 0.15), (3, 0.06)].iter() {
+                                let glow = layout::opaque(accent.0 * br, accent.1 * br, accent.2 * br);
+                                f.clear(glow, &[layout::rect(sp_x - bw - off, sp_y - bw - off, sp_w + 2 * (bw + off), *off)]).ok();
+                            }
+                            // 底部阴影
+                            for (off, br) in [(0i32, 0.10f32), (1, 0.05), (2, 0.02)].iter() {
+                                f.clear(
+                                    layout::opaque(0.0 * br, 0.0 * br, 0.0 * br),
+                                    &[layout::rect(sp_x - bw - 2, sp_y + sp_h + bw + off, sp_w + 2 * bw + 4, 1)],
+                                ).ok();
+                            }
                             f.clear(border, &[layout::rect(sp_x + sp_w, sp_y, bw, sp_h)])
                                 .ok();
                             // Scratchpad label
