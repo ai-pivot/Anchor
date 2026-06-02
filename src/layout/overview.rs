@@ -203,6 +203,8 @@ pub fn render_overview(
 
         let is_active = i as usize == active_ws;
         let is_hovered = hover_ws == Some(i as usize);
+        // 选中的格子（hover_ws）有更明显的视觉反馈
+        let is_selected = is_hovered;
 
         // Staggered appearance
         let stagger = ((col as f32 + row as f32) * 0.06).min(0.4);
@@ -214,22 +216,43 @@ pub fn render_overview(
         }
 
         // Workspace thumbnail background
-        let bg_br = (if is_active { 0.10 } else if is_hovered { 0.08 } else { 0.04 }) * item_p * color_alpha;
+        let bg_base = if is_active { 0.12 } else if is_selected { 0.10 } else if is_hovered { 0.08 } else { 0.04 };
+        let bg_br = bg_base * item_p * color_alpha;
         f.clear(
-            opaque(bg_br, bg_br, (bg_br + 0.02 * item_p * color_alpha).min(0.12)),
+            opaque(bg_br, bg_br, (bg_br + 0.02 * item_p * color_alpha).min(0.14)),
             &[rect(cx, cy, cell_w, cell_h)],
         )
         .ok();
 
-        // Active indicator — accent border
-        let border_br = if is_active { 0.8 } else if is_hovered { 0.5 } else { 0.0 } * item_p * color_alpha;
+        // Border for active / selected
+        let border_br = if is_active { 0.8 } else if is_selected { 0.9 } else if is_hovered { 0.5 } else { 0.0 };
         if border_br > 0.01 {
+            let br = border_br * item_p * color_alpha;
+            // Top border
             f.clear(
-                opaque(accent.0 * border_br, accent.1 * border_br, accent.2 * border_br),
+                opaque(accent.0 * br, accent.1 * br, accent.2 * br),
                 &[rect(cx, cy, cell_w, 2)],
             )
             .ok();
-            if is_active {
+            // Selected: also draw bottom + sides for full border effect
+            if is_selected {
+                f.clear(
+                    opaque(accent.0 * br * 0.6, accent.1 * br * 0.6, accent.2 * br * 0.6),
+                    &[rect(cx, cy + cell_h - 2, cell_w, 2)],
+                )
+                .ok();
+                f.clear(
+                    opaque(accent.0 * br * 0.4, accent.1 * br * 0.4, accent.2 * br * 0.4),
+                    &[rect(cx, cy, 2, cell_h)],
+                )
+                .ok();
+                f.clear(
+                    opaque(accent.0 * br * 0.4, accent.1 * br * 0.4, accent.2 * br * 0.4),
+                    &[rect(cx + cell_w - 2, cy, 2, cell_h)],
+                )
+                .ok();
+            } else if is_active {
+                // Active: bottom glow
                 f.clear(
                     opaque(accent.0 * 0.15 * item_p * color_alpha, accent.1 * 0.15 * item_p * color_alpha, accent.2 * 0.15 * item_p * color_alpha),
                     &[rect(cx, cy + cell_h - 2, cell_w, 2)],

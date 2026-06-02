@@ -86,7 +86,7 @@ impl OverviewState {
             start: std::time::Instant::now(),
             opening: true,
             duration_ms: 300,
-            hover_ws: None,
+            hover_ws: None, // 首次方向键按下时初始化
         };
     }
 

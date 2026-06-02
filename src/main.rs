@@ -1441,6 +1441,54 @@ impl App {
                             }
                         }
 
+                        // ── Overview 模式：方向键导航 + Enter 确认 ──
+                        if data.overview.is_active() && state == KeyState::Pressed {
+                            let sym = keysym.modified_sym();
+                            if let Some(hover) = data.overview.hover_ws() {
+                                match sym {
+                                    Keysym::Left => {
+                                        let new = if hover > 0 { hover - 1 } else { hover };
+                                        data.overview.set_hover_ws(Some(new));
+                                        return FilterResult::Intercept(());
+                                    }
+                                    Keysym::Right => {
+                                        let new = (hover + 1).min(NUM_WORKSPACES - 1);
+                                        data.overview.set_hover_ws(Some(new));
+                                        return FilterResult::Intercept(());
+                                    }
+                                    Keysym::Up => {
+                                        let new = if hover >= 3 { hover - 3 } else { hover };
+                                        data.overview.set_hover_ws(Some(new));
+                                        return FilterResult::Intercept(());
+                                    }
+                                    Keysym::Down => {
+                                        let new = (hover + 3).min(NUM_WORKSPACES - 1);
+                                        data.overview.set_hover_ws(Some(new));
+                                        return FilterResult::Intercept(());
+                                    }
+                                    Keysym::Return => {
+                                        data.overview.close();
+                                        data.switch_workspace(hover);
+                                        return FilterResult::Intercept(());
+                                    }
+                                    _ => {}
+                                }
+                            } else {
+                                // 初始状态：Enter 时从第一个工作区开始
+                                match sym {
+                                    Keysym::Return => {
+                                        data.overview.set_hover_ws(Some(data.active_ws));
+                                        return FilterResult::Intercept(());
+                                    }
+                                    Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down => {
+                                        data.overview.set_hover_ws(Some(data.active_ws));
+                                        return FilterResult::Intercept(());
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
+
                         if state == KeyState::Pressed && mods.logo {
                             let uid = unsafe { libc::getuid() };
                             match keysym.modified_sym() {
@@ -1808,6 +1856,13 @@ impl App {
                     self.focused_output = new_focused;
                     // 全局 active_ws 跟踪当前鼠标所在 output 的工作区
                     self.active_ws = self.output_active_ws.get(new_focused).copied().unwrap_or(0);
+                    // 关键：同步 scroll_offset 到目标 output 的值，终止弹簧动画
+                    // 否则 scroll_offset 还在旧 output 的中间值（如 2.3），
+                    // 新 output 的 ws_offset = (new_ws - 2.3) * screen_w → 窗口飞到屏幕外
+                    self.scroll_offset = self.scroll_offsets.get(new_focused).copied().unwrap_or(self.active_ws as f64);
+                    self.scroll_spring.set(self.scroll_offset);
+                    self.scroll_spring.set_target(self.scroll_offset);
+                    self.scroll_momentum.reset();
                     self.dirty = true;
                 }
 
@@ -1853,6 +1908,101 @@ impl App {
                 // 锁屏模式：阻止鼠标按钮
                 if self.lock_state.locked {
                     return;
+                }
+                // ── Overview / Task Panel 模式：拦截鼠标点击 ──
+                if self.overview.is_active() && event.state() == ButtonState::Released {
+                    let px = self.pointer_pos.0 as i32;
+                    let py = self.pointer_pos.1 as i32;
+                    if self.overview.is_task_panel() {
+                        // Task Panel：点击切换焦点窗口或关闭
+                        let (ox, oy, ow, oh) = self.output_sizes.get(self.focused_output)
+                            .copied().unwrap_or_default();
+                        let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height as i32 } else { 0 };
+                        let panel_h = (oh as f32 * 0.35) as i32;
+                        let panel_y = oy + oh - panel_h;
+                        let panel_x = ox + 16;
+                        let panel_w = ow - 32;
+                        let thumb_w = 180i32;
+                        let thumb_h = 120i32;
+                        let thumb_gap = 16;
+                        let cols = ((panel_w - 32) / (thumb_w + thumb_gap)).max(1);
+                        let start_y = panel_y + 16 + 24;
+
+                        let ws = &self.workspaces[self.active_ws];
+                        let n_top = ws.tops.len();
+                        let n_x11 = ws.x11_surfaces.len();
+                        let n_total = n_top + n_x11;
+
+                        for i in 0..n_total {
+                            let ii = i as i32;
+                            let col = ii % cols;
+                            let row = ii / cols;
+                            let tx = panel_x + 16 + col * (thumb_w + thumb_gap);
+                            let ty = start_y + row * (thumb_h + thumb_gap + 16);
+
+                            if px >= tx && px < tx + thumb_w && py >= ty && py < ty + thumb_h {
+                                // 命中窗口 i → 切换焦点
+                                if i < n_top {
+                                    let surf = {
+                                        let ws = &self.workspaces[self.active_ws];
+                                        ws.tops[i].wl_surface().clone()
+                                    };
+                                    self.workspaces[self.active_ws].focus = Some(surf.clone());
+                                    let kbd = self.kbd.clone();
+                                    let serial = SERIAL_COUNTER.next_serial();
+                                    kbd.set_focus(self, Some(surf.clone()), serial);
+                                    if let Some(tl) = self.workspaces[self.active_ws]
+                                        .tops
+                                        .iter()
+                                        .find(|t| t.wl_surface() == &surf)
+                                    {
+                                        tl.with_pending_state(|st| {
+                                            st.states.set(xdg_toplevel::State::Activated);
+                                        });
+                                        tl.send_configure();
+                                    }
+                                }
+                                self.overview.close();
+                                self.dirty = true;
+                                return;
+                            }
+                        }
+                        // 点击面板外区域 → 关闭
+                        if py < panel_y {
+                            self.overview.close();
+                            self.dirty = true;
+                        }
+                        return; // 拦截所有点击
+                    } else if self.overview.is_overview() {
+                        // Overview：点击工作区网格切换
+                        let (ox, oy, ow, oh) = self.output_sizes.get(self.focused_output)
+                            .copied().unwrap_or_default();
+                        let cols = 3;
+                        let grid_gap = 16;
+                        let grid_margin_x = 48;
+                        let grid_margin_top = 48 * 3;
+                        let grid_w = ow - grid_margin_x * 2;
+                        let grid_h = oh - grid_margin_top - 48;
+                        let cell_w = (grid_w - (cols - 1) * grid_gap) / cols;
+                        let cell_h = (grid_h - 2 * grid_gap) / 3;
+
+                        for i in 0..self.workspaces.len().min(9) {
+                            let col = i as i32 % cols;
+                            let row = i as i32 / cols;
+                            let cx = ox + grid_margin_x + col * (cell_w + grid_gap);
+                            let cy = oy + grid_margin_top + row * (cell_h + grid_gap);
+                            if px >= cx && px < cx + cell_w && py >= cy && py < cy + cell_h {
+                                // 命中工作区 i → 关闭 overview 并切换
+                                self.overview.close();
+                                self.switch_workspace(i);
+                                return;
+                            }
+                        }
+                        // 点击网格外 → 关闭 overview
+                        self.overview.close();
+                        self.dirty = true;
+                        return;
+                    }
                 }
                 // 截图/录制区域选择模式：按下记录起点，释放完成
                 if self.screenshot.selecting {
@@ -4194,6 +4344,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             // Overview 动画进行中时持续请求渲染（与 ws_anim/layout_anim 同模式）
             if state.overview.is_active() {
+                state.dirty = true;
+            }
+            // 弹簧滚动动画进行中时持续请求渲染（与 ws_anim 同模式）
+            if !state.scroll_spring.is_settled(0.001) {
                 state.dirty = true;
             }
             // 锁屏动画需要持续重绘（frame 驱动动画，必须保证 dirty 始终为 true）
