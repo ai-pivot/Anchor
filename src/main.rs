@@ -4433,7 +4433,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     };
                                     crate::text_render::draw_text(
                                         &mut f,
-                                        &format!("WS {}", _ws_i + 1),
+                                        &format!("WS {} ({} wins)", _ws_i + 1, thumbs.len()),
                                         *cx + 8,
                                         *cy - 22,
                                         14.0,

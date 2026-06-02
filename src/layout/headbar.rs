@@ -35,6 +35,17 @@ pub fn render_headbar(
 
     let accent = parse_color(&cfg.colors.focus_border);
 
+    // ── 左侧 accent 竖装饰线 ──
+    f.clear(
+        opaque(accent.0 * 0.6, accent.1 * 0.6, accent.2 * 0.6),
+        &[rect(0, 0, 2, h)],
+    ).ok();
+    // 发光扩散
+    f.clear(
+        opaque(accent.0 * 0.15, accent.1 * 0.15, accent.2 * 0.15),
+        &[rect(2, 0, 2, h)],
+    ).ok();
+
     // ── 录制指示器（红色闪烁圆点）──
     if recording {
         let blink = (time_secs % 2) == 0;
@@ -253,6 +264,11 @@ pub fn render_headbar(
             &[rect(cx - S2, S2, tw + S4, h - S4)],
         )
         .ok();
+        // 底部 accent 发光线
+        f.clear(
+            opaque(accent.0 * 0.15, accent.1 * 0.15, accent.2 * 0.15),
+            &[rect(cx - S2, h - 3, tw + S4, 1)],
+        ).ok();
         text_render::draw_text(
             f,
             &info,
