@@ -3605,6 +3605,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             th: i32,
                             // draw_render_elements 的缩放因子
                             scale: f64,
+                            // 窗口标题（用于标签显示）
+                            title: String,
                         }
                         let mut task_panel_thumbs: Vec<ThumbItem> = Vec::new();
                         let mut overview_thumbs: Vec<(usize, Vec<ThumbItem>, i32, i32, i32, i32, i32, bool, bool)> = Vec::new(); // (ws_idx, thumbs, cx, cy, cw, ch, dist, is_active, is_hover)
@@ -4023,11 +4025,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         }),
                                     } {
                                         if !elems.is_empty() {
+                                            let title = match slot {
+                                                WindowSlot::Wl(idx) => {
+                                                    state.window_app_ids.get(idx).cloned()
+                                                        .unwrap_or_else(|| "Window".to_string())
+                                                }
+                                                WindowSlot::X11(xidx) => {
+                                                    ws.x11_surfaces.get(*xidx)
+                                                        .map(|xs| xs.class())
+                                                        .unwrap_or_else(|| "X11".to_string())
+                                                }
+                                            };
                                             task_panel_thumbs.push(ThumbItem {
                                                 elems, tx, ty,
                                                 tw: (sw as f32 * thumb_scale) as i32,
                                                 th: (sh as f32 * thumb_scale) as i32,
                                                 scale: thumb_scale as f64,
+                                                title,
                                             });
                                         }
                                     }
@@ -4113,11 +4127,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             }),
                                         } {
                                             if !elems.is_empty() {
+                                                let title = match wslot {
+                                                    WindowSlot::Wl(idx) => {
+                                                        state.window_app_ids.get(idx).cloned()
+                                                            .unwrap_or_else(|| "Window".to_string())
+                                                    }
+                                                    WindowSlot::X11(xidx) => {
+                                                        ws.x11_surfaces.get(*xidx)
+                                                            .map(|xs| xs.class())
+                                                            .unwrap_or_else(|| "X11".to_string())
+                                                    }
+                                                };
                                                 ws_thumbs.push(ThumbItem {
                                                     elems, tx, ty,
                                                     tw: (sw as f32 * card_scale) as i32,
                                                     th: (sh as f32 * card_scale) as i32,
                                                     scale: card_scale as f64,
+                                                    title,
                                                 });
                                             }
                                         }
@@ -4429,6 +4455,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         Color32F::new(focus_color.r() * border_br, focus_color.g() * border_br, focus_color.b() * border_br, 1.0),
                                         &[layout::rect(thumb.tx + thumb.tw - 1, thumb.ty, 1, thumb.th)],
                                     ).ok();
+                                    // 窗口标题标签（缩略图下方）
+                                    let display_title = if thumb.title.len() > 12 {
+                                        format!("{}…", &thumb.title[..12])
+                                    } else {
+                                        thumb.title.clone()
+                                    };
+                                    crate::text_render::draw_text(
+                                        &mut f,
+                                        &display_title,
+                                        thumb.tx,
+                                        thumb.ty + thumb.th + 3,
+                                        10.0,
+                                        (focus_color.r() * 0.35, focus_color.g() * 0.35, focus_color.b() * 0.35),
+                                    );
                                 }
                             } else if state.overview.is_overview() {
                                 // ── Cover Flow 3D ──
