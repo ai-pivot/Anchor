@@ -39,6 +39,13 @@ pub fn render_wallpaper(f: &mut impl Frame, cfg: &Config, ow: i32, oh: i32, fram
         f.clear(dot, &dots).ok();
     }
 
+    // 全局呼吸脉冲（微妙的全屏亮度变化）
+    let breathe = 0.008 + 0.004 * (frame as f32 * 0.008).sin();
+    f.clear(
+        opaque(accent.0 * breathe, accent.1 * breathe, accent.2 * breathe),
+        &[rect(0, 0, ow, oh)],
+    ).ok();
+
     // Animated glow spots (6 calls — fine)
     let t = frame as f32 * 0.012;
     let spots: [(f32, f32, f32, f32, i32, f32); 5] = [

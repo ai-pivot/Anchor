@@ -394,12 +394,22 @@ pub fn render_headbar(
                 &[rect(bar_x, bar_y, fill_w, bar_h)],
             )
             .ok();
-            // 进度条发光
+            // 进度条发光扩散（3层）
             f.clear(
                 opaque(mem_color.0 * 0.3, mem_color.1 * 0.3, mem_color.2 * 0.3),
                 &[rect(bar_x, bar_y - 1, fill_w, 1)],
-            )
-            .ok();
+            ).ok();
+            f.clear(
+                opaque(mem_color.0 * 0.12, mem_color.1 * 0.12, mem_color.2 * 0.12),
+                &[rect(bar_x, bar_y - 2, fill_w, 1)],
+            ).ok();
+            // 进度条尾部发光点
+            if fill_w > 2 {
+                f.clear(
+                    opaque(mem_color.0 * 0.5, mem_color.1 * 0.5, mem_color.2 * 0.5),
+                    &[rect(bar_x + fill_w - 2, bar_y - 1, 2, bar_h + 2)],
+                ).ok();
+            }
         }
         rx -= mw.max(bar_w) + S3;
         f.clear(
@@ -444,11 +454,22 @@ pub fn render_headbar(
                 &[rect(bar_x, bar_y, fill_w, bar_h)],
             )
             .ok();
+            // 进度条发光扩散（3层）
             f.clear(
                 opaque(cpu_color.0 * 0.3, cpu_color.1 * 0.3, cpu_color.2 * 0.3),
                 &[rect(bar_x, bar_y - 1, fill_w, 1)],
-            )
-            .ok();
+            ).ok();
+            f.clear(
+                opaque(cpu_color.0 * 0.12, cpu_color.1 * 0.12, cpu_color.2 * 0.12),
+                &[rect(bar_x, bar_y - 2, fill_w, 1)],
+            ).ok();
+            // 进度条尾部发光点
+            if fill_w > 2 {
+                f.clear(
+                    opaque(cpu_color.0 * 0.5, cpu_color.1 * 0.5, cpu_color.2 * 0.5),
+                    &[rect(bar_x + fill_w - 2, bar_y - 1, 2, bar_h + 2)],
+                ).ok();
+            }
         }
         rx -= cw.max(bar_w) + S3;
     }
