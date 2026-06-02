@@ -132,12 +132,16 @@ pub fn render_headbar(
         let text_y = block_y + ws_pad;
 
         if is_active {
-            // 激活工作区 — accent 填充 + 顶部亮线
+            // 激活工作区 — accent 渐变背景 + 顶部亮线
+            // 渐变：顶部亮 → 底部暗（2层）
             f.clear(
-                opaque(accent.0 * 0.2, accent.1 * 0.2, accent.2 * 0.2),
-                &[rect(x, block_y, block_w, block_h)],
-            )
-            .ok();
+                opaque(accent.0 * 0.22, accent.1 * 0.22, accent.2 * 0.22),
+                &[rect(x, block_y, block_w, block_h / 2)],
+            ).ok();
+            f.clear(
+                opaque(accent.0 * 0.14, accent.1 * 0.14, accent.2 * 0.14),
+                &[rect(x, block_y + block_h / 2, block_w, block_h - block_h / 2)],
+            ).ok();
             f.clear(
                 opaque(accent.0 * 0.8, accent.1 * 0.8, accent.2 * 0.8),
                 &[rect(x, block_y, block_w, 2)],
@@ -326,12 +330,15 @@ pub fn render_headbar(
     .ok();
     rx -= S3;
 
-    // ── 日期 ──
+    // ── 日期 + 星期几 ──
     if cfg.bar.show_date {
         let month = (tm.tm_mon + 1) as u8;
         let day = tm.tm_mday as u8;
+        let weekdays = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
+        let weekday = weekdays.get(tm.tm_wday as usize).unwrap_or(&"");
         let date_str = format!("{}-{}-{}", tm.tm_year + 1900, month, day);
-        let dw = text_render::text_width(&date_str, DATE_SIZE);
+        let full_str = format!("{} {}", date_str, weekday);
+        let dw = text_render::text_width(&full_str, DATE_SIZE);
         let dy = h / 2 - DATE_SIZE as i32 / 2 - 1;
         // 日期背景发光
         f.clear(
@@ -345,7 +352,7 @@ pub fn render_headbar(
         ).ok();
         text_render::draw_text(
             f,
-            &date_str,
+            &full_str,
             rx - dw,
             dy,
             DATE_SIZE,
