@@ -3608,10 +3608,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     state.workspaces[out_ws_idx].layout,
                                     state.workspaces[out_ws_idx].split,
                                 );
-                                let (dx, dy) = state
-                                    .layout_anim
-                                    .offset_for(&order[i], (x, y))
-                                    .unwrap_or((0, 0));
+                                let (dx, dy) = if is_focused_output {
+                                    state
+                                        .layout_anim
+                                        .offset_for(&order[i], (x, y))
+                                        .unwrap_or((0, 0))
+                                } else {
+                                    (0, 0)
+                                };
                                 layout::render_window_decorations_anim(
                                     &mut f,
                                     &state.cfg,
