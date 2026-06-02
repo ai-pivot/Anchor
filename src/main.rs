@@ -4067,10 +4067,29 @@ impl smithay::xwayland::XwmHandler for App {
         _xwm: smithay::xwayland::xwm::XwmId,
         window: smithay::xwayland::X11Surface,
     ) {
+        use smithay::xwayland::xwm::WmWindowType;
+
+        let is_aux = window.is_transient_for().is_some()
+            || matches!(
+                window.window_type(),
+                Some(WmWindowType::Dialog)
+                | Some(WmWindowType::Menu)
+                | Some(WmWindowType::PopupMenu)
+                | Some(WmWindowType::DropdownMenu)
+                | Some(WmWindowType::Toolbar)
+                | Some(WmWindowType::Tooltip)
+                | Some(WmWindowType::Utility)
+                | Some(WmWindowType::Notification)
+                | Some(WmWindowType::Splash)
+            );
+
         tracing::info!(
-            "🗺️  X11 map_request: class='{}' title='{}'",
+            "🗺️  X11 map_request: class='{}' title='{}' type={:?} transient={:?} aux={}",
             window.class(),
-            window.title()
+            window.title(),
+            window.window_type(),
+            window.is_transient_for(),
+            is_aux
         );
 
         if let Err(e) = window.set_mapped(true) {
@@ -4079,23 +4098,33 @@ impl smithay::xwayland::XwmHandler for App {
         }
 
         let wid = window.window_id();
-        let ws = &mut self.workspaces[self.active_ws];
-        let is_new = !ws.x11_surfaces.iter().any(|s| s.window_id() == wid);
-        if is_new {
-            ws.x11_surfaces.push(window.clone());
-            ws.rebuild_order();
-        }
 
-        // Focus the new X11 window
-        if let Some(wl) = window.wl_surface() {
-            // 保存当前焦点（原应用），辅助窗口消失后恢复
-            self.x11_saved_focus = self.workspaces[self.active_ws].focus.clone();
-            self.workspaces[self.active_ws].focus = Some(wl.clone());
-            let kbd = self.kbd.clone();
-            let serial = SERIAL_COUNTER.next_serial();
-            kbd.set_focus(self, Some(wl), serial);
+        if is_aux {
+            // 辅助窗口（IM候选框、对话框、菜单等）：
+            // 放入 or_surfaces 作为浮动窗口，接受客户端自己的位置，
+            // 不参与平铺布局，不抢焦点。
+            tracing::info!("📌 X11 aux → floating overlay");
+            if !self.xw.or_surfaces.iter().any(|s| s.window_id() == wid) {
+                self.xw.or_surfaces.push(window);
+            }
+        } else {
+            // 普通窗口：加入平铺布局，设置焦点
+            let ws = &mut self.workspaces[self.active_ws];
+            let is_new = !ws.x11_surfaces.iter().any(|s| s.window_id() == wid);
+            if is_new {
+                ws.x11_surfaces.push(window.clone());
+                ws.rebuild_order();
+            }
+
+            if let Some(wl) = window.wl_surface() {
+                self.x11_saved_focus = self.workspaces[self.active_ws].focus.clone();
+                self.workspaces[self.active_ws].focus = Some(wl.clone());
+                let kbd = self.kbd.clone();
+                let serial = SERIAL_COUNTER.next_serial();
+                kbd.set_focus(self, Some(wl), serial);
+            }
+            self.do_layout_animated();
         }
-        self.do_layout_animated();
         self.dirty = true;
     }
 
