@@ -4454,11 +4454,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     };
                                     crate::text_render::draw_text(
                                         &mut f,
-                                        &format!("WS {} ({} wins)", _ws_i + 1, thumbs.len()),
+                                        &format!("WS {}", _ws_i + 1),
                                         *cx + 8,
-                                        *cy - 22,
+                                        *cy - 24,
                                         14.0,
                                         label_color,
+                                    );
+                                    // WS 窗口数小标签
+                                    crate::text_render::draw_text(
+                                        &mut f,
+                                        &format!("{} windows", thumbs.len()),
+                                        *cx + 8,
+                                        *cy - 10,
+                                        10.0,
+                                        (label_color.0 * 0.6, label_color.1 * 0.6, label_color.2 * 0.6),
                                     );
 
                                     // 画真窗口缩略图
@@ -4552,6 +4561,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 &state.launcher.query,
                                 &filtered,
                                 state.launcher.selected,
+                                state.frame,
                             );
                         }
 

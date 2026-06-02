@@ -15,6 +15,7 @@ pub fn render_launcher(
     query: &str,
     filtered: &[(usize, &(String, String))],
     selected: usize,
+    frame: u32,
 ) {
     let accent = parse_color(&cfg.colors.focus_border);
     let bar_h = cfg.bar.height;
@@ -78,6 +79,12 @@ pub fn render_launcher(
     text_render::draw_text(f, ">", lx + 16, search_y + 6, 20.0, accent);
 
     if query.is_empty() {
+        // 闪烁光标
+        let cursor_alpha = 0.3 + 0.7 * (frame as f32 * 0.06).sin().max(0.0);
+        f.clear(
+            opaque(accent.0 * cursor_alpha, accent.1 * cursor_alpha, accent.2 * cursor_alpha),
+            &[rect(lx + 38, search_y + 8, 2, search_h - 16)],
+        ).ok();
         text_render::draw_text(
             f,
             "Type to search...",
