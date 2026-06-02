@@ -295,6 +295,19 @@ For SDDM: Create `/usr/share/wayland-sessions/anchor.desktop` with same content.
       2. 物理重启后 GDM 显示登录页
       3. 输入密码 → GDM 用密码解锁 GNOME Keyring（密码=keyring 密码）
       4. 浏览器、TLS 证书、密码管理器全部恢复
+23. **多显示器 `prev_positions` 必须在 `focused_output` 切换时同步。**
+    `prev_positions` 是全局变量（只有当前 `active_ws` 的数据）。当鼠标从
+    显示器2 移到显示器1 时，`active_ws` 更新了但 `prev_positions` 还是
+    显示器2 的数据。之后新建窗口时 `do_layout_animated` 把已有窗口误判为
+    新窗口 → 从屏幕外飞入。**修复**：所有 `focused_output` 切换点都调用
+    `self.layout_workspace(self.active_ws)` 同步 `prev_positions`。
+24. **`do_layout_animated` 在动画进行中时不能重启动画。** 连续 commit /
+    surface 事件会反复调用 `do_layout_animated`，每次都重启 layout 动画 →
+    窗口抖动。动画进行中时只执行 `layout_workspace`（更新位置），不重新
+    开始动画。
+25. **新增窗口 vs 布局切换需要不同的动画策略。** `do_layout_animated` 自动
+    检测：纯新增窗口场景（窗口数增加、旧窗口全存在）→ 已有窗口零偏移；
+    布局变化场景 → 所有窗口从旧位置动画到新位置。
 
 ## 渲染循环与动画架构
 

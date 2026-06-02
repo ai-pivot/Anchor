@@ -754,31 +754,59 @@ impl App {
     }
 
     /// 触发布局动画 + 重新布局
+    ///
+    /// 策略：
+    /// - 对比 layout 前后的窗口列表，自动检测 "新增窗口" vs "布局变化"
+    /// - 新增窗口场景（窗口数增加，旧窗口不变）：
+    ///   已有窗口起始 = 新位置（零偏移，不动画），新窗口从屏幕外滑入
+    /// - 布局变化场景（窗口数不变，全屏切换等）：
+    ///   所有窗口从旧位置动画到新位置
+    /// - 动画进行中时跳过重启动画
     fn do_layout_animated(&mut self) {
-        // 保存动画起点（每个窗口的身份 + 位置）
-        let old_positions = self.prev_positions.clone();
+        // 如果布局动画正在进行中，只执行布局不重启动画
+        if self.layout_anim.is_active() {
+            self.layout_workspace(self.active_ws);
+            return;
+        }
 
-        // 执行布局
+        // 1. 在 layout 之前保存旧位置和窗口数
+        let old_snapshot = self.prev_positions.clone();
+        let old_n = old_snapshot.len();
+
+        // 2. 执行布局 → prev_positions 更新为新位置
         self.layout_workspace(self.active_ws);
+        let new_positions = self.prev_positions.clone();
+        let new_n = new_positions.len();
 
-        // 为新窗口（在 prev_positions 中没有记录的）填充假的旧位置
-        let bar_h = if self.cfg.bar.enabled {
-            self.cfg.bar.height
-        } else {
-            0
-        };
+        // 3. 检测是否为 "纯新增窗口" 场景
+        //    条件：新窗口数 > 旧窗口数，且旧窗口全部仍存在
+        let is_pure_add = new_n > old_n && old_snapshot.iter().all(|(old_slot, _)| {
+            new_positions.iter().any(|(new_slot, _)| match (old_slot, new_slot) {
+                (WindowSlot::Wl(a), WindowSlot::Wl(b)) => a == b,
+                (WindowSlot::X11(a), WindowSlot::X11(b)) => a == b,
+                _ => false,
+            })
+        });
+
+        // 4. 构建 anim_positions
         let split = self.workspaces[self.active_ws].split;
-        let new_positions = self.prev_positions.clone(); // layout_workspace 刚更新
-        let mut anim_positions = old_positions;
+        let mut anim_positions = Vec::new();
 
-        // 为新增的窗口添加假旧位置（从 split 方向滑入）
         for (slot, new_pos) in &new_positions {
-            let already_tracked = anim_positions.iter().any(|(s, _)| match (s, slot) {
+            let old_entry = old_snapshot.iter().find(|(s, _)| match (s, slot) {
                 (WindowSlot::Wl(a), WindowSlot::Wl(b)) => a == b,
                 (WindowSlot::X11(a), WindowSlot::X11(b)) => a == b,
                 _ => false,
             });
-            if !already_tracked {
+
+            if is_pure_add && old_entry.is_some() {
+                // 纯新增场景：已有窗口不动画（起始 = 新位置 → 零偏移）
+                anim_positions.push((slot.clone(), *new_pos));
+            } else if let Some((_, old_pos)) = old_entry {
+                // 布局变化场景：已有窗口从旧位置动画到新位置
+                anim_positions.push((slot.clone(), *old_pos));
+            } else {
+                // 新增窗口：从屏幕外滑入
                 let fake_pos = match split {
                     layout::SplitDir::Horizontal => (new_pos.0 + self.osize.w + 100, new_pos.1),
                     layout::SplitDir::Vertical => (new_pos.0, new_pos.1 + self.osize.h + 100),
@@ -787,7 +815,7 @@ impl App {
             }
         }
 
-        // 启动动画
+        // 5. 启动动画
         if !anim_positions.is_empty() {
             self.layout_anim.begin(&anim_positions);
             self.dirty = true;
@@ -948,6 +976,8 @@ impl App {
                     self.scroll_spring.set(self.scroll_offset);
                     self.scroll_spring.set_target(self.scroll_offset);
                     self.scroll_momentum.reset();
+                    // 同步 prev_positions 到新 active_ws（跨屏切换时防止旧 ws 数据污染）
+                    self.layout_workspace(target);
                     self.notify(format!("Workspace {} (screen {})", target + 1, oi + 1));
                     self.dirty = true;
                     // 设置焦点
@@ -1129,6 +1159,8 @@ impl App {
             self.scroll_spring.set(self.scroll_offset);
             self.scroll_spring.set_target(self.scroll_offset);
             self.scroll_momentum.reset();
+            // 同步 prev_positions 到新 active_ws（跨屏切换时防止旧 ws 数据污染）
+            self.layout_workspace(target);
         } else {
             self.switch_workspace(target);
         }
@@ -1863,6 +1895,10 @@ impl App {
                     self.scroll_spring.set(self.scroll_offset);
                     self.scroll_spring.set_target(self.scroll_offset);
                     self.scroll_momentum.reset();
+                    // 同步 prev_positions 到新 active_ws
+                    // 否则 prev_positions 还是旧 output 的窗口数据，
+                    // 新建窗口时 do_layout_animated 会把已有窗口误判为新窗口 → 从屏幕外飞入
+                    self.layout_workspace(self.active_ws);
                     self.dirty = true;
                 }
 
@@ -3514,6 +3550,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             Vec::new();
                         let mut im_popup_pos: (i32, i32) = (0, 0);
                         let mut ws_offset: i32 = 0;
+
+                        // ── Task Panel 缩略图 elements ──
+                        // 在 Phase 1 收集（需要 renderer），Phase 2 画（需要 f）
+                        struct ThumbItem {
+                            elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>>,
+                            // 缩略图在屏幕上的目标位置和大小
+                            tx: i32,
+                            ty: i32,
+                            tw: i32,
+                            th: i32,
+                        }
+                        let mut task_panel_thumbs: Vec<ThumbItem> = Vec::new();
+                        let mut overview_thumbs: Vec<(usize, Vec<ThumbItem>)> = Vec::new(); // (ws_idx, thumbs)
                         let mut scratchpad_data: Option<(i32, i32, i32, i32)> = None; // (x, y, w, h)
 
                         // 每个 output 都渲染自己工作区的窗口（不再限制 is_primary）
@@ -3809,6 +3858,115 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
                         // ═══════════════════════════════════════════════
+                        // Phase 1.5: collect thumbnail elements for Task Panel / Overview
+                        // ═══════════════════════════════════════════════
+                        // 只有 overview 活跃且有足够 progress 时才收集
+                        // ⚠️ 非活跃工作区的窗口可能没有 buffer（被缩到 1x1），
+                        //    render_elements_from_surface_tree 可能返回空或 panic
+                        if is_focused_output && state.overview.is_active() {
+                            let progress = state.overview.progress();
+                            if state.overview.is_task_panel() && progress > 0.15 {
+                                // Task Panel: 只收集当前活跃 ws 的窗口（有 buffer）
+                                let panel_h = (oh as f32 * 0.35) as i32;
+                                let panel_x = 12i32; // S3
+                                let panel_w = ow - 12 * 2;
+                                let thumb_w = 180i32;
+                                let thumb_h = 120i32;
+                                let thumb_gap = 12i32; // S3
+                                let cols = ((panel_w - 32) / (thumb_w + thumb_gap)).max(1);
+                                let start_y_base = oh - panel_h + 40;
+
+                                let ws = &state.workspaces[state.active_ws];
+                                let order = ws.effective_order();
+                                for (i, slot) in order.iter().enumerate() {
+                                    let col = i % cols as usize;
+                                    let row = i / cols as usize;
+                                    let tx = panel_x + 16 + col as i32 * (thumb_w + thumb_gap);
+                                    let ty = start_y_base + row as i32 * (thumb_h + thumb_gap + 16);
+                                    if ty + thumb_h > oh { break; }
+
+                                    if let Some(elems) = match slot {
+                                        WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| {
+                                            render_elements_from_surface_tree(
+                                                &mut renderer, tl.wl_surface(),
+                                                Point::<i32, Physical>::from((tx, ty)),
+                                                1.0, 1.0, Kind::Unspecified,
+                                            )
+                                        }),
+                                        WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()).map(|wl| {
+                                            render_elements_from_surface_tree(
+                                                &mut renderer, &wl,
+                                                Point::<i32, Physical>::from((tx, ty)),
+                                                1.0, 1.0, Kind::Unspecified,
+                                            )
+                                        }),
+                                    } {
+                                        if !elems.is_empty() {
+                                            task_panel_thumbs.push(ThumbItem { elems, tx, ty, tw: thumb_w, th: thumb_h });
+                                        }
+                                    }
+                                }
+                            }
+                            // Overview 缩略图：只对当前 active_ws 收集（其他 ws 可能没 buffer）
+                            else if state.overview.is_overview() && progress > 0.15 {
+                                let grid_gap = 16i32;
+                                let grid_margin_x = 48i32;
+                                let grid_margin_top = 72i32;
+                                let grid_w = ow - grid_margin_x * 2;
+                                let grid_h = oh - grid_margin_top - 24;
+                                let cell_w = (grid_w - 2 * grid_gap) / 3;
+                                let cell_h = (grid_h - 2 * grid_gap) / 3;
+
+                                let ws_i = state.active_ws;
+                                let col = ws_i % 3;
+                                let row = ws_i / 3;
+                                let cx = grid_margin_x + col as i32 * (cell_w + grid_gap);
+                                let cy = grid_margin_top + row as i32 * (cell_h + grid_gap);
+
+                                let ws = &state.workspaces[ws_i];
+                                let order = ws.effective_order();
+                                let n = order.len();
+                                if n > 0 {
+                                    let inner_margin = 8i32;
+                                    let inner_w = cell_w - inner_margin * 2;
+                                    let inner_h = cell_h - inner_margin * 2 - 16;
+                                    let ws_thumb_w = (inner_w / n as i32).max(40);
+                                    let ws_thumb_h = inner_h;
+
+                                    let mut ws_thumbs = Vec::new();
+                                    for (wi, wslot) in order.iter().enumerate() {
+                                        let thumb_x = cx + inner_margin + wi as i32 * ws_thumb_w;
+                                        let thumb_y = cy + inner_margin + 14;
+
+                                        if let Some(elems) = match wslot {
+                                            WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| {
+                                                render_elements_from_surface_tree(
+                                                    &mut renderer, tl.wl_surface(),
+                                                    Point::<i32, Physical>::from((thumb_x, thumb_y)),
+                                                    1.0, 1.0, Kind::Unspecified,
+                                                )
+                                            }),
+                                            WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()).map(|wl| {
+                                                render_elements_from_surface_tree(
+                                                    &mut renderer, &wl,
+                                                    Point::<i32, Physical>::from((thumb_x, thumb_y)),
+                                                    1.0, 1.0, Kind::Unspecified,
+                                                )
+                                            }),
+                                        } {
+                                            if !elems.is_empty() {
+                                                ws_thumbs.push(ThumbItem { elems, tx: thumb_x, ty: thumb_y, tw: ws_thumb_w, th: ws_thumb_h });
+                                            }
+                                        }
+                                    }
+                                    if !ws_thumbs.is_empty() {
+                                        overview_thumbs.push((ws_i, ws_thumbs));
+                                    }
+                                }
+                            }
+                        }
+
+                        // ═══════════════════════════════════════════════
                         // Phase 2: bind + render everything (full control)
                         // ═══════════════════════════════════════════════
                         let mut target = renderer.bind(&mut dmabuf)?;
@@ -4016,6 +4174,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         // Step 4.8: Overview overlay (Task Panel / Bird's Eye View)
                         if is_focused_output && state.overview.is_active() {
+                            let progress = state.overview.progress();
                             let ws_counts: Vec<usize> = state
                                 .workspaces
                                 .iter()
@@ -4024,33 +4183,72 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             let titles: Vec<String> = (0..state.workspaces[state.active_ws].tops.len() + state.workspaces[state.active_ws].x11_surfaces.len())
                                 .map(|i| state.window_titles.get(&i).cloned().unwrap_or_default())
                                 .collect();
+
                             if state.overview.is_task_panel() {
+                                // 画背景（面板、边框、标签）
                                 layout::render_task_panel(
                                     &mut f,
                                     &state.cfg,
-                                    ow,
-                                    oh,
-                                    state.overview.progress(),
+                                    ow, oh,
+                                    progress,
                                     state.active_ws,
                                     &titles,
                                     out_ws_focus_idx,
                                     n_total,
                                 );
+                                // 画真窗口缩略图
+                                for thumb in &task_panel_thumbs {
+                                    // 计算 scale: 把正常窗口尺寸缩小到 thumb_w × thumb_h
+                                    // draw_render_elements 的 scale 参数控制 dst 大小
+                                    // 需要知道窗口的原始渲染尺寸来计算 scale
+                                    // 简化方案：用固定的 scale 缩放
+                                    if !thumb.elems.is_empty() {
+                                        // scale = thumb_size / actual_size
+                                        // 但我们没有 actual_size…用近似值
+                                        // Task Panel 窗口通常是半屏或全屏，thumb 是 180x120
+                                        // 简单起见：用窗口的 slot 尺寸来算
+                                        let scale_x = thumb.tw as f64 / ow.max(1) as f64;
+                                        let scale_y = thumb.th as f64 / oh.max(1) as f64;
+                                        let thumb_scale = scale_x.min(scale_y);
+                                        let _ = draw_render_elements(
+                                            &mut f,
+                                            thumb_scale,
+                                            &thumb.elems,
+                                            &[dmg],
+                                        );
+                                    }
+                                }
                             } else if state.overview.is_overview() {
                                 let hover_ws = match &state.overview {
                                     OverviewState::Overview { hover_ws, .. } => *hover_ws,
                                     _ => None,
                                 };
+                                // 画背景（全屏遮罩、网格、边框、标签）
                                 layout::render_overview(
                                     &mut f,
                                     &state.cfg,
-                                    ow,
-                                    oh,
-                                    state.overview.progress(),
+                                    ow, oh,
+                                    progress,
                                     state.active_ws,
                                     &ws_counts,
                                     hover_ws,
                                 );
+                                // 画真窗口缩略图
+                                for (_ws_i, thumbs) in &overview_thumbs {
+                                    for thumb in thumbs {
+                                        if !thumb.elems.is_empty() {
+                                            let scale_x = thumb.tw as f64 / ow.max(1) as f64;
+                                            let scale_y = thumb.th as f64 / oh.max(1) as f64;
+                                            let thumb_scale = scale_x.min(scale_y);
+                                            let _ = draw_render_elements(
+                                                &mut f,
+                                                thumb_scale,
+                                                &thumb.elems,
+                                                &[dmg],
+                                            );
+                                        }
+                                    }
+                                }
                             }
                         }
 
