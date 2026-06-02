@@ -659,11 +659,10 @@ impl App {
                     WindowSlot::X11(idx) => {
                         if let Some(xs) = self.workspaces[ws_idx].x11_surfaces.get(*idx) {
                             // X11 root window 坐标需要加上 output 偏移
-                            let _ =
-                                xs.configure(Some(Rectangle::from_loc_and_size(
-                                    (out_ox + x, out_oy + y),
-                                    (w, h),
-                                )));
+                            let _ = xs.configure(Some(Rectangle::from_loc_and_size(
+                                (out_ox + x, out_oy + y),
+                                (w, h),
+                            )));
                         }
                     }
                 }
@@ -1995,7 +1994,11 @@ impl XdgShellHandler for App {
             let order = ws.effective_order();
             for (i, slot) in order.iter().enumerate() {
                 let matched = match slot {
-                    WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| tl.wl_surface() == &wl_surf).unwrap_or(false),
+                    WindowSlot::Wl(idx) => ws
+                        .tops
+                        .get(*idx)
+                        .map(|tl| tl.wl_surface() == &wl_surf)
+                        .unwrap_or(false),
                     WindowSlot::X11(_) => false,
                 };
                 if matched {
@@ -3308,10 +3311,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     // 布局动画偏移（macOS 风格：从旧位置滑到新位置）
                                     // 只对触发动画的 output 播放，避免双屏下另一个屏幕的窗口也跟着动
                                     let (layout_dx, layout_dy) = if is_focused_output {
-                                        state
-                                            .layout_anim
-                                            .offset_for(slot, (x, y))
-                                            .unwrap_or((0, 0))
+                                        state.layout_anim.offset_for(slot, (x, y)).unwrap_or((0, 0))
                                     } else {
                                         (0, 0)
                                     };
@@ -3443,7 +3443,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     );
                                                     match slot {
                                                         WindowSlot::Wl(idx) => {
-                                                            if let Some(tl) = out_ws.tops.get(*idx) {
+                                                            if let Some(tl) = out_ws.tops.get(*idx)
+                                                            {
                                                                 let geo = smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
                                                                     states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
                                                                 }).unwrap_or_default();
@@ -4073,14 +4074,14 @@ impl smithay::xwayland::XwmHandler for App {
             || matches!(
                 window.window_type(),
                 Some(WmWindowType::Dialog)
-                | Some(WmWindowType::Menu)
-                | Some(WmWindowType::PopupMenu)
-                | Some(WmWindowType::DropdownMenu)
-                | Some(WmWindowType::Toolbar)
-                | Some(WmWindowType::Tooltip)
-                | Some(WmWindowType::Utility)
-                | Some(WmWindowType::Notification)
-                | Some(WmWindowType::Splash)
+                    | Some(WmWindowType::Menu)
+                    | Some(WmWindowType::PopupMenu)
+                    | Some(WmWindowType::DropdownMenu)
+                    | Some(WmWindowType::Toolbar)
+                    | Some(WmWindowType::Tooltip)
+                    | Some(WmWindowType::Utility)
+                    | Some(WmWindowType::Notification)
+                    | Some(WmWindowType::Splash)
             );
 
         tracing::info!(
@@ -4151,9 +4152,10 @@ impl smithay::xwayland::XwmHandler for App {
         let wid = window.window_id();
 
         // 检查这个窗口是否在平铺布局中（x11_surfaces 里）
-        let was_in_layout = self.workspaces.iter().any(|ws| {
-            ws.x11_surfaces.iter().any(|s| s.window_id() == wid)
-        });
+        let was_in_layout = self
+            .workspaces
+            .iter()
+            .any(|ws| ws.x11_surfaces.iter().any(|s| s.window_id() == wid));
 
         for ws in &mut self.workspaces {
             ws.x11_surfaces.retain(|s| s.window_id() != wid);
@@ -4205,9 +4207,10 @@ impl smithay::xwayland::XwmHandler for App {
         let wid = window.window_id();
 
         // 检查这个窗口是否在平铺布局中
-        let was_in_layout = self.workspaces.iter().any(|ws| {
-            ws.x11_surfaces.iter().any(|s| s.window_id() == wid)
-        });
+        let was_in_layout = self
+            .workspaces
+            .iter()
+            .any(|ws| ws.x11_surfaces.iter().any(|s| s.window_id() == wid));
 
         if was_in_layout {
             // 重新映射 prev_positions（X11 窗口索引移位）
