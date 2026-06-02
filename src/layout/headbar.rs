@@ -174,6 +174,66 @@ pub fn render_headbar(
         x += block_w + ws_gap;
     }
 
+    // ── 滑动式 ws 位置指示条 ──
+    // 用 scroll_offset 驱动的连续位置条形光标
+    // 指示条在 ws 方块下方滑动，跟随 scroll_offset 平滑移动
+    {
+        let indicator_y = h - 8;
+        let indicator_h = 3;
+        // 计算整个 ws 区域的宽度和起始位置
+        let ws_start_x = S4 + logo_w + S4 + S2 + S3;
+        let ws_block_pad = 6;
+        let ws_gap_total = 3;
+        let total_ws_w: i32 = (0..max_show)
+            .map(|i| {
+                let num_str = format!("{}", i + 1);
+                let num_w = text_render::text_width(&num_str, WS_SIZE);
+                num_w + ws_block_pad * 2 + if i < max_show - 1 { ws_gap_total } else { 0 }
+            })
+            .sum();
+        // 指示条宽度 = 单个 ws 方块宽度
+        let first_block_w = {
+            let num_str = format!("{}", 1);
+            let num_w = text_render::text_width(&num_str, WS_SIZE);
+            num_w + ws_block_pad * 2
+        };
+        // 计算 scroll_offset 对应的指示条位置
+        let frac = scroll_offset - scroll_offset.floor();
+        let base_idx = scroll_offset.floor() as i32;
+        let offset_in_block: f64 = (0..max_show)
+            .map(|i| {
+                let num_str = format!("{}", i + 1);
+                let num_w = text_render::text_width(&num_str, WS_SIZE);
+                num_w + ws_block_pad * 2 + if i < max_show - 1 { ws_gap_total } else { 0 }
+            })
+            .take(base_idx as usize)
+            .sum::<i32>() as f64;
+        let current_block_w = {
+            let idx = (base_idx as usize).min(max_show - 1);
+            let num_str = format!("{}", idx + 1);
+            let num_w = text_render::text_width(&num_str, WS_SIZE);
+            num_w + ws_block_pad * 2
+        };
+        let indicator_x = ws_start_x as f64 + offset_in_block + frac * (current_block_w + ws_gap_total) as f64;
+        let indicator_w = first_block_w as f64 * (1.0 - frac * 0.3).max(0.7);
+
+        // 发光底座（宽一点，暗一点）
+        f.clear(
+            opaque(accent.0 * 0.08, accent.1 * 0.08, accent.2 * 0.08),
+            &[rect(ws_start_x - 2, indicator_y, total_ws_w + 4, indicator_h)],
+        ).ok();
+        // 主指示条
+        f.clear(
+            opaque(accent.0 * 0.8, accent.1 * 0.8, accent.2 * 0.8),
+            &[rect(indicator_x as i32, indicator_y, indicator_w as i32, indicator_h)],
+        ).ok();
+        // 发光层
+        f.clear(
+            opaque(accent.0 * 0.3, accent.1 * 0.3, accent.2 * 0.3),
+            &[rect(indicator_x as i32 - 2, indicator_y + indicator_h, (indicator_w + 4.0) as i32, 2)],
+        ).ok();
+    }
+
     // 分隔线
     f.clear(
         opaque(accent.0 * 0.15, accent.1 * 0.15, accent.2 * 0.15),

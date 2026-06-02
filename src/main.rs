@@ -4395,6 +4395,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     f.clear(border_color, &[layout::rect(*cx - bw, *cy, bw, *ch)]).ok();
                                     f.clear(border_color, &[layout::rect(*cx + *cw, *cy, bw, *ch)]).ok();
 
+                                    // 卡片底部阴影（4层渐变）
+                                    let shadow_br = if *is_hover { 0.25f32 } else { 0.12f32 } / (1 + dist) as f32;
+                                    for (si, sb) in [(0i32, 1.0f32), (1, 0.7), (2, 0.4), (3, 0.2)].iter() {
+                                        f.clear(
+                                            Color32F::new(0.0, 0.0, 0.0, shadow_br * sb),
+                                            &[layout::rect(*cx - 4, *cy + *ch + 2 + si, *cw + 8, 2)],
+                                        ).ok();
+                                    }
+
                                     // WS 标签
                                     let label_color = if *is_hover {
                                         (focus_color.r(), focus_color.g(), focus_color.b())

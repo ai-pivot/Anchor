@@ -41,23 +41,36 @@ pub fn render_wallpaper(f: &mut impl Frame, cfg: &Config, ow: i32, oh: i32, fram
 
     // Animated glow spots (6 calls — fine)
     let t = frame as f32 * 0.012;
-    let spots: [(f32, f32, f32, f32, i32, f32); 3] = [
-        (t.sin(), t.cos(), 0.5, 0.5, 160, 0.03),
+    let spots: [(f32, f32, f32, f32, i32, f32); 5] = [
+        (t.sin(), t.cos(), 0.5, 0.5, 180, 0.04),
         (
             (t * 0.6 + 2.1).sin(),
             (t * 0.6 + 2.1).cos(),
             0.25,
             0.65,
-            120,
-            0.02,
+            140, 0.03,
         ),
         (
             (t * 0.4 + 4.2).sin(),
             (t * 0.4 + 4.2).cos(),
             0.75,
             0.35,
-            90,
-            0.015,
+            100, 0.025,
+        ),
+        // 新增：更多光斑，营造更动感的效果
+        (
+            (t * 0.8 + 1.0).cos(),
+            (t * 0.5 + 3.0).sin(),
+            0.6,
+            0.7,
+            80, 0.02,
+        ),
+        (
+            (t * 0.3 + 5.0).sin(),
+            (t * 0.7 + 1.5).cos(),
+            0.15,
+            0.4,
+            110, 0.025,
         ),
     ];
     for (sx, sy, cx, cy, size, brightness) in spots {
