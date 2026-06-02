@@ -7,7 +7,7 @@ use smithay::{
     utils::{Physical, Rectangle, Size},
 };
 
-pub fn render_wallpaper(f: &mut impl Frame, cfg: &Config, ow: i32, oh: i32, frame: u32) {
+pub fn render_wallpaper(f: &mut impl Frame, cfg: &Config, ow: i32, oh: i32, frame: u32, hour: u8) {
     f.clear(
         color_hex(&cfg.wallpaper.color),
         &[Rectangle::from_size(Size::new(ow, oh))],
@@ -15,6 +15,24 @@ pub fn render_wallpaper(f: &mut impl Frame, cfg: &Config, ow: i32, oh: i32, fram
     .ok();
 
     let accent = parse_color(&cfg.colors.focus_border);
+
+    // ── 时间相关的色调叠加 ──
+    // 0-6: 深夜蓝调, 6-12: 暖橙, 12-18: 正常, 18-24: 冷蓝
+    let (warm_r, warm_g, warm_b) = if hour < 6 {
+        (0.0, 0.0, 0.005)
+    } else if hour < 12 {
+        (0.006, 0.003, 0.0)
+    } else if hour < 18 {
+        (0.0, 0.0, 0.0)
+    } else {
+        (0.0, 0.0, 0.004)
+    };
+    if warm_r > 0.0 || warm_g > 0.0 || warm_b > 0.0 {
+        f.clear(
+            opaque(warm_r, warm_g, warm_b),
+            &[Rectangle::from_size(Size::new(ow, oh))],
+        ).ok();
+    }
 
     // Batch grid lines: one draw call for all horizontal, one for all vertical
     let grid = opaque(accent.0 * 0.03, accent.1 * 0.03, accent.2 * 0.03);

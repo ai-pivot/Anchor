@@ -133,6 +133,26 @@ pub fn render_window_decorations_anim(
         // ── 右上角发光点 ──
         f.clear(bright, &[rect(x + w + bw - 3, y - bw - 1, 4, 4)]).ok();
 
+        // ── 窗口控制按钮（macOS 红绿灯风格） ──
+        let btn_y = y - bw + 2;
+        let btn_r = 4;
+        let btn_gap = 14;
+        // 关闭按钮（红色）
+        f.clear(
+            opaque(0.8, 0.2, 0.2),
+            &[rect(x + w - 12 - bw, btn_y, btn_r, btn_r)],
+        ).ok();
+        // 最小化按钮（黄色）
+        f.clear(
+            opaque(0.7, 0.6, 0.15),
+            &[rect(x + w - 12 - bw - btn_gap, btn_y, btn_r, btn_r)],
+        ).ok();
+        // 全屏按钮（绿色）
+        f.clear(
+            opaque(0.2, 0.7, 0.3),
+            &[rect(x + w - 12 - bw - btn_gap * 2, btn_y, btn_r, btn_r)],
+        ).ok();
+
         // 窗口编号（暗底 + 亮字）
         let label_w = 22;
         f.clear(dark, &[rect(x + 4, y + 4, label_w, 18)]).ok();

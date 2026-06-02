@@ -4232,7 +4232,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 );
                             }
                         } else if !state.wallpaper_cache.render(&mut f, &state.cfg, ow, oh) {
-                            layout::render_wallpaper(&mut f, &state.cfg, ow, oh, state.frame);
+                            layout::render_wallpaper(&mut f, &state.cfg, ow, oh, state.frame, {
+                                let now = std::time::SystemTime::now();
+                                let secs = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
+                                ((secs / 3600 + 8) % 24) as u8 // UTC+8 → 北京时间
+                            });
                         }
 
                         // Step 2: Window surfaces + XDG popups — render per-window, painter's algorithm
