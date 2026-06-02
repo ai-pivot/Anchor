@@ -3409,28 +3409,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     .unwrap_or(false),
                                             };
                                             if matched {
-                                                let (x, y, _, _) = layout::slot(
-                                                    i,
-                                                    im_order.len(),
-                                                    ow,
-                                                    oh,
-                                                    bar_h,
-                                                    &state.cfg,
-                                                    out_ws.layout,
-                                                    out_ws.split,
-                                                );
-                                                let (bx, by) = match slot {
-                                                    WindowSlot::Wl(idx) => {
-                                                        if let Some(tl) = out_ws.tops.get(*idx) {
-                                                            let geo = smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
-                                                                states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
-                                                            }).unwrap_or_default();
-                                                            (x - geo.loc.x, y - geo.loc.y)
-                                                        } else {
-                                                            (x, y)
+                                                // 全屏时父窗口占满 output（除 headbar），基准位置是 (0, bar_h)
+                                                // 否则用 layout::slot() 的平铺坐标
+                                                let (bx, by) = if fullscreen == Some(i) {
+                                                    (0, bar_h)
+                                                } else {
+                                                    let (x, y, _, _) = layout::slot(
+                                                        i,
+                                                        im_order.len(),
+                                                        ow,
+                                                        oh,
+                                                        bar_h,
+                                                        &state.cfg,
+                                                        out_ws.layout,
+                                                        out_ws.split,
+                                                    );
+                                                    match slot {
+                                                        WindowSlot::Wl(idx) => {
+                                                            if let Some(tl) = out_ws.tops.get(*idx) {
+                                                                let geo = smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
+                                                                    states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
+                                                                }).unwrap_or_default();
+                                                                (x - geo.loc.x, y - geo.loc.y)
+                                                            } else {
+                                                                (x, y)
+                                                            }
                                                         }
+                                                        WindowSlot::X11(_) => (x, y),
                                                     }
-                                                    WindowSlot::X11(_) => (x, y),
                                                 };
                                                 popup_pos = (bx + popup_loc.x, by + popup_loc.y);
                                                 break;
