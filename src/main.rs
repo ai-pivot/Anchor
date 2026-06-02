@@ -4357,6 +4357,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             &[dmg],
                                         );
                                     }
+                                    // 缩略图边框（accent 发光）
+                                    let focus_color = layout::color_hex(&state.cfg.colors.focus_border);
+                                    let border_br: f32 = 0.25;
+                                    f.clear(
+                                        Color32F::new(focus_color.r() * border_br, focus_color.g() * border_br, focus_color.b() * border_br, 1.0),
+                                        &[layout::rect(thumb.tx, thumb.ty, thumb.tw, 1)],
+                                    ).ok();
+                                    f.clear(
+                                        Color32F::new(focus_color.r() * border_br, focus_color.g() * border_br, focus_color.b() * border_br, 1.0),
+                                        &[layout::rect(thumb.tx, thumb.ty + thumb.th - 1, thumb.tw, 1)],
+                                    ).ok();
+                                    f.clear(
+                                        Color32F::new(focus_color.r() * border_br, focus_color.g() * border_br, focus_color.b() * border_br, 1.0),
+                                        &[layout::rect(thumb.tx, thumb.ty, 1, thumb.th)],
+                                    ).ok();
+                                    f.clear(
+                                        Color32F::new(focus_color.r() * border_br, focus_color.g() * border_br, focus_color.b() * border_br, 1.0),
+                                        &[layout::rect(thumb.tx + thumb.tw - 1, thumb.ty, 1, thumb.th)],
+                                    ).ok();
                                 }
                             } else if state.overview.is_overview() {
                                 // ── Cover Flow 3D ──

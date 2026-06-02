@@ -278,18 +278,22 @@ pub fn render_headbar(
     // ── 时钟 ──
     let time_str = format!("{:02}:{:02}:{:02}", local_h, minutes, seconds);
     let tw = text_render::text_width(&time_str, CLOCK_SIZE);
+    // 秒级脉冲：accent 亮度随秒数微妙变化
+    let pulse = 0.06 + 0.02 * (seconds as f32 * 0.1047).sin();
     f.clear(
-        opaque(accent.0 * 0.06, accent.1 * 0.06, accent.2 * 0.06),
+        opaque(accent.0 * pulse, accent.1 * pulse, accent.2 * pulse),
         &[rect(rx - tw - S2, S2, tw + S4, h - S4)],
     )
     .ok();
+    // 时钟文字亮度也微弱脉冲
+    let text_pulse = 0.85 + 0.05 * (seconds as f32 * 0.1047).sin();
     text_render::draw_text(
         f,
         &time_str,
         rx - tw,
         ty,
         CLOCK_SIZE,
-        (accent.0 * 0.85, accent.1 * 0.85, accent.2 * 0.85),
+        (accent.0 * text_pulse, accent.1 * text_pulse, accent.2 * text_pulse),
     );
     rx -= tw + S4;
 
