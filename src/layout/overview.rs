@@ -8,7 +8,7 @@
 //! (NOT eased progress) to ramp from near-background-color to the target color.
 
 use super::util::{
-    ease_out_back, ease_out_expo, opaque, rect, S2, S3, S4, S6, TITLE_SIZE, WS_SIZE,
+    ease_out_expo, opaque, rect, S2, S3, S4, TITLE_SIZE,
 };
 use crate::config::Config;
 use crate::text_render;
