@@ -4518,6 +4518,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     f.clear(border_color, &[layout::rect(*cx, *cy + *ch, *cw, bw)]).ok();
                                     f.clear(border_color, &[layout::rect(*cx - bw, *cy, bw, *ch)]).ok();
                                     f.clear(border_color, &[layout::rect(*cx + *cw, *cy, bw, *ch)]).ok();
+                                    // 活跃/选中卡片顶部 accent 亮线
+                                    if *is_active || *is_hover {
+                                        let top_br = if *is_hover { 0.8 * hover_pulse } else { 0.5 };
+                                        f.clear(
+                                            Color32F::new(focus_color.r() * top_br, focus_color.g() * top_br, focus_color.b() * top_br, 1.0),
+                                            &[layout::rect(*cx, *cy - bw, *cw, 2)],
+                                        ).ok();
+                                    }
 
                                     // 卡片底部阴影（4层渐变）
                                     let shadow_br = if *is_hover { 0.25f32 } else { 0.12f32 } / (1 + dist) as f32;

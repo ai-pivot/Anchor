@@ -74,6 +74,21 @@ pub fn render_headbar(
         )
         .ok();
     }
+    // 底部移动光斑（从左到右扫过的明亮区域）
+    {
+        let seconds = time_secs as f32 % 8.0; // 8秒一个周期
+        let sweep_x = ((seconds / 8.0) * ow as f32) as i32;
+        let sweep_w = 80;
+        f.clear(
+            opaque(accent.0 * 0.3, accent.1 * 0.3, accent.2 * 0.3),
+            &[rect(sweep_x - sweep_w / 2, h - 5, sweep_w, 1)],
+        ).ok();
+        // 光斑拖尾
+        f.clear(
+            opaque(accent.0 * 0.15, accent.1 * 0.15, accent.2 * 0.15),
+            &[rect(sweep_x - sweep_w, h - 5, sweep_w / 2, 1)],
+        ).ok();
+    }
     // 顶部高亮线（与底部呼应，更细更暗）
     f.clear(
         opaque(accent.0 * 0.3, accent.1 * 0.3, accent.2 * 0.3),
@@ -85,9 +100,10 @@ pub fn render_headbar(
     // ── ANCHOR logo ──
     let logo_w = text_render::text_width("ANCHOR", LOGO_SIZE);
     let logo_y = h / 2 - LOGO_SIZE as i32 / 2 - 2;
-    // Logo 背景发光块
+    // Logo 背景发光块（微妙脉冲）
+    let logo_pulse = 0.08 + 0.02 * ((time_secs as f32 * 0.5).sin());
     f.clear(
-        opaque(accent.0 * 0.08, accent.1 * 0.08, accent.2 * 0.08),
+        opaque(accent.0 * logo_pulse, accent.1 * logo_pulse, accent.2 * logo_pulse),
         &[rect(x - S1, S2, logo_w + S2 + S1, h - S4)],
     )
     .ok();
