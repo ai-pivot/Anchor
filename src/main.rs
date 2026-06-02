@@ -586,8 +586,15 @@ impl App {
             }
         }
         let fullscreen = self.workspaces[ws_idx].fullscreen;
-        let osize_w = self.osize.w;
-        let osize_h = self.osize.h;
+
+        // 找到该工作区所在的 output，使用该 output 的实际尺寸
+        let (out_ox, out_oy, out_w, out_h) = self
+            .output_active_ws
+            .iter()
+            .enumerate()
+            .find(|(_, &ws)| ws == ws_idx)
+            .and_then(|(oi, _)| self.output_sizes.get(oi).copied())
+            .unwrap_or((0, 0, self.osize.w, self.osize.h));
 
         if let Some(fi) = fullscreen {
             for (i, slot) in order.iter().enumerate() {
@@ -598,7 +605,7 @@ impl App {
                                 tl.with_pending_state(|st| {
                                     st.states.set(xdg_toplevel::State::Activated);
                                     st.states.set(xdg_toplevel::State::Fullscreen);
-                                    st.size = Some((osize_w, osize_h - bar_h).into());
+                                    st.size = Some((out_w, out_h - bar_h).into());
                                 });
                             } else {
                                 tl.with_pending_state(|st| {
@@ -613,9 +620,10 @@ impl App {
                     WindowSlot::X11(idx) => {
                         if let Some(xs) = self.workspaces[ws_idx].x11_surfaces.get(*idx) {
                             if i == fi {
+                                // X11 root window 坐标需要加上 output 偏移
                                 let _ = xs.configure(Some(Rectangle::from_loc_and_size(
-                                    (0, bar_h),
-                                    (osize_w, osize_h - bar_h),
+                                    (out_ox, out_oy + bar_h),
+                                    (out_w, out_h - bar_h),
                                 )));
                             } else {
                                 let _ = xs
@@ -630,8 +638,8 @@ impl App {
                 let (x, y, w, h) = layout::slot(
                     i,
                     n,
-                    osize_w,
-                    osize_h,
+                    out_w,
+                    out_h,
                     bar_h,
                     &self.cfg,
                     self.workspaces[ws_idx].layout,
@@ -650,8 +658,12 @@ impl App {
                     }
                     WindowSlot::X11(idx) => {
                         if let Some(xs) = self.workspaces[ws_idx].x11_surfaces.get(*idx) {
+                            // X11 root window 坐标需要加上 output 偏移
                             let _ =
-                                xs.configure(Some(Rectangle::from_loc_and_size((x, y), (w, h))));
+                                xs.configure(Some(Rectangle::from_loc_and_size(
+                                    (out_ox + x, out_oy + y),
+                                    (w, h),
+                                )));
                         }
                     }
                 }
