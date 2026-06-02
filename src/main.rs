@@ -3783,9 +3783,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
                         // Step 9: Screenshot area selection overlay
-                        if is_focused_output && state.screenshot.selecting {
-                            if let Some(rect) = state.screenshot.selection_rect() {
-                                screenshot::render_selection_overlay(&mut f, ow, oh, rect);
+                        // 坐标需要从全局转为 output-local
+                        {
+                            let (out_ox, out_oy, _, _) = state
+                                .output_sizes
+                                .get(oi)
+                                .copied()
+                                .unwrap_or((0, 0, ow, oh));
+                            if state.screenshot.selecting {
+                                if let Some((rx, ry, rw, rh)) = state.screenshot.selection_rect() {
+                                    // 全局坐标转为 output-local
+                                    let local_rect = (rx - out_ox, ry - out_oy, rw, rh);
+                                    screenshot::render_selection_overlay(
+                                        &mut f, ow, oh, local_rect,
+                                    );
+                                }
                             }
                         }
 
@@ -3810,7 +3822,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 if let Some(req) = state.pending_screenshot.take() {
                                     let area = match &req {
                                         screenshot::ScreenshotRequest::Area(x, y, w, h) => {
-                                            Some((*x, *y, *w, *h))
+                                            // 全局坐标转为 output-local
+                                            Some((*x - out_ox, *y - out_oy, *w, *h))
                                         }
                                         screenshot::ScreenshotRequest::Full => None,
                                     };
