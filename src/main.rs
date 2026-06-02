@@ -4400,9 +4400,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     };
                                     f.clear(bg_color, &[Rectangle::from_loc_and_size((*cx, *cy), (*cw, *ch))]).ok();
 
-                                    // 卡片边框
+                                    // 卡片边框（hover 卡片有呼吸脉冲）
+                                    let hover_pulse = if *is_hover {
+                                        let t = state.frame as f32 * 0.05;
+                                        0.6 + 0.4 * t.sin()
+                                    } else {
+                                        1.0
+                                    };
                                     let border_color = if *is_hover {
-                                        focus_color
+                                        let fc = focus_color;
+                                        Color32F::new(fc.r() * hover_pulse, fc.g() * hover_pulse, fc.b() * hover_pulse, 1.0)
                                     } else if *is_active {
                                         Color32F::new(0.4, 0.45, 0.6, 0.7)
                                     } else {

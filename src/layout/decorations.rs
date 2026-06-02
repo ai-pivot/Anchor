@@ -111,8 +111,18 @@ pub fn render_window_decorations_anim(
         // ── 主边框 ──
         f.clear(border, &[rect(x - bw, y - bw, w + 2 * bw, bw)]).ok();
         f.clear(border, &[rect(x - bw, y + h, w + 2 * bw, bw)]).ok();
-        f.clear(border, &[rect(x - bw, y, bw, h)]).ok();
-        f.clear(border, &[rect(x + w, y, bw, h)]).ok();
+        // ── 左右边框（从上到下渐变：顶部亮 → 底部暗）──
+        let grad_steps = 4;
+        let seg_h = h / grad_steps;
+        for g in 0..grad_steps {
+            let t = g as f32 / (grad_steps - 1).max(1) as f32; // 0.0 (top) → 1.0 (bottom)
+            let br = 1.0 - t * 0.4; // 1.0 → 0.6
+            let grad_color = opaque(accent.0 * br, accent.1 * br, accent.2 * br);
+            let sy = y + g * seg_h;
+            let sh = if g == grad_steps - 1 { h - g * seg_h } else { seg_h };
+            f.clear(grad_color, &[rect(x - bw, sy, bw, sh)]).ok();
+            f.clear(grad_color, &[rect(x + w, sy, bw, sh)]).ok();
+        }
 
         // ── 顶部高亮线 ──
         f.clear(bright, &[rect(x - bw, y - bw, w + 2 * bw, 2)]).ok();
