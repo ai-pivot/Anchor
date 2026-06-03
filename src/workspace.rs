@@ -67,16 +67,12 @@ impl Workspace {
             order.extend((0..self.x11_surfaces.len()).map(WindowSlot::X11));
             order
         } else {
-            // Filter out invalid entries (windows that were closed) AND minimized windows
+            // Filter out invalid entries (windows that were closed)
             self.window_order
                 .iter()
-                .filter(|s| {
-                    let valid = match s {
-                        WindowSlot::Wl(i) => *i < self.tops.len(),
-                        WindowSlot::X11(i) => *i < self.x11_surfaces.len(),
-                    };
-                    let not_minimized = !self.minimized.contains(s);
-                    valid && not_minimized
+                .filter(|s| match s {
+                    WindowSlot::Wl(i) => *i < self.tops.len(),
+                    WindowSlot::X11(i) => *i < self.x11_surfaces.len(),
                 })
                 .cloned()
                 .collect()

@@ -1777,54 +1777,70 @@ impl App {
                                 }
                                 // Super+M: 最小化当前窗口（Genie Effect）
                                 Keysym::m => {
-                                    if let Some(ref surf) = data.workspaces[data.active_ws].focus.clone() {
-                                        let ws = &mut data.workspaces[data.active_ws];
-                                        let order = ws.effective_order();
-                                        // 检查是否已经是最小化状态 → 还原
-                                        let minimized_idx = ws.minimized.iter().position(|slot| match slot {
-                                            WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| tl.wl_surface() == surf).unwrap_or(false),
-                                            WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()).as_ref().map(|s| s == surf).unwrap_or(false),
-                                        });
-                                        if let Some(mi) = minimized_idx {
-                                            // 还原：从 minimized 列表中移除
-                                            let slot = ws.minimized.remove(mi);
-                                            // 触发 Genie Effect 还原动画
-                                            if let Some((oi, _)) = order.iter().enumerate().find(|(_, s)| match (s, &slot) {
-                                                (WindowSlot::Wl(a), WindowSlot::Wl(b)) => a == b,
-                                                (WindowSlot::X11(a), WindowSlot::X11(b)) => a == b,
-                                                _ => false,
-                                            }) {
-                                                let (_, _, ow, oh) = data.output_sizes.get(data.focused_output).copied().unwrap_or_default();
-                                                let bar_h = if data.cfg.bar.enabled { data.cfg.bar.height as i32 } else { 0 };
-                                                let (sx, sy, sw, sh) = layout::slot(oi, order.len(), ow, oh, bar_h, &data.cfg, ws.layout, ws.split);
-                                                data.genie_anims.push(GenieAnim {
-                                                    ws_idx: data.active_ws,
-                                                    order_idx: oi,
-                                                    start: std::time::Instant::now(),
-                                                    minimizing: false,
-                                                    duration_ms: 400,
-                                                    from_x: ow / 2 - sw / 8,
-                                                    from_y: oh - bar_h - sh / 8,
-                                                    from_w: sw / 4,
-                                                    from_h: sh / 4,
-                                                    to_x: sx, to_y: sy,
-                                                    to_w: sw, to_h: sh,
-                                                });
-                                            }
-                                            ws.rebuild_order();
-                                            data.do_layout_animated();
-                                            data.dirty = true;
-                                        } else if let Some(oi) = order.iter().position(|slot| match slot {
-                                            WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| tl.wl_surface() == surf).unwrap_or(false),
-                                            WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()).as_ref().map(|s| s == surf).unwrap_or(false),
-                                        }) {
-                                            // 最小化
-                                            let slot = order[oi].clone();
+                                    let has_minimized = !data.workspaces[data.active_ws].minimized.is_empty();
+                                    if has_minimized {
+                                        // ── 还原：弹出最后一个最小化窗口 ──
+                                        let restore_slot = data.workspaces[data.active_ws].minimized.pop().unwrap();
+                                        // 重新布局
+                                        data.layout_workspace(data.active_ws);
+                                        // 计算还原动画参数（需要释放 ws 借用）
+                                        let (oi, ow, oh, bar_h, sx, sy, sw, sh, n, focus_surf) = {
+                                            let ws = &data.workspaces[data.active_ws];
+                                            let order = ws.effective_order();
+                                            let oi = order.iter().position(|s| *s == restore_slot).unwrap_or(0);
                                             let (_, _, ow, oh) = data.output_sizes.get(data.focused_output).copied().unwrap_or_default();
                                             let bar_h = if data.cfg.bar.enabled { data.cfg.bar.height as i32 } else { 0 };
-                                            let (sx, sy, sw, sh) = layout::slot(oi, order.len(), ow, oh, bar_h, &data.cfg, ws.layout, ws.split);
-                                            ws.minimized.push(slot);
-                                            ws.rebuild_order();
+                                            let n = order.len();
+                                            let (sx, sy, sw, sh) = layout::slot(oi, n, ow, oh, bar_h, &data.cfg, ws.layout, ws.split);
+                                            let focus_surf = match &restore_slot {
+                                                WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| tl.wl_surface().clone()),
+                                                WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()),
+                                            };
+                                            (oi, ow, oh, bar_h, sx, sy, sw, sh, n, focus_surf)
+                                        };
+                                        data.genie_anims.push(GenieAnim {
+                                            ws_idx: data.active_ws,
+                                            order_idx: oi,
+                                            start: std::time::Instant::now(),
+                                            minimizing: false,
+                                            duration_ms: 400,
+                                            from_x: ow / 2 - sw / 8,
+                                            from_y: oh - bar_h - sh / 8,
+                                            from_w: sw / 4,
+                                            from_h: sh / 4,
+                                            to_x: sx, to_y: sy,
+                                            to_w: sw, to_h: sh,
+                                        });
+                                        if let Some(s) = focus_surf {
+                                            data.workspaces[data.active_ws].focus = Some(s.clone());
+                                            let kbd = data.kbd.clone();
+                                            let serial = SERIAL_COUNTER.next_serial();
+                                            kbd.set_focus(data, Some(s), serial);
+                                        }
+                                        data.do_layout_animated();
+                                        data.dirty = true;
+                                    } else if let Some(ref surf) = data.workspaces[data.active_ws].focus.clone() {
+                                        // ── 最小化：当前焦点窗口 ──
+                                        let (oi, ow, oh, bar_h, sx, sy, sw, sh, slot) = {
+                                            let ws = &data.workspaces[data.active_ws];
+                                            let order = ws.effective_order();
+                                            let oi = order.iter().position(|s| match s {
+                                                WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| tl.wl_surface() == surf).unwrap_or(false),
+                                                WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()).as_ref().map(|s2| s2 == surf).unwrap_or(false),
+                                            });
+                                            match oi {
+                                                Some(oi) => {
+                                                    let (_, _, ow, oh) = data.output_sizes.get(data.focused_output).copied().unwrap_or_default();
+                                                    let bar_h = if data.cfg.bar.enabled { data.cfg.bar.height as i32 } else { 0 };
+                                                    let n = order.len();
+                                                    let (sx, sy, sw, sh) = layout::slot(oi, n, ow, oh, bar_h, &data.cfg, ws.layout, ws.split);
+                                                    (Some(oi), ow, oh, bar_h, sx, sy, sw, sh, order[oi].clone())
+                                                }
+                                                None => (None, 0, 0, 0, 0, 0, 0, 0, WindowSlot::Wl(0)),
+                                            }
+                                        };
+                                        if let Some(oi) = oi {
+                                            data.workspaces[data.active_ws].minimized.push(slot);
                                             data.genie_anims.push(GenieAnim {
                                                 ws_idx: data.active_ws,
                                                 order_idx: oi,
@@ -1838,18 +1854,20 @@ impl App {
                                                 to_w: sw / 4,
                                                 to_h: sh / 4,
                                             });
-                                            // focus 转移到下一个窗口
-                                            if ws.focus.as_ref() == Some(surf) {
-                                                let new_order = ws.effective_order();
-                                                ws.focus = new_order.last().and_then(|s| match s {
+                                            // focus 转移到下一个非最小化窗口
+                                            let new_focus = {
+                                                let ws = &data.workspaces[data.active_ws];
+                                                let order = ws.effective_order();
+                                                order.iter().rev().find(|s| !ws.minimized.contains(s)).and_then(|s| match s {
                                                     WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| tl.wl_surface().clone()),
-                                                    WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()).map(|s| s.clone()),
-                                                });
+                                                    WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()),
+                                                })
+                                            };
+                                            if let Some(s) = new_focus {
+                                                data.workspaces[data.active_ws].focus = Some(s.clone());
                                                 let kbd = data.kbd.clone();
                                                 let serial = SERIAL_COUNTER.next_serial();
-                                                if let Some(s) = ws.focus.clone() {
-                                                    kbd.set_focus(data, Some(s), serial);
-                                                }
+                                                kbd.set_focus(data, Some(s), serial);
                                             }
                                             data.do_layout_animated();
                                             data.dirty = true;
@@ -3998,6 +4016,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let genie = if is_focused_output && out_ws_idx == state.active_ws {
                                         state.genie_anims.iter().find(|a| a.ws_idx == out_ws_idx && a.order_idx == i).cloned()
                                     } else { None };
+                                    // 跳过已最小化的窗口（除非在做 Genie 动画）
+                                    let is_minimized = out_ws.minimized.contains(slot);
+                                    if is_minimized && genie.is_none() {
+                                        win_elems.push(Vec::new());
+                                        popup_elems.push(Vec::new());
+                                        continue;
+                                    }
                                     let (use_x, use_y) = if let Some(ref g) = genie {
                                         let (gx, gy) = g.pos();
                                         (gx, gy)
@@ -4596,7 +4621,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             state.window_anims.retain(|(_, t, _): &(usize, std::time::Instant, bool)| t.elapsed().as_millis() < 500);
 
                             let order = out_ws.effective_order();
-                            for (i, _) in order.iter().enumerate() {
+                            for (i, slot) in order.iter().enumerate() {
+                                // 跳过已最小化且无 genie 动画的窗口装饰
+                                if out_ws.minimized.contains(slot) {
+                                    let has_genie = state.genie_anims.iter().any(|a| a.ws_idx == out_ws_idx && a.order_idx == i);
+                                    if !has_genie { continue; }
+                                }
                                 let (x, y, _, _) = layout::slot(
                                     i,
                                     n_total,
