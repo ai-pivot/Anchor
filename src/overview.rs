@@ -60,12 +60,6 @@ impl OverviewState {
         matches!(self, Self::Expose { .. })
     }
 
-    /// Whether we're in overview mode — always false now.
-    #[allow(dead_code)]
-    pub fn is_overview(&self) -> bool {
-        false
-    }
-
     /// Get current animation progress (0.0 if inactive).
     /// 0.0 = hidden/closed, 1.0 = fully visible.
     pub fn progress(&self) -> f64 {

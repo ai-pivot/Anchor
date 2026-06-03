@@ -27,6 +27,9 @@ use workspace::{WindowSlot, Workspace, NUM_WORKSPACES};
 mod overview;
 use overview::OverviewState;
 
+/// 预分配的工作区标签，避免渲染热路径中的 format! 分配
+const WS_LABELS: [&str; 9] = ["WS 1", "WS 2", "WS 3", "WS 4", "WS 5", "WS 6", "WS 7", "WS 8", "WS 9"];
+
 use std::{
     os::fd::AsRawFd,
     os::unix::io::OwnedFd,
@@ -232,6 +235,9 @@ struct App {
     window_anims: Vec<(usize, std::time::Instant, bool)>,
     /// Mission Control 缩略图点击区域 (tx, ty, tw, th, ws_idx, slot)
     expose_thumbs: Vec<(i32, i32, i32, i32, usize, crate::workspace::WindowSlot)>,
+    /// 预解析的颜色值（避免每帧 parse_color）
+    cached_focus_color: (f32, f32, f32),
+    cached_unfocus_color: (f32, f32, f32),
 }
 
 /// 工作区切换动画状态
@@ -803,7 +809,6 @@ impl App {
         // 如果布局动画正在进行中，只执行布局不重启动画
         let anim_active = self.layout_anim.is_active();
         if anim_active {
-            info!("🔄 do_layout_animated: 动画进行中，只更新布局不重启");
             self.layout_workspace(self.active_ws);
             return;
         }
@@ -816,8 +821,6 @@ impl App {
         self.layout_workspace(self.active_ws);
         let new_positions = self.prev_positions.clone();
         let new_n = new_positions.len();
-
-        info!("🔄 do_layout_animated: old_n={}, new_n={}, anim_active={}", old_n, new_n, anim_active);
 
         // 3. 检测是否为 "纯新增窗口" 场景
         //    条件：新窗口数 > 旧窗口数，且旧窗口全部仍存在
@@ -859,11 +862,10 @@ impl App {
 
         // 5. 启动动画
         if !anim_positions.is_empty() {
-            info!("🔄 layout_anim.begin: {} windows animating", anim_positions.len());
             self.layout_anim.begin(&anim_positions);
             self.dirty = true;
         } else {
-            info!("🔄 layout_anim: no anim_positions, skipping animation");
+            // no windows to animate
         }
     }
 
@@ -1370,7 +1372,6 @@ impl App {
             None => return,
         };
 
-        info!("🔄 交换窗口 {} ↔ {} (方向感知)", fi + 1, target + 1);
         ws.window_order.swap(fi, target);
 
         if let Some(fs) = ws.fullscreen {
@@ -1734,7 +1735,6 @@ impl App {
                                     let ws = &mut data.workspaces[data.active_ws];
                                     ws.layout = ws.layout.next();
                                     let name = ws.layout.name();
-                                    info!("🔄 布局切换 → {}", name);
                                     data.notify(format!("Layout: {}", name));
                                     data.do_layout_animated();
                                     return FilterResult::Intercept(());
@@ -2971,6 +2971,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let direct = args.iter().any(|a| a == "--direct");
     let cfg = Config::load();
+    // 预解析颜色（cfg 被移动到 App 后无法再读取）
+    let pre_focus_color = config::parse_color(&cfg.colors.focus_border);
+    let pre_unfocus_color = config::parse_color(&cfg.colors.unfocus_border);
     info!(
         "🚀 Anchor v10 GPU ({})",
         if direct { "direct" } else { "session" }
@@ -3160,6 +3163,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         prev_positions: Vec::new(),
         window_anims: Vec::new(),
         expose_thumbs: Vec::new(),
+        cached_focus_color: pre_focus_color,
+        cached_unfocus_color: pre_unfocus_color,
         record_state: record::RecordState::new(),
         output_sizes: vec![],
         output_active_ws: vec![],
@@ -3542,8 +3547,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
-    info!("🔄 GPU 渲染中...");
-
     // ── 固定颜色 buffer（用于装饰线等）──
     let bg_color: [f32; 4] = {
         let c = config::parse_color(&state.cfg.colors.background);
@@ -3645,6 +3648,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ws_anim_duration = state.ws_anim.duration_ms;
             let ws_anim_elapsed = state.ws_anim.start.map(|s| s.elapsed().as_millis() as u64);
 
+            // ── 预计算工作区窗口数（避免 Step 4.8 + Step 5 重复计算）──
+            let ws_counts: Vec<usize> = state.workspaces.iter()
+                .map(|w| w.tops.len() + w.x11_surfaces.len())
+                .collect();
+
             // ── 物理引擎更新：弹簧吸附 ──
             {
                 let now = std::time::Instant::now();
@@ -3703,6 +3711,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // 此 output 的工作区（从 App 的 output_active_ws 读取，确保与 switch_workspace 同步）
                 let out_ws_idx = state.output_active_ws.get(oi).copied().unwrap_or(0);
                 let out_ws = &state.workspaces[out_ws_idx];
+                // 预计算 effective_order（避免每帧重复调用 12+ 次）
+                let out_order = out_ws.effective_order();
                 let n_windows = out_ws.tops.len();
                 let n_x11 = out_ws.x11_surfaces.len();
                 let n_total = n_windows + n_x11;
@@ -3712,7 +3722,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // Per-output 的焦点和标题
                 let out_ws_focus_idx = {
                     let ws = &state.workspaces[out_ws_idx];
-                    let order = ws.effective_order();
+                    let order = &out_order;
                     ws.focus.as_ref().and_then(|surf| {
                         order
                             .iter()
@@ -3733,11 +3743,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             .map(|(i, _)| i)
                     })
                 };
-                let out_window_title = state
-                    .window_titles
-                    .get(&out_ws_focus_idx.unwrap_or(0))
-                    .cloned()
-                    .unwrap_or_default();
+                // out_window_title 将在 Step 5 中直接通过引用获取，避免 clone
 
                 match out.buf_surf.next_buffer() {
                     Ok((mut dmabuf, _)) => {
@@ -3747,10 +3753,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // ═══════════════════════════════════════════════
                         // Phase 1: collect surface elements (before bind)
                         // ═══════════════════════════════════════════════
+                        let n_est = out_order.len().max(4);
                         let mut win_elems: Vec<Vec<WaylandSurfaceRenderElement<GlesRenderer>>> =
-                            Vec::new();
+                            Vec::with_capacity(n_est);
                         let mut popup_elems: Vec<Vec<WaylandSurfaceRenderElement<GlesRenderer>>> =
-                            Vec::new();
+                            Vec::with_capacity(n_est);
                         let mut sp_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
                             Vec::new();
                         let mut im_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
@@ -3786,11 +3793,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         let mut task_panel_thumbs: Vec<ThumbItem> = Vec::new();
                         let mut scratchpad_data: Option<(i32, i32, i32, i32)> = None; // (x, y, w, h)
+                        // 预计算 slot 位置缓存（在正常模式分支中填充，Step 3 复用）
+                        let mut slot_cache: Vec<(i32, i32, i32, i32)> = Vec::new();
 
                         // 每个 output 都渲染自己工作区的窗口（不再限制 is_primary）
                         {
                             if let Some(fi) = fullscreen {
-                                let fs_order = out_ws.effective_order();
+                                let fs_order = &out_order;
                                 if let Some(fs_slot) = fs_order.get(fi) {
                                     match fs_slot {
                                         WindowSlot::Wl(idx) => {
@@ -3866,18 +3875,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 };
 
                                 // 渲染当前 ws 的窗口（和之前一样）
-                                let order = out_ws.effective_order();
+                                let order = &out_order;
+                                // 预计算所有 slot 位置（避免 Phase 1 + Step 3 重复计算）
+                                slot_cache = order.iter().enumerate().map(|(i, _)| {
+                                    layout::slot(i, order.len(), ow, oh, bar_h, &state.cfg,
+                                        state.workspaces[out_ws_idx].layout, state.workspaces[out_ws_idx].split)
+                                }).collect();
                                 for (i, slot) in order.iter().enumerate() {
-                                    let (x, y, _w, _h) = layout::slot(
-                                        i,
-                                        n_total,
-                                        ow,
-                                        oh,
-                                        bar_h,
-                                        &state.cfg,
-                                        state.workspaces[out_ws_idx].layout,
-                                        state.workspaces[out_ws_idx].split,
-                                    );
+                                    let (x, y, _w, _h) = slot_cache[i];
                                     let (layout_dx, layout_dy) = if is_focused_output {
                                         state.layout_anim.offset_for(slot, (x, y)).unwrap_or((0, 0))
                                     } else {
@@ -4047,7 +4052,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     );
                                     if let Some(parent) = im_popup.get_parent() {
                                         let popup_loc = im_popup.location();
-                                        let im_order = out_ws.effective_order();
+                                        let im_order = &out_order;
                                         for (i, slot) in im_order.iter().enumerate() {
                                             let matched = match slot {
                                                 WindowSlot::Wl(idx) => out_ws
@@ -4453,9 +4458,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                         } else if !state.wallpaper_cache.render(&mut f, &state.cfg, ow, oh) {
                             layout::render_wallpaper(&mut f, &state.cfg, ow, oh, state.frame, {
-                                let now = std::time::SystemTime::now();
-                                let secs = now.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs();
-                                ((secs / 3600 + 8) % 24) as u8 // UTC+8 → 北京时间
+                                // 复用外层已计算的 time_secs，避免重复 SystemTime::now()
+                                ((time_secs / 3600 + 8) % 24) as u8 // UTC+8 → 北京时间
                             });
                         }
 
@@ -4512,18 +4516,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .fold(0.0f32, |a, b| a.max(b));
                             state.window_anims.retain(|(_, t, _): &(usize, std::time::Instant, bool)| t.elapsed().as_millis() < 500);
 
-                            let order = out_ws.effective_order();
+                            let order = &out_order;
                             for (i, slot) in order.iter().enumerate() {
-                                let (x, y, _, _) = layout::slot(
-                                    i,
-                                    n_total,
-                                    ow,
-                                    oh,
-                                    bar_h,
-                                    &state.cfg,
-                                    state.workspaces[out_ws_idx].layout,
-                                    state.workspaces[out_ws_idx].split,
-                                );
+                                let (x, y, _, _) = slot_cache[i];
                                 let (dx, dy) = if is_focused_output {
                                     state
                                         .layout_anim
@@ -4553,7 +4548,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Step 4: Scratchpad — background FIRST, then surface ON TOP
                         if let Some((sp_x, sp_y, sp_w, sp_h)) = scratchpad_data {
                             let bw = 4;
-                            let accent = crate::config::parse_color(&state.cfg.colors.focus_border);
+                            let accent = state.cached_focus_color;
                             let border = layout::opaque(accent.0, accent.1, accent.2);
                             let sp_bg = layout::opaque(0.06, 0.06, 0.10);
                             // Background (opaque, covers windows below)
@@ -4617,11 +4612,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Step 4.8: Overview overlay (Task Panel / Bird's Eye View)
                         if is_focused_output && state.overview.is_active() {
                             let progress = state.overview.progress();
-                            let ws_counts: Vec<usize> = state
-                                .workspaces
-                                .iter()
-                                .map(|w| w.tops.len() + w.x11_surfaces.len())
-                                .collect();
                             let titles: Vec<String> = (0..state.workspaces[state.active_ws].tops.len() + state.workspaces[state.active_ws].x11_surfaces.len())
                                 .map(|i| state.window_titles.get(&i).cloned().unwrap_or_default())
                                 .collect();
@@ -4635,7 +4625,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     &[Rectangle::from_size((ow, oh).into())],
                                 ).ok();
 
-                                let focus_color = layout::color_hex(&state.cfg.colors.focus_border);
+                                let focus_color = layout::opaque(state.cached_focus_color.0, state.cached_focus_color.1, state.cached_focus_color.2);
                                 let scroll_offset = match &state.overview {
                                     OverviewState::TaskPanel { scroll_offset, .. } => *scroll_offset,
                                     _ => state.active_ws as f64,
@@ -4689,7 +4679,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let label_br = if is_selected { 0.8 } else { 0.4 };
                                     crate::text_render::draw_text(
                                         &mut f,
-                                        &format!("WS {}", ws_i + 1),
+                                        &WS_LABELS[ws_i],
                                         card_x + 8,
                                         card_y - 22,
                                         14.0,
@@ -4764,7 +4754,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     &[Rectangle::from_size((ow, oh).into())],
                                 ).ok();
 
-                                let focus_color = layout::color_hex(&state.cfg.colors.focus_border);
+                                let focus_color = layout::opaque(state.cached_focus_color.0, state.cached_focus_color.1, state.cached_focus_color.2);
                                 let selected = state.overview.expose_selected();
 
                                 // 标题
@@ -4822,7 +4812,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let label_br: f32 = if is_current { 0.8 } else { 0.4 };
                                     crate::text_render::draw_text(
                                         &mut f,
-                                        &format!("WS {}", ws_i + 1),
+                                        &WS_LABELS[ws_i],
                                         card_x_offset, top_margin + 6, 12.0,
                                         (focus_color.r() * label_br, focus_color.g() * label_br, focus_color.b() * label_br),
                                     );
@@ -4898,16 +4888,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         // Step 5: Headbar — 每个 output 显示自己的活跃工作区
                         {
-                            let ws_counts: Vec<usize> = state
-                                .workspaces
-                                .iter()
-                                .map(|w| w.tops.len() + w.x11_surfaces.len())
-                                .collect();
                             // ── 视差偏移：headbar 层移动稍快（×0.1）产生前景感 ──
                             let parallax_headbar = if is_focused_output {
                                 let fractional = state.scroll_offset - (state.scroll_offset.round() as f64);
                                 (fractional * ow as f64 * 0.1) as i32
                             } else { 0 };
+                            // 直接获取窗口标题引用，避免提前 clone
+                            let out_window_title = state.window_titles
+                                .get(&out_ws_focus_idx.unwrap_or(0))
+                                .map(|s| s.as_str())
+                                .unwrap_or("");
                             layout::render_headbar(
                                 &mut f,
                                 &state.cfg,
@@ -4916,7 +4906,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 n_total,
                                 out_ws_focus_idx,
                                 time_secs,
-                                &out_window_title,
+                                out_window_title,
                                 out_ws_idx,
                                 NUM_WORKSPACES,
                                 &ws_counts,
@@ -4929,7 +4919,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         // Step 6: Notifications — 只在鼠标所在的 output 上显示
                         if is_focused_output && !state.notifications.is_empty() {
-                            let accent = crate::config::parse_color(&state.cfg.colors.focus_border);
+                            let accent = state.cached_focus_color;
                             let notif_data: Vec<(String, std::time::Instant, std::time::Duration)> =
                                 state
                                     .notifications
@@ -5135,13 +5125,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 state.dirty = true;
             }
 
-            // 发送 frame callback
+            // 发送 frame callback（合并 toplevel + popup 遍历）
             let now = start.elapsed().as_millis() as u32;
             for s in state.xdg.toplevel_surfaces() {
                 send_frames(s.wl_surface(), now);
-            }
-            // XDG popup surfaces (browser menus, context menus, etc.)
-            for s in state.xdg.toplevel_surfaces() {
+                // XDG popup surfaces (browser menus, context menus, etc.)
                 for (popup, _) in PopupManager::popups_for_surface(s.wl_surface()) {
                     send_frames(popup.wl_surface(), now);
                 }

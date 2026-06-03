@@ -10,6 +10,57 @@ use crate::config::{parse_color, Config};
 use crate::text_render;
 use smithay::{backend::renderer::Frame, utils::Size};
 
+// ── WS block 宽度缓存（避免每帧 4 次遍历 + text_width 计算）──
+thread_local! {
+    static WS_BLOCK_WIDTHS: std::cell::RefCell<(usize, Vec<i32>)> =
+        std::cell::RefCell::new((0, Vec::new()));
+}
+
+fn get_ws_block_widths(max_show: usize) -> Vec<i32> {
+    WS_BLOCK_WIDTHS.with(|cache| {
+        let mut c = cache.borrow_mut();
+        if c.0 == max_show && !c.1.is_empty() {
+            return c.1.clone();
+        }
+        let pad = 6i32;
+        let widths: Vec<i32> = (0..max_show)
+            .map(|i| {
+                let num_str = format!("{}", i + 1);
+                let num_w = text_render::text_width(&num_str, WS_SIZE);
+                num_w + pad * 2
+            })
+            .collect();
+        *c = (max_show, widths.clone());
+        widths
+    })
+}
+
+/// 时间缓存（秒级粒度，避免每帧 localtime_r + format!）
+struct TimeCache {
+    secs: u64,
+    time_str: String,
+    hour: u8,
+    min: u8,
+    sec: u8,
+}
+
+impl Default for TimeCache {
+    fn default() -> Self {
+        Self {
+            secs: 0,
+            time_str: String::new(),
+            hour: 0,
+            min: 0,
+            sec: 0,
+        }
+    }
+}
+
+thread_local! {
+    static TIME_CACHE: std::cell::RefCell<TimeCache> =
+        std::cell::RefCell::new(TimeCache::default());
+}
+
 /// 渲染 headbar（v29 — 赛博朋克发光风格 + CPU/MEM + 无限滚动指示器）
 pub fn render_headbar(
     f: &mut impl Frame,
@@ -135,14 +186,14 @@ pub fn render_headbar(
     let ws_pad = 6;
     let ws_gap = 3;
     let max_show = total_workspaces.min(9);
+    let ws_widths = get_ws_block_widths(max_show);
 
     for i in 0..max_show {
         let is_active = i == active_workspace;
         let ws_wins = workspace_window_counts.get(i).copied().unwrap_or(0);
         let has_wins = ws_wins > 0;
         let num_str = format!("{}", i + 1);
-        let num_w = text_render::text_width(&num_str, WS_SIZE);
-        let block_w = num_w + ws_pad * 2;
+        let block_w = ws_widths[i];
         let block_h = WS_SIZE as i32 + ws_pad * 2;
         let block_y = h / 2 - block_h / 2;
         let text_y = block_y + ws_pad;
@@ -218,39 +269,20 @@ pub fn render_headbar(
         let indicator_h = 3;
         // 计算整个 ws 区域的宽度和起始位置
         let ws_start_x = S4 + logo_w + S4 + S2 + S3;
-        let ws_block_pad = 6;
-        let ws_gap_total = 3;
-        let total_ws_w: i32 = (0..max_show)
-            .map(|i| {
-                let num_str = format!("{}", i + 1);
-                let num_w = text_render::text_width(&num_str, WS_SIZE);
-                num_w + ws_block_pad * 2 + if i < max_show - 1 { ws_gap_total } else { 0 }
-            })
+        // 使用缓存的 ws block 宽度，避免重复 text_width 计算
+        let total_ws_w: i32 = ws_widths.iter().enumerate()
+            .map(|(i, &w)| w + if i < max_show - 1 { ws_gap } else { 0 })
             .sum();
         // 指示条宽度 = 单个 ws 方块宽度
-        let first_block_w = {
-            let num_str = format!("{}", 1);
-            let num_w = text_render::text_width(&num_str, WS_SIZE);
-            num_w + ws_block_pad * 2
-        };
+        let first_block_w = ws_widths[0];
         // 计算 scroll_offset 对应的指示条位置
         let frac = scroll_offset - scroll_offset.floor();
         let base_idx = scroll_offset.floor() as i32;
-        let offset_in_block: f64 = (0..max_show)
-            .map(|i| {
-                let num_str = format!("{}", i + 1);
-                let num_w = text_render::text_width(&num_str, WS_SIZE);
-                num_w + ws_block_pad * 2 + if i < max_show - 1 { ws_gap_total } else { 0 }
-            })
-            .take(base_idx as usize)
-            .sum::<i32>() as f64;
-        let current_block_w = {
-            let idx = (base_idx as usize).min(max_show - 1);
-            let num_str = format!("{}", idx + 1);
-            let num_w = text_render::text_width(&num_str, WS_SIZE);
-            num_w + ws_block_pad * 2
-        };
-        let indicator_x = ws_start_x as f64 + offset_in_block + frac * (current_block_w + ws_gap_total) as f64;
+        let offset_in_block: f64 = ws_widths.iter().take(base_idx as usize).enumerate()
+            .map(|(i, &w)| (w + if i < max_show.saturating_sub(1) { ws_gap } else { 0 }) as f64)
+            .sum();
+        let current_block_w = ws_widths[(base_idx as usize).min(max_show - 1)];
+        let indicator_x = ws_start_x as f64 + offset_in_block + frac * (current_block_w + ws_gap) as f64;
         let indicator_w = first_block_w as f64 * (1.0 - frac * 0.3).max(0.7);
 
         // 发光底座（宽一点，暗一点）
@@ -305,19 +337,26 @@ pub fn render_headbar(
     }
 
     // ── 右侧区域 ──
-    let time_secs_c = time_secs as libc::time_t;
-    let mut tm: libc::tm = unsafe { std::mem::zeroed() };
-    unsafe { libc::localtime_r(&time_secs_c, &mut tm) };
-
-    let local_h = tm.tm_hour as u8;
-    let minutes = tm.tm_min as u8;
-    let seconds = tm.tm_sec as u8;
+    // 时间缓存（秒级粒度，避免每帧 localtime_r + format!）
+    let (time_str, local_h, minutes, seconds) = TIME_CACHE.with(|cache| {
+        let mut c = cache.borrow_mut();
+        if c.secs != time_secs {
+            let t = time_secs as libc::time_t;
+            let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+            unsafe { libc::localtime_r(&t, &mut tm) };
+            c.secs = time_secs;
+            c.time_str = format!("{:02}:{:02}:{:02}", tm.tm_hour, tm.tm_min, tm.tm_sec);
+            c.hour = tm.tm_hour as u8;
+            c.min = tm.tm_min as u8;
+            c.sec = tm.tm_sec as u8;
+        }
+        (c.time_str.clone(), c.hour, c.min, c.sec)
+    });
 
     let mut rx = ow - S4;
     let ty = h / 2 - CLOCK_SIZE as i32 / 2 - 1;
 
     // ── 时钟 ──
-    let time_str = format!("{:02}:{:02}:{:02}", local_h, minutes, seconds);
     let tw = text_render::text_width(&time_str, CLOCK_SIZE);
     // 秒级脉冲：accent 亮度随秒数微妙变化
     let pulse = 0.06 + 0.02 * (seconds as f32 * 0.1047).sin();
@@ -348,6 +387,11 @@ pub fn render_headbar(
 
     // ── 日期 + 星期几 ──
     if cfg.bar.show_date {
+        // 日期字段变化极慢（天级），独立调用 localtime_r
+        let time_secs_c = time_secs as libc::time_t;
+        let mut tm: libc::tm = unsafe { std::mem::zeroed() };
+        unsafe { libc::localtime_r(&time_secs_c, &mut tm) };
+
         let month = (tm.tm_mon + 1) as u8;
         let day = tm.tm_mday as u8;
         let weekdays = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];

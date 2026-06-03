@@ -1,11 +1,17 @@
 //! 壁纸渲染（背景填充 + 网格线 + 闪烁点 + 动态光斑）
 
+use std::cell::RefCell;
+
 use super::util::{color_hex, opaque, rect};
 use crate::config::{parse_color, Config};
 use smithay::{
     backend::renderer::Frame,
     utils::{Physical, Rectangle, Size},
 };
+
+thread_local! {
+    static GRID_CACHE: RefCell<Option<(i32, i32, Vec<Rectangle<i32, Physical>>, Vec<Rectangle<i32, Physical>>, Vec<Rectangle<i32, Physical>>)>> = RefCell::new(None);
+}
 
 pub fn render_wallpaper(f: &mut impl Frame, cfg: &Config, ow: i32, oh: i32, frame: u32, hour: u8) {
     f.clear(
@@ -36,10 +42,26 @@ pub fn render_wallpaper(f: &mut impl Frame, cfg: &Config, ow: i32, oh: i32, fram
 
     // Batch grid lines: one draw call for all horizontal, one for all vertical
     let grid = opaque(accent.0 * 0.03, accent.1 * 0.03, accent.2 * 0.03);
-    let h_lines: Vec<Rectangle<i32, Physical>> =
-        (0..oh).step_by(48).map(|y| rect(0, y, ow, 1)).collect();
-    let v_lines: Vec<Rectangle<i32, Physical>> =
-        (0..ow).step_by(48).map(|x| rect(x, 0, 1, oh)).collect();
+    let (h_lines, v_lines) = GRID_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        match cache.as_ref() {
+            Some((cw, ch, cached_h, cached_v, _)) if *cw == ow && *ch == oh => {
+                (cached_h.clone(), cached_v.clone())
+            }
+            _ => {
+                let h: Vec<Rectangle<i32, Physical>> =
+                    (0..oh).step_by(48).map(|y| rect(0, y, ow, 1)).collect();
+                let v: Vec<Rectangle<i32, Physical>> =
+                    (0..ow).step_by(48).map(|x| rect(x, 0, 1, oh)).collect();
+                let d: Vec<Rectangle<i32, Physical>> = (0..oh)
+                    .step_by(48)
+                    .flat_map(|y| (0..ow).step_by(48).map(move |x| rect(x, y, 2, 2)))
+                    .collect();
+                *cache = Some((ow, oh, h.clone(), v.clone(), d));
+                (h, v)
+            }
+        }
+    });
     if !h_lines.is_empty() {
         f.clear(grid, &h_lines).ok();
     }
@@ -49,10 +71,12 @@ pub fn render_wallpaper(f: &mut impl Frame, cfg: &Config, ow: i32, oh: i32, fram
 
     // Batch all dots into a single draw call
     let dot = opaque(accent.0 * 0.05, accent.1 * 0.05, accent.2 * 0.05);
-    let dots: Vec<Rectangle<i32, Physical>> = (0..oh)
-        .step_by(48)
-        .flat_map(|y| (0..ow).step_by(48).map(move |x| rect(x, y, 2, 2)))
-        .collect();
+    let dots: Vec<Rectangle<i32, Physical>> = GRID_CACHE.with(|cache| {
+        let cache = cache.borrow();
+        cache.as_ref().and_then(|(_, _, _, _, d)| {
+            if d.is_empty() { None } else { Some(d.clone()) }
+        }).unwrap_or_default()
+    });
     if !dots.is_empty() {
         f.clear(dot, &dots).ok();
     }
