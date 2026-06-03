@@ -81,7 +81,7 @@ impl OverviewState {
         *self = Self::TaskPanel {
             start: std::time::Instant::now(),
             opening: true,
-            duration_ms: 250,
+            duration_ms: 350,
             scroll_offset: current_ws as f64,
             target_offset: current_ws as f64,
         };
@@ -106,7 +106,7 @@ impl OverviewState {
                 *self = Self::TaskPanel {
                     start: std::time::Instant::now(),
                     opening: false,
-                    duration_ms: 200,
+                    duration_ms: 300,
                     scroll_offset: *scroll_offset,
                     target_offset: snap,
                 };
@@ -135,14 +135,15 @@ impl OverviewState {
     }
 
     /// Scroll task panel left/right by one workspace.
+    /// Only moves target_offset — spring animation drives scroll_offset smoothly.
     /// Clamps to valid workspace range.
     pub fn task_panel_scroll(&mut self, delta: i32, max_ws: usize) {
         if let Self::TaskPanel { scroll_offset, target_offset, .. } = self {
-            let new = (*scroll_offset + delta as f64)
+            let new_target = (*target_offset + delta as f64)
                 .max(0.0)
                 .min((max_ws - 1) as f64);
-            *scroll_offset = new;
-            *target_offset = new;
+            *target_offset = new_target;
+            // scroll_offset will be driven by update_snap() each frame
         }
     }
 
@@ -155,8 +156,8 @@ impl OverviewState {
                 *scroll_offset = *target_offset;
                 return false;
             }
-            // Simple exponential ease towards target
-            *scroll_offset += diff * (1.0 - (-12.0 * dt).exp());
+            // Exponential ease towards target — responsive but smooth
+            *scroll_offset += diff * (1.0 - (-18.0 * dt).exp());
             true
         } else {
             false

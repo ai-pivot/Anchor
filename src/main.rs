@@ -4017,15 +4017,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         //
                         if is_focused_output && state.overview.is_active() {
                             let progress = state.overview.progress();
-                            if state.overview.is_task_panel() && progress > 0.15 {
+                            if state.overview.is_task_panel() && progress > 0.01 {
                                 // ── Task Panel: niri 风格水平条形 ──
-                                // 所有 ws 并排连接，scroll_offset 控制居中的 ws
+                                // scale 从 1.0（正常）→ 0.55（拉远），随 progress 插值
+                                let base_scale: f32 = 0.55;
+                                let scale: f32 = 1.0 - (1.0 - base_scale) * progress as f32;
                                 let scroll_offset = match &state.overview {
                                     OverviewState::TaskPanel { scroll_offset, .. } => *scroll_offset,
                                     _ => state.active_ws as f64,
                                 };
-                                // 缩小比例：让 ws 内容占屏幕约 70% 高度
-                                let scale: f32 = 0.55;
                                 let scaled_w = (ow as f32 * scale) as i32;
                                 let scaled_h = (oh as f32 * scale) as i32;
                                 // 每个 ws 的水平间距
@@ -4453,7 +4453,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                             if state.overview.is_task_panel() {
                                 // ── Task Panel: niri 风格水平条形 ──
-                                // 全屏暗色遮罩
+                                // 全屏暗色遮罩（随 progress 加深）
                                 let alpha = (progress * 0.85).min(0.85) as f32;
                                 f.clear(
                                     Color32F::new(0.02, 0.02, 0.06, alpha),
@@ -4465,7 +4465,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     OverviewState::TaskPanel { scroll_offset, .. } => *scroll_offset,
                                     _ => state.active_ws as f64,
                                 };
-                                let scale: f32 = 0.55;
+                                // scale 从 1.0→0.55 随 progress 插值（视角拉远动画）
+                                let base_scale: f32 = 0.55;
+                                let scale: f32 = 1.0 - (1.0 - base_scale) * progress as f32;
                                 let scaled_w = (ow as f32 * scale) as i32;
                                 let scaled_h = (oh as f32 * scale) as i32;
                                 let ws_spacing = (scaled_w + 40) as f32;
