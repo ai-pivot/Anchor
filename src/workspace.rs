@@ -13,7 +13,7 @@ use smithay::{
 pub const NUM_WORKSPACES: usize = 9;
 
 /// Identifies a window in the unified window list.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum WindowSlot {
     /// Wayland toplevel (index into `Workspace::tops`)
     Wl(usize),
@@ -67,12 +67,16 @@ impl Workspace {
             order.extend((0..self.x11_surfaces.len()).map(WindowSlot::X11));
             order
         } else {
-            // Filter out invalid entries (windows that were closed)
+            // Filter out invalid entries (windows that were closed) AND minimized windows
             self.window_order
                 .iter()
-                .filter(|s| match s {
-                    WindowSlot::Wl(i) => *i < self.tops.len(),
-                    WindowSlot::X11(i) => *i < self.x11_surfaces.len(),
+                .filter(|s| {
+                    let valid = match s {
+                        WindowSlot::Wl(i) => *i < self.tops.len(),
+                        WindowSlot::X11(i) => *i < self.x11_surfaces.len(),
+                    };
+                    let not_minimized = !self.minimized.contains(s);
+                    valid && not_minimized
                 })
                 .cloned()
                 .collect()

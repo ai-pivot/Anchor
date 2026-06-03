@@ -838,7 +838,9 @@ impl App {
     /// - 动画进行中时跳过重启动画
     fn do_layout_animated(&mut self) {
         // 如果布局动画正在进行中，只执行布局不重启动画
-        if self.layout_anim.is_active() {
+        let anim_active = self.layout_anim.is_active();
+        if anim_active {
+            info!("🔄 do_layout_animated: 动画进行中，只更新布局不重启");
             self.layout_workspace(self.active_ws);
             return;
         }
@@ -851,6 +853,8 @@ impl App {
         self.layout_workspace(self.active_ws);
         let new_positions = self.prev_positions.clone();
         let new_n = new_positions.len();
+
+        info!("🔄 do_layout_animated: old_n={}, new_n={}, anim_active={}", old_n, new_n, anim_active);
 
         // 3. 检测是否为 "纯新增窗口" 场景
         //    条件：新窗口数 > 旧窗口数，且旧窗口全部仍存在
@@ -892,8 +896,11 @@ impl App {
 
         // 5. 启动动画
         if !anim_positions.is_empty() {
+            info!("🔄 layout_anim.begin: {} windows animating", anim_positions.len());
             self.layout_anim.begin(&anim_positions);
             self.dirty = true;
+        } else {
+            info!("🔄 layout_anim: no anim_positions, skipping animation");
         }
     }
 
@@ -2933,9 +2940,12 @@ impl CompositorHandler for App {
                             .and_then(|xs| xs.wl_surface()),
                     });
                 }
-                // 无论是否是 active_ws 都需要 relayout（多屏可见）
-                self.layout_workspace(ws_idx);
-                if ws_idx == self.active_ws {
+                // 非当前活动工作区：直接 relayout（多屏可见）
+                // 当前活动工作区：交给 do_layout_animated 处理（它会调 layout_workspace，
+                //   但先保存旧位置用于动画——如果这里先调 layout_workspace 会覆盖 prev_positions）
+                if ws_idx != self.active_ws {
+                    self.layout_workspace(ws_idx);
+                } else {
                     self.do_layout_animated();
                     self.dirty = true;
                     // 更新键盘焦点
@@ -2976,9 +2986,11 @@ impl CompositorHandler for App {
                         .get(*idx)
                         .and_then(|xs| xs.wl_surface()),
                 });
-                // 无论是否是 active_ws 都需要 relayout（多屏可见）
-                self.layout_workspace(ws_idx);
-                if ws_idx == self.active_ws {
+                // 非当前活动工作区：直接 relayout（多屏可见）
+                // 当前活动工作区：交给 do_layout_animated 处理
+                if ws_idx != self.active_ws {
+                    self.layout_workspace(ws_idx);
+                } else {
                     self.do_layout_animated();
                     self.dirty = true;
                     if let Some(ref s) = self.workspaces[self.active_ws].focus {
