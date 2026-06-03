@@ -22,7 +22,7 @@ pub enum WindowSlot {
 }
 
 /// A single workspace holding both Wayland and X11 windows.
-pub struct Workspace {
+    pub struct Workspace {
     /// Wayland toplevel surfaces on this workspace.
     pub tops: Vec<ToplevelSurface>,
     /// Currently focused surface (if any).
@@ -40,8 +40,6 @@ pub struct Workspace {
     /// Unified rendering/focus order. Maps flat index → window slot.
     /// When empty, defaults to `[Wl(0), Wl(1), ..., X11(0), X11(1), ...]`.
     pub window_order: Vec<WindowSlot>,
-    /// Minimized windows (removed from rendering but not closed).
-    pub minimized: Vec<WindowSlot>,
 }
 
 impl Workspace {
@@ -55,7 +53,6 @@ impl Workspace {
             pending_split: Option::None,
             x11_surfaces: Vec::new(),
             window_order: Vec::new(),
-            minimized: Vec::new(),
         }
     }
 
