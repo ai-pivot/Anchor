@@ -5196,19 +5196,16 @@ impl smithay::xwayland::XwmHandler for App {
     ) {
         use smithay::xwayland::xwm::WmWindowType;
 
-        let is_aux = window.is_transient_for().is_some()
-            || matches!(
-                window.window_type(),
-                Some(WmWindowType::Dialog)
-                    | Some(WmWindowType::Menu)
-                    | Some(WmWindowType::PopupMenu)
-                    | Some(WmWindowType::DropdownMenu)
-                    | Some(WmWindowType::Toolbar)
-                    | Some(WmWindowType::Tooltip)
-                    | Some(WmWindowType::Utility)
-                    | Some(WmWindowType::Notification)
-                    | Some(WmWindowType::Splash)
-            );
+        // is_aux: 只有真正的 OR 窗口（tooltip, popup menu）和 notification 才进 or_surfaces
+        // Dialog/Utility/Menu 等作为正常窗口进入 tiling 布局（确保能交互）
+        // is_transient_for 不再单独作为判断条件——transient dialog 应该能接收焦点和交互
+        let is_aux = matches!(
+            window.window_type(),
+            Some(WmWindowType::Tooltip)
+                | Some(WmWindowType::PopupMenu)
+                | Some(WmWindowType::DropdownMenu)
+                | Some(WmWindowType::Notification)
+        );
 
         tracing::info!(
             "🗺️  X11 map_request: class='{}' title='{}' type={:?} transient={:?} aux={}",
@@ -5235,8 +5232,23 @@ impl smithay::xwayland::XwmHandler for App {
                 self.xw.or_surfaces.push(window);
             }
         } else {
-            // 普通窗口：加入平铺布局，设置焦点
-            let ws = &mut self.workspaces[self.active_ws];
+            // 普通窗口：跟随 transient_for 父窗口所在的 workspace
+            let target_ws = if let Some(parent) = window.is_transient_for() {
+                let mut found_ws = self.active_ws;
+                'search: for ws_i in 0..self.workspaces.len() {
+                    for xs in &self.workspaces[ws_i].x11_surfaces {
+                        if xs.window_id() == parent {
+                            found_ws = ws_i;
+                            break 'search;
+                        }
+                    }
+                }
+                found_ws
+            } else {
+                self.active_ws
+            };
+
+            let ws = &mut self.workspaces[target_ws];
             let is_new = !ws.x11_surfaces.iter().any(|s| s.window_id() == wid);
             if is_new {
                 ws.x11_surfaces.push(window.clone());
@@ -5244,13 +5256,17 @@ impl smithay::xwayland::XwmHandler for App {
             }
 
             if let Some(wl) = window.wl_surface() {
-                self.x11_saved_focus = self.workspaces[self.active_ws].focus.clone();
-                self.workspaces[self.active_ws].focus = Some(wl.clone());
+                self.x11_saved_focus = self.workspaces[target_ws].focus.clone();
+                self.workspaces[target_ws].focus = Some(wl.clone());
                 let kbd = self.kbd.clone();
                 let serial = SERIAL_COUNTER.next_serial();
                 kbd.set_focus(self, Some(wl), serial);
             }
-            self.do_layout_animated();
+            if target_ws == self.active_ws {
+                self.do_layout_animated();
+            } else {
+                self.layout_workspace(target_ws);
+            }
         }
         self.dirty = true;
     }
