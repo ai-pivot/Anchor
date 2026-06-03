@@ -16,7 +16,7 @@ pub fn render_window_bg(
     layout: LayoutPreset,
     split: SplitDir,
 ) {
-    render_window_bg_anim(f, cfg, n, ow, oh, bar_h, layout, split, 0, 0);
+    render_window_bg_anim(f, cfg, n, ow, oh, bar_h, layout, split, 0, 0, 0.0);
 }
 
 pub fn render_window_bg_anim(
@@ -30,6 +30,7 @@ pub fn render_window_bg_anim(
     split: SplitDir,
     offset_x: i32,
     offset_y: i32,
+    anim_glow: f32,  // 窗口打开/关闭时的额外发光脉冲强度
 ) {
     if n == 0 {
         return;
@@ -63,7 +64,7 @@ pub fn render_window_decorations(
     layout: LayoutPreset,
     split: SplitDir,
 ) {
-    render_window_decorations_anim(f, cfg, i, n, focus_idx, ow, oh, bar_h, layout, split, 0, 0);
+    render_window_decorations_anim(f, cfg, i, n, focus_idx, ow, oh, bar_h, layout, split, 0, 0, 0.0);
 }
 
 pub fn render_window_decorations_anim(
@@ -79,6 +80,7 @@ pub fn render_window_decorations_anim(
     split: SplitDir,
     offset_x: i32,
     offset_y: i32,
+    anim_glow: f32,  // 窗口打开/关闭时的额外发光脉冲强度
 ) {
     if n == 0 {
         return;
@@ -99,9 +101,10 @@ pub fn render_window_decorations_anim(
         );
         let dark = opaque(accent.0 * 0.3, accent.1 * 0.3, accent.2 * 0.3);
 
-        // ── 外层发光（4 层递减亮度）──
+        // ── 外层发光（4 层递减亮度）── 动画时增强发光
+        let glow_boost = 1.0 + anim_glow * 3.0; // 动画时发光最多增强 4 倍
         for (expand, brightness) in [(4, 0.03f32), (3, 0.06), (2, 0.12), (1, 0.22)] {
-            let glow = opaque(accent.0 * brightness, accent.1 * brightness, accent.2 * brightness);
+            let glow = opaque(accent.0 * brightness * glow_boost, accent.1 * brightness * glow_boost, accent.2 * brightness * glow_boost);
             f.clear(glow, &[rect(x - bw - expand, y - bw - expand, w + 2 * (bw + expand), expand)]).ok();
             f.clear(glow, &[rect(x - bw - expand, y + h + bw, w + 2 * (bw + expand), expand)]).ok();
             f.clear(glow, &[rect(x - bw - expand, y - bw, expand, h + 2 * bw)]).ok();
@@ -167,8 +170,9 @@ pub fn render_window_decorations_anim(
     } else {
         let unfocus = parse_color(&cfg.colors.unfocus_border);
         let border = opaque(unfocus.0, unfocus.1, unfocus.2);
-        // 微弱发光
-        let glow = opaque(unfocus.0 * 0.15, unfocus.1 * 0.15, unfocus.2 * 0.15);
+        // 微弱发光 — 动画时增强
+        let boost = 1.0 + anim_glow * 2.5;
+        let glow = opaque(unfocus.0 * 0.15 * boost, unfocus.1 * 0.15 * boost, unfocus.2 * 0.15 * boost);
         f.clear(glow, &[rect(x - 1, y - 1, w + 2, 1)]).ok();
         f.clear(glow, &[rect(x - 1, y + h, w + 2, 1)]).ok();
         f.clear(glow, &[rect(x - 1, y, 1, h)]).ok();

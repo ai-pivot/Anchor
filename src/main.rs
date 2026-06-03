@@ -228,6 +228,8 @@ struct App {
     last_frame_time: std::time::Instant,
     // ── Overview 状态机（任务面板 + 鸟瞰视图）──
     overview: OverviewState,
+    /// 窗口打开/关闭动画（ws_idx, start_time, is_open）
+    window_anims: Vec<(usize, std::time::Instant, bool)>,
 }
 
 /// 工作区切换动画状态
@@ -2264,6 +2266,9 @@ impl XdgShellHandler for App {
         }
 
         self.pending_tops.push(s);
+        // 标记打开动画（pending 确认后实际加入 ws 时再触发）
+        self.window_anims.push((self.active_ws, std::time::Instant::now(), true));
+        self.dirty = true;
     }
     fn new_popup(&mut self, popup: PopupSurface, _positioner: PositionerState) {
         info!("🆕 new_popup created");
@@ -2634,6 +2639,9 @@ impl CompositorHandler for App {
                     self.remap_prev_after_remove(&WindowSlot::Wl(removed_idx));
                 }
                 info!("🗑️ 窗口关闭 (工作区 {})", ws_idx + 1);
+                // 触发关闭动画（装饰层发光脉冲）
+                self.window_anims.push((ws_idx, std::time::Instant::now(), false));
+                self.dirty = true;
                 // 清理 fullscreen：只在关闭的窗口是全屏窗口时才清除
                 if let Some(fi) = self.workspaces[ws_idx].fullscreen {
                     let closed = closed_idx.unwrap_or(usize::MAX);
@@ -2999,6 +3007,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
         layout_anim: LayoutAnimation::new(),
         prev_positions: Vec::new(),
+        window_anims: Vec::new(),
         record_state: record::RecordState::new(),
         output_sizes: vec![],
         output_active_ws: vec![],
@@ -4199,6 +4208,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         // Step 3: Window decorations — 每个 output 都渲染自己工作区的装饰
                         if fullscreen.is_none() {
+                            // 计算窗口打开/关闭动画的发光脉冲强度
+                            let anim_glow: f32 = state.window_anims.iter()
+                                .filter(|(ws_i, _, _)| *ws_i == out_ws_idx)
+                                .map(|(_, time, is_open): &(_, std::time::Instant, bool)| {
+                                    let elapsed = time.elapsed().as_millis() as f32;
+                                    let duration = if *is_open { 400.0 } else { 250.0 };
+                                    let t = (elapsed / duration).min(1.0);
+                                    let pulse = if *is_open { t } else { 1.0 - t };
+                                    pulse * 0.6
+                                })
+                                .fold(0.0f32, |a, b| a.max(b));
+                            state.window_anims.retain(|(_, t, _): &(usize, std::time::Instant, bool)| t.elapsed().as_millis() < 500);
+
                             let order = out_ws.effective_order();
                             for (i, _) in order.iter().enumerate() {
                                 let (x, y, _, _) = layout::slot(
@@ -4232,6 +4254,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     state.workspaces[out_ws_idx].split,
                                     ws_offset + dx,
                                     dy,
+                                    anim_glow,
                                 );
                             }
                         }
@@ -4730,6 +4753,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             // 布局动画进行中时持续请求渲染
             if state.layout_anim.is_active() {
+                state.dirty = true;
+            }
+            // 窗口打开/关闭发光动画进行中时持续渲染
+            if !state.window_anims.is_empty() {
                 state.dirty = true;
             }
             // Overview 动画进行中时持续请求渲染（与 ws_anim/layout_anim 同模式）
