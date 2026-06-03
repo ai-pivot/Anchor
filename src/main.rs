@@ -1534,56 +1534,6 @@ impl App {
                             }
                         }
 
-                        // ── Overview 模式：方向键导航 + Enter 确认 ──
-                        // 卡片水平排列，左右导航（上下忽略）
-                        if data.overview.is_active() && state == KeyState::Pressed {
-                            let sym = keysym.modified_sym();
-                            // 构建有窗口的 ws 列表（与渲染一致）
-                            let active_wss: Vec<usize> = (0..NUM_WORKSPACES)
-                                .filter(|&i| data.workspaces[i].tops.len() + data.workspaces[i].x11_surfaces.len() > 0)
-                                .collect();
-                            if active_wss.is_empty() {
-                                // 没有任何窗口
-                            } else if let Some(hover) = data.overview.hover_ws() {
-                                // 在 active_wss 中找到当前 hover 的索引
-                                let cur_idx = active_wss.iter().position(|&w| w == hover).unwrap_or(0);
-                                match sym {
-                                    Keysym::Left => {
-                                        let new_idx = if cur_idx > 0 { cur_idx - 1 } else { 0 };
-                                        data.overview.set_hover_ws(Some(active_wss[new_idx]));
-                                        data.dirty = true;
-                                        return FilterResult::Intercept(());
-                                    }
-                                    Keysym::Right => {
-                                        let new_idx = (cur_idx + 1).min(active_wss.len() - 1);
-                                        data.overview.set_hover_ws(Some(active_wss[new_idx]));
-                                        data.dirty = true;
-                                        return FilterResult::Intercept(());
-                                    }
-                                    Keysym::Return => {
-                                        data.overview.close();
-                                        data.switch_workspace(hover);
-                                        return FilterResult::Intercept(());
-                                    }
-                                    _ => {}
-                                }
-                            } else {
-                                // 初始状态：任意方向键 → 选中当前 active_ws
-                                match sym {
-                                    Keysym::Left | Keysym::Right | Keysym::Up | Keysym::Down => {
-                                        data.overview.set_hover_ws(Some(data.active_ws));
-                                        data.dirty = true;
-                                        return FilterResult::Intercept(());
-                                    }
-                                    Keysym::Return => {
-                                        data.overview.set_hover_ws(Some(data.active_ws));
-                                        data.dirty = true;
-                                        return FilterResult::Intercept(());
-                                    }
-                                    _ => {}
-                                }
-                            }
-                        }
 
                         if state == KeyState::Pressed && mods.logo {
                             let uid = unsafe { libc::getuid() };
@@ -1705,16 +1655,6 @@ impl App {
                                         data.overview.close();
                                     } else {
                                         data.overview.open_task_panel(data.active_ws);
-                                    }
-                                    data.dirty = true;
-                                    return FilterResult::Intercept(());
-                                }
-                                // Super+Down (Ctrl): 切换鸟瞰视图（Overview）
-                                Keysym::Down if mods.ctrl => {
-                                    if data.overview.is_overview() {
-                                        data.overview.close();
-                                    } else {
-                                        data.overview.open_overview();
                                     }
                                     data.dirty = true;
                                     return FilterResult::Intercept(());
@@ -2089,49 +2029,7 @@ impl App {
                               self.overview.close();
                               self.dirty = true;
                          }
-                        } else if self.overview.is_overview() {
-                            // Overview Cover Flow：计算点击区域
-                            // 和 Phase 1.5 完全相同的布局计算
-                            let active_wss: Vec<usize> = (0..NUM_WORKSPACES)
-                                .filter(|&i| self.workspaces[i].tops.len() + self.workspaces[i].x11_surfaces.len() > 0)
-                                .collect();
-                            let n_cards = active_wss.len().max(1);
-                            let hover_ws = self.overview.hover_ws();
-                            let hover_idx = hover_ws
-                                .and_then(|h| active_wss.iter().position(|&w| w == h))
-                                .or_else(|| active_wss.iter().position(|&w| w == self.active_ws))
-                                .unwrap_or(0);
-
-                            let base_scale: f32 = 0.55;
-                            let base_w = (ow as f32 * base_scale) as i32;
-                            let base_h = (oh as f32 * base_scale) as i32;
-                            let center_x = ow / 2;
-                            let spacing = base_w as f32 * 0.55;
-
-                            for (ci, &ws_i) in active_wss.iter().enumerate() {
-                                let dist = (ci as i32 - hover_idx as i32).abs();
-                                let scale = if dist == 0 { base_scale } else { base_scale * (1.0 - 0.12 * dist as f32).max(0.3) };
-                                let cw = (ow as f32 * scale) as i32;
-                                let ch = (oh as f32 * scale) as i32;
-                                let offset = (ci as i32 - hover_idx as i32) as f32;
-                                let card_x = if offset == 0.0 {
-                                   center_x - cw / 2
-                                } else {
-                                   let card_center = center_x as f32 + offset * spacing;
-                                   (card_center - cw as f32 / 2.0) as i32
-                                };
-                                let card_y = (oh - ch) / 2;
-
-                                if px >= card_x && px < card_x + cw && py >= card_y && py < card_y + ch {
-                                   self.overview.close();
-                                   self.switch_workspace(ws_i);
-                                   return;
-                                }
-                            }
-                            // 点击卡片外 → 关闭
-                            self.overview.close();
-                            self.dirty = true;
-                         }
+                        }
                     }
                     return; // ← 无论什么鼠标事件都拦截，不穿透到下层窗口
                 }
@@ -3716,7 +3614,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             title: String,
                         }
                         let mut task_panel_thumbs: Vec<ThumbItem> = Vec::new();
-                        let mut overview_thumbs: Vec<(usize, Vec<ThumbItem>, i32, i32, i32, i32, i32, bool, bool)> = Vec::new(); // (ws_idx, thumbs, cx, cy, cw, ch, dist, is_active, is_hover)
                         let mut scratchpad_data: Option<(i32, i32, i32, i32)> = None; // (x, y, w, h)
 
                         // 每个 output 都渲染自己工作区的窗口（不再限制 is_primary）
@@ -4178,110 +4075,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                             }
-                            else if state.overview.is_overview() && progress > 0.15 {
-                                // ── Overview Cover Flow ──
-                                let active_wss: Vec<usize> = (0..NUM_WORKSPACES)
-                                    .filter(|&i| {
-                                        state.workspaces[i].tops.len() + state.workspaces[i].x11_surfaces.len() > 0
-                                    })
-                                    .collect();
-
-                                let hover_ws = match &state.overview {
-                                    OverviewState::Overview { hover_ws, .. } => *hover_ws,
-                                    _ => None,
-                                };
-                                let hover_idx = hover_ws
-                                    .and_then(|h| active_wss.iter().position(|&w| w == h))
-                                    .or_else(|| active_wss.iter().position(|&w| w == state.active_ws))
-                                    .unwrap_or(0);
-
-                                let base_scale: f32 = 0.55;
-                                let base_w = (ow as f32 * base_scale) as i32;
-                                let spacing = base_w as f32 * 0.55;
-                                let center_x = ow as f32 / 2.0;
-
-                                for (ci, &ws_i) in active_wss.iter().enumerate() {
-                                    let dist = (ci as i32 - hover_idx as i32).abs();
-                                    let is_hover = ci == hover_idx;
-                                    let is_active = ws_i == state.active_ws;
-                                    let card_scale = if dist == 0 { base_scale } else { base_scale * (1.0 - 0.12 * dist as f32).max(0.3) };
-                                    let cw = (ow as f32 * card_scale) as i32;
-                                    let ch = (oh as f32 * card_scale) as i32;
-                                    let offset = (ci as i32 - hover_idx as i32) as f32;
-                                    let card_x = if offset == 0.0 {
-                                        (center_x - cw as f32 / 2.0) as i32
-                                    } else {
-                                        let card_center = center_x + offset * spacing;
-                                        (card_center - cw as f32 / 2.0) as i32
-                                    };
-                                    let card_y = (oh - ch) / 2;
-
-                                    let ws = &state.workspaces[ws_i];
-                                    let order = ws.effective_order();
-                                    let n = order.len();
-
-                                    let mut ws_thumbs = Vec::new();
-                                    for (wi, wslot) in order.iter().enumerate() {
-                                        let (sx, sy, sw, sh) = layout::slot(
-                                            wi, n, ow, oh, bar_h, &state.cfg,
-                                            ws.layout, ws.split,
-                                        );
-                                        let tx = card_x + (sx as f32 * card_scale) as i32;
-                                        let ty = card_y + (sy as f32 * card_scale) as i32;
-
-                                        let (gx, gy) = match wslot {
-                                            WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| {
-                                                let g = smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
-                                                    states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry.unwrap_or_default()
-                                                });
-                                                (g.loc.x, g.loc.y)
-                                            }).unwrap_or((0, 0)),
-                                            WindowSlot::X11(_) => (0, 0),
-                                        };
-                                        let loc_x = tx - (gx as f32 * card_scale) as i32;
-                                        let loc_y = ty - (gy as f32 * card_scale) as i32;
-
-                                        if let Some(elems) = match wslot {
-                                            WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| {
-                                                render_elements_from_surface_tree(
-                                                    &mut renderer, tl.wl_surface(),
-                                                    Point::<i32, Physical>::from((loc_x, loc_y)),
-                                                    1.0, 1.0, Kind::Unspecified,
-                                                )
-                                            }),
-                                            WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()).map(|wl| {
-                                                render_elements_from_surface_tree(
-                                                    &mut renderer, &wl,
-                                                    Point::<i32, Physical>::from((loc_x, loc_y)),
-                                                    1.0, 1.0, Kind::Unspecified,
-                                                )
-                                            }),
-                                        } {
-                                            if !elems.is_empty() {
-                                                let title = match wslot {
-                                                    WindowSlot::Wl(idx) => {
-                                                        state.window_app_ids.get(idx).cloned()
-                                                            .unwrap_or_else(|| "Window".to_string())
-                                                    }
-                                                    WindowSlot::X11(xidx) => {
-                                                        ws.x11_surfaces.get(*xidx)
-                                                            .map(|xs| xs.class())
-                                                            .unwrap_or_else(|| "X11".to_string())
-                                                    }
-                                                };
-                                                ws_thumbs.push(ThumbItem {
-                                                    elems, tx, ty,
-                                                    tw: (sw as f32 * card_scale) as i32,
-                                                    th: (sh as f32 * card_scale) as i32,
-                                                    scale: card_scale as f64,
-                                                    title,
-                                                });
-                                            }
-                                        }
-                                    }
-                                    overview_thumbs.push((ws_i, ws_thumbs, card_x, card_y, cw, ch, dist, is_active, is_hover));
-                                }
-                            }
                         }
 
                         // ═══════════════════════════════════════════════
@@ -4647,127 +4440,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         (focus_color.r() * 0.35, focus_color.g() * 0.35, focus_color.b() * 0.35),
                                     );
                                 }
-                            } else if state.overview.is_overview() {
-                                // ── Cover Flow 3D ──
-                                // 全屏暗色遮罩
-                                let alpha = (progress * 0.9).min(0.9) as f32;
-                                f.clear(
-                                    Color32F::new(0.02, 0.02, 0.06, alpha),
-                                    &[Rectangle::from_size((ow, oh).into())],
-                                ).ok();
-
-                                let focus_color = layout::color_hex(&state.cfg.colors.focus_border);
-
-                                // 用 overview_thumbs 中的元数据画卡片背景和缩略图
-                                // overview_thumbs: (ws_idx, thumbs, cx, cy, cw, ch, dist, is_active, is_hover)
-                                // 排序：active/hover 的放最后渲染（z-order 最上层）
-                                let mut sorted_thumbs: Vec<_> = overview_thumbs.iter().collect();
-                                sorted_thumbs.sort_by_key(|(_, _, _, _, _, _, _, is_active, is_hover)| {
-                                    (*is_active as i32) + (*is_hover as i32)
-                                });
-                                for (_ws_i, thumbs, cx, cy, cw, ch, dist, is_active, is_hover) in sorted_thumbs {
-                                    // 卡片背景——距离越远越暗
-                                    let bg_alpha: f32 = if *dist == 0 { 0.35 } else if *dist == 1 { 0.2 } else { 0.1 };
-                                    let bg_color = if *is_active {
-                                        Color32F::new(0.16, 0.20, 0.30, bg_alpha)
-                                    } else {
-                                        Color32F::new(0.10, 0.10, 0.16, bg_alpha)
-                                    };
-                                    f.clear(bg_color, &[Rectangle::from_loc_and_size((*cx, *cy), (*cw, *ch))]).ok();
-
-                                    // 卡片边框（hover 卡片有呼吸脉冲）
-                                    let hover_pulse = if *is_hover {
-                                        let t = state.frame as f32 * 0.05;
-                                        0.6 + 0.4 * t.sin()
-                                    } else {
-                                        1.0
-                                    };
-                                    let border_color = if *is_hover {
-                                        let fc = focus_color;
-                                        Color32F::new(fc.r() * hover_pulse, fc.g() * hover_pulse, fc.b() * hover_pulse, 1.0)
-                                    } else if *is_active {
-                                        Color32F::new(0.4, 0.45, 0.6, 0.7)
-                                    } else {
-                                        Color32F::new(0.15, 0.15, 0.22, 0.3)
-                                    };
-                                    let bw = if *is_hover { 3 } else { 2 };
-                                    f.clear(border_color, &[layout::rect(*cx, *cy - bw, *cw, bw)]).ok();
-                                    f.clear(border_color, &[layout::rect(*cx, *cy + *ch, *cw, bw)]).ok();
-                                    f.clear(border_color, &[layout::rect(*cx - bw, *cy, bw, *ch)]).ok();
-                                    f.clear(border_color, &[layout::rect(*cx + *cw, *cy, bw, *ch)]).ok();
-                                    // 活跃/选中卡片顶部 accent 亮线
-                                    if *is_active || *is_hover {
-                                        let top_br = if *is_hover { 0.8 * hover_pulse } else { 0.5 };
-                                        f.clear(
-                                            Color32F::new(focus_color.r() * top_br, focus_color.g() * top_br, focus_color.b() * top_br, 1.0),
-                                            &[layout::rect(*cx, *cy - bw, *cw, 2)],
-                                        ).ok();
-                                    }
-
-                                    // 卡片底部阴影（4层渐变）
-                                    let shadow_br = if *is_hover { 0.25f32 } else { 0.12f32 } / (1 + dist) as f32;
-                                    for (si, sb) in [(0i32, 1.0f32), (1, 0.7), (2, 0.4), (3, 0.2)].iter() {
-                                        f.clear(
-                                            Color32F::new(0.0, 0.0, 0.0, shadow_br * sb),
-                                            &[layout::rect(*cx - 4, *cy + *ch + 2 + si, *cw + 8, 2)],
-                                        ).ok();
-                                    }
-
-                                    // WS 标签
-                                    let label_color = if *is_hover {
-                                        (focus_color.r(), focus_color.g(), focus_color.b())
-                                    } else if *is_active {
-                                        (0.7, 0.7, 0.8)
-                                    } else {
-                                        (0.4, 0.4, 0.5)
-                                    };
-                                    crate::text_render::draw_text(
-                                        &mut f,
-                                        &format!("WS {}", _ws_i + 1),
-                                        *cx + 8,
-                                        *cy - 24,
-                                        14.0,
-                                        label_color,
-                                    );
-                                    // WS 窗口数小标签
-                                    crate::text_render::draw_text(
-                                        &mut f,
-                                        &format!("{} windows", thumbs.len()),
-                                        *cx + 8,
-                                        *cy - 10,
-                                        10.0,
-                                        (label_color.0 * 0.6, label_color.1 * 0.6, label_color.2 * 0.6),
-                                    );
-
-                                    // 画真窗口缩略图 + 窗口标题标签
-                                    for thumb in thumbs {
-                                        if !thumb.elems.is_empty() {
-                                            let _ = draw_render_elements(
-                                                &mut f,
-                                                thumb.scale,
-                                                &thumb.elems,
-                                                &[dmg],
-                                            );
-                                        }
-                                        // 每个缩略图下方显示窗口标题
-                                        if *is_hover || *is_active {
-                                            let display_title = if thumb.title.len() > 15 {
-                                                format!("{}…", &thumb.title[..15])
-                                            } else {
-                                                thumb.title.clone()
-                                            };
-                                            crate::text_render::draw_text(
-                                                &mut f,
-                                                &display_title,
-                                                thumb.tx,
-                                                thumb.ty + thumb.th + 2,
-                                                9.0,
-                                                (label_color.0 * 0.5, label_color.1 * 0.5, label_color.2 * 0.5),
-                                            );
-                                        }
-                                    }
-                                }
-                            }
+                        }
                         }
 
                         // Step 5: Headbar — 每个 output 显示自己的活跃工作区

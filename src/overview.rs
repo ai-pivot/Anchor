@@ -1,9 +1,9 @@
-//! Overview state machine — Task Panel (niri-style horizontal strip) + Bird's Eye View.
+//! Task Panel state machine — niri-style horizontal workspace strip.
 //!
 //! Uses Instant + ease-based animation (same pattern as LayoutAnimation/WsAnimation),
 //! guaranteeing deterministic, smooth, zero-jitter animation.
 
-/// Overview operating modes.
+/// Task Panel operating modes.
 #[derive(Debug, Clone)]
 pub enum OverviewState {
     /// No overlay visible.
@@ -22,17 +22,6 @@ pub enum OverviewState {
         /// Target scroll position for snap animation
         target_offset: f64,
     },
-    /// Bird's Eye View — Cover Flow 3D of all workspaces.
-    Overview {
-        /// Animation start time
-        start: std::time::Instant,
-        /// Direction: true = opening, false = closing
-        opening: bool,
-        /// Duration in ms
-        duration_ms: u64,
-        /// Currently hovered/selected workspace (if any)
-        hover_ws: Option<usize>,
-    },
 }
 
 impl Default for OverviewState {
@@ -42,9 +31,20 @@ impl Default for OverviewState {
 }
 
 impl OverviewState {
-    /// Whether any overview overlay is active.
+    /// Whether task panel is active.
     pub fn is_active(&self) -> bool {
         !matches!(self, Self::Inactive)
+    }
+
+    /// Whether we're in task panel mode (kept for compatibility).
+    pub fn is_task_panel(&self) -> bool {
+        matches!(self, Self::TaskPanel { .. })
+    }
+
+    /// Whether we're in overview mode — always false now.
+    #[allow(dead_code)]
+    pub fn is_overview(&self) -> bool {
+        false
     }
 
     /// Get current animation progress (0.0 if inactive).
@@ -52,28 +52,13 @@ impl OverviewState {
     pub fn progress(&self) -> f64 {
         match self {
             Self::Inactive => 0.0,
-            Self::TaskPanel { start, opening, duration_ms, .. }
-            | Self::Overview { start, opening, duration_ms, .. } => {
+            Self::TaskPanel { start, opening, duration_ms, .. } => {
                 let elapsed = start.elapsed().as_millis() as u64;
                 let t = (elapsed as f32 / *duration_ms as f32).min(1.0);
                 let eased = 1.0 - (1.0 - t).powi(3); // ease_out_cubic
-                if *opening {
-                    eased as f64
-                } else {
-                    1.0 - eased as f64
-                }
+                if *opening { eased as f64 } else { 1.0 - eased as f64 }
             }
         }
-    }
-
-    /// Whether we're in task panel mode.
-    pub fn is_task_panel(&self) -> bool {
-        matches!(self, Self::TaskPanel { .. })
-    }
-
-    /// Whether we're in overview mode.
-    pub fn is_overview(&self) -> bool {
-        matches!(self, Self::Overview { .. })
     }
 
     /// Open task panel at the current active workspace.
@@ -87,17 +72,7 @@ impl OverviewState {
         };
     }
 
-    /// Open overview (bird's eye view).
-    pub fn open_overview(&mut self) {
-        *self = Self::Overview {
-            start: std::time::Instant::now(),
-            opening: true,
-            duration_ms: 300,
-            hover_ws: None,
-        };
-    }
-
-    /// Close overview/task panel.
+    /// Close task panel.
     pub fn close(&mut self) {
         match self {
             Self::Inactive => return,
@@ -111,39 +86,26 @@ impl OverviewState {
                     target_offset: snap,
                 };
             }
-            Self::Overview { .. } => {
-                let hover_ws = self.hover_ws();
-                *self = Self::Overview {
-                    start: std::time::Instant::now(),
-                    opening: false,
-                    duration_ms: 250,
-                    hover_ws,
-                };
-            }
         }
     }
 
     /// Get the workspace index that the task panel is currently snapped to.
-    /// Returns the nearest integer workspace index.
     pub fn task_panel_ws(&self) -> usize {
         match self {
             Self::TaskPanel { scroll_offset, .. } => {
                 scroll_offset.round().max(0.0) as usize
             }
-            _ => 0,
+            Self::Inactive => 0,
         }
     }
 
     /// Scroll task panel left/right by one workspace.
-    /// Only moves target_offset — spring animation drives scroll_offset smoothly.
-    /// Clamps to valid workspace range.
     pub fn task_panel_scroll(&mut self, delta: i32, max_ws: usize) {
-        if let Self::TaskPanel { scroll_offset, target_offset, .. } = self {
+        if let Self::TaskPanel { target_offset, .. } = self {
             let new_target = (*target_offset + delta as f64)
                 .max(0.0)
                 .min((max_ws - 1) as f64);
             *target_offset = new_target;
-            // scroll_offset will be driven by update_snap() each frame
         }
     }
 
@@ -156,7 +118,6 @@ impl OverviewState {
                 *scroll_offset = *target_offset;
                 return false;
             }
-            // Exponential ease towards target — responsive but smooth
             *scroll_offset += diff * (1.0 - (-18.0 * dt).exp());
             true
         } else {
@@ -164,32 +125,15 @@ impl OverviewState {
         }
     }
 
-    /// Get current hover_ws (for overview mode).
-    pub fn hover_ws(&self) -> Option<usize> {
-        match self {
-            Self::Overview { hover_ws, .. } => *hover_ws,
-            _ => None,
-        }
-    }
-
-    /// Set hover_ws (for overview mode).
-    pub fn set_hover_ws(&mut self, ws: Option<usize>) {
-        match self {
-            Self::Overview { hover_ws, .. } => *hover_ws = ws,
-            _ => {}
-        }
-    }
-
     /// Step animation. Returns true if animation is still running.
     pub fn update_progress(&mut self, _dt: f64) -> bool {
         match self {
             Self::Inactive => false,
-            Self::TaskPanel { start, opening, duration_ms, .. }
-            | Self::Overview { start, opening, duration_ms, .. } => {
+            Self::TaskPanel { start, opening, duration_ms, .. } => {
                 let elapsed = start.elapsed().as_millis() as u64;
                 if elapsed >= *duration_ms {
                     if *opening {
-                        false // animation done, stay open
+                        false
                     } else {
                         *self = Self::Inactive;
                         false
