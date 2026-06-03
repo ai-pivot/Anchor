@@ -500,13 +500,30 @@ impl App {
             }
         }
 
-        // Last resort: last window in order
+        // Check X11 override-redirect windows (file dialogs, tooltips, etc.)
+        // OR 窗口使用全局坐标，转为 output 局部后做 hit-test
+        for xs in &self.xw.or_surfaces {
+            if let Some(wl) = xs.wl_surface() {
+                let geo = xs.geometry();
+                let local_x = (geo.loc.x - ox as i32) as f64;
+                let local_y = (geo.loc.y - oy as i32) as f64;
+                let local_w = geo.size.w as f64;
+                let local_h = geo.size.h as f64;
+                if px >= local_x && px < local_x + local_w
+                    && py >= local_y && py < local_y + local_h
+                {
+                    return Some((wl, Point::from((local_x, local_y))));
+                }
+            }
+        }
+
+        // Last resort: last window in order (使用 output 局部尺寸，不是全局 osize)
         if let Some((i, slot)) = order.iter().enumerate().last() {
             let (x, y, _w, _h) = layout::slot(
                 i,
                 order.len(),
-                self.osize.w,
-                self.osize.h,
+                ow,
+                oh,
                 bar_h,
                 &self.cfg,
                 ws.layout,
@@ -543,14 +560,14 @@ impl App {
 
     /// Check if the pointer is over any XDG popup of the given toplevel.
     /// Returns (popup_wl_surface, popup_global_position) if found.
-    fn popup_at_pointer(
+    /// `local_px, local_py` must be output-local coordinates (not global pointer_pos).
+    fn popup_at_pointer_local(
         &self,
         tl: &ToplevelSurface,
         tl_pos: Point<f64, Logical>,
+        local_px: f64,
+        local_py: f64,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
-        let px = self.pointer_pos.0;
-        let py = self.pointer_pos.1;
-
         let tl_geo_loc = smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
             states
                 .cached_state
@@ -574,11 +591,27 @@ impl App {
             let popup_w = popup_geo.size.w as f64;
             let popup_h = popup_geo.size.h as f64;
 
-            if px >= popup_x && px < popup_x + popup_w && py >= popup_y && py < popup_y + popup_h {
+            if local_px >= popup_x && local_px < popup_x + popup_w
+                && local_py >= popup_y && local_py < popup_y + popup_h
+            {
                 return Some((popup.wl_surface().clone(), Point::from((popup_x, popup_y))));
             }
         }
         None
+    }
+
+    /// Convenience wrapper using global pointer_pos (kept for backward compatibility).
+    /// Converts global pointer_pos to output-local before calling popup_at_pointer_local.
+    fn popup_at_pointer(
+        &self,
+        tl: &ToplevelSurface,
+        tl_pos: Point<f64, Logical>,
+    ) -> Option<(WlSurface, Point<f64, Logical>)> {
+        let oi = self.output_at_pointer();
+        let (ox, oy, _, _) = self.output_sizes.get(oi).copied().unwrap_or((0, 0, self.osize.w, self.osize.h));
+        let local_px = self.pointer_pos.0 - ox as f64;
+        let local_py = self.pointer_pos.1 - oy as f64;
+        self.popup_at_pointer_local(tl, tl_pos, local_px, local_py)
     }
 
     fn fullscreen(&self) -> Option<usize> {
@@ -2172,9 +2205,25 @@ impl App {
                     let ws = &self.workspaces[ws_idx];
 
                     if py >= bar_h {
-                        // 全屏模式下：点击不切换焦点，只确保全屏窗口有焦点
+                        // 全屏模式下：点击确保全屏窗口有焦点
                         if ws.fullscreen.is_some() {
-                            // 全屏时整个区域都属于全屏窗口，不切换焦点
+                            let order = ws.effective_order();
+                            if let Some(fi) = ws.fullscreen {
+                                if let Some(slot) = order.get(fi) {
+                                    let surf = match slot {
+                                        WindowSlot::Wl(idx) => ws.tops.get(*idx)
+                                            .map(|tl| tl.wl_surface().clone()),
+                                        WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx)
+                                            .and_then(|xs| xs.wl_surface()),
+                                    };
+                                    if let Some(surf) = surf {
+                                        self.workspaces[ws_idx].focus = Some(surf.clone());
+                                        let kbd = self.kbd.clone();
+                                        let serial = SERIAL_COUNTER.next_serial();
+                                        kbd.set_focus(self, Some(surf), serial);
+                                    }
+                                }
+                            }
                         } else {
                             let order = ws.effective_order();
 
@@ -2687,8 +2736,21 @@ impl CompositorHandler for App {
                     self.remap_prev_after_remove(&WindowSlot::Wl(removed_idx));
                 }
                 info!("🗑️ 窗口关闭 (工作区 {})", ws_idx + 1);
-                // 清理 fullscreen（fullscreen 存的是 effective_order 索引）
-                self.workspaces[ws_idx].fullscreen = None;
+                // 清理 fullscreen：只在关闭的窗口是全屏窗口时才清除
+                if let Some(fi) = self.workspaces[ws_idx].fullscreen {
+                    let closed = closed_idx.unwrap_or(usize::MAX);
+                    // 在 order 中找到 fullscreen 窗口，检查是否是被关闭的窗口
+                    let is_fullscreen_win = {
+                        let order = self.workspaces[ws_idx].effective_order();
+                        match order.get(fi) {
+                            Some(WindowSlot::Wl(idx)) => *idx == closed,
+                            _ => false,
+                        }
+                    };
+                    if is_fullscreen_win {
+                        self.workspaces[ws_idx].fullscreen = None;
+                    }
+                }
                 // 重建窗口顺序
                 self.workspaces[ws_idx].rebuild_order();
                 // 更新 focus
@@ -2705,6 +2767,8 @@ impl CompositorHandler for App {
                             .and_then(|xs| xs.wl_surface()),
                     });
                 }
+                // 无论是否是 active_ws 都需要 relayout（多屏可见）
+                self.layout_workspace(ws_idx);
                 if ws_idx == self.active_ws {
                     self.do_layout_animated();
                     self.dirty = true;
@@ -2746,6 +2810,8 @@ impl CompositorHandler for App {
                         .get(*idx)
                         .and_then(|xs| xs.wl_surface()),
                 });
+                // 无论是否是 active_ws 都需要 relayout（多屏可见）
+                self.layout_workspace(ws_idx);
                 if ws_idx == self.active_ws {
                     self.do_layout_animated();
                     self.dirty = true;
@@ -3980,13 +4046,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
                         // Collect X11 override-redirect window elements (input method popups, tooltips)
+                        // 每个输出都需要检查 OR 窗口是否在自己的范围内（多显示器支持）
                         for xs in &state.xw.or_surfaces {
                             if let Some(wl) = xs.wl_surface() {
                                 let geo = xs.geometry();
-                                // 关键修复：X11 OR 窗口的 geometry() 是 X11 root window 绝对坐标。
-                                // 渲染管线使用 output 局部坐标，所以必须减去当前 output 的 (ox, oy) 偏移。
-                                // 否则在多屏场景下，OR 窗口会渲染到错误的 output 上（甚至屏幕外）。
-                                // 全屏应用占据整个 output 时，这一转换也保证 OR popup 出现在正确位置。
                                 let (ox, oy, _, _) = state
                                     .output_sizes
                                     .get(oi)
@@ -3994,7 +4057,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     .unwrap_or((0, 0, state.osize.w, state.osize.h));
                                 let render_pos =
                                     Point::<i32, Physical>::from((geo.loc.x - ox, geo.loc.y - oy));
-                                if is_focused_output {
+                                // 检查 OR 窗口是否在此 output 的可见范围内（带 200px 容差）
+                                let margin = 200;
+                                if render_pos.x + geo.size.w + margin >= 0
+                                    && render_pos.x <= ow + margin
+                                    && render_pos.y + geo.size.h + margin >= 0
+                                    && render_pos.y <= oh + margin
+                                {
                                     or_elems.extend(render_elements_from_surface_tree(
                                         &mut renderer,
                                         &wl,
@@ -4433,9 +4502,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             draw_render_elements(&mut f, 1.0, &sp_elems, &[dmg])?;
                         }
 
-                        // Step 4.5: X11 override-redirect windows (只在焦点屏幕)
-                        // Must render on top of window content but below headbar
-                        if is_focused_output && !or_elems.is_empty() {
+                        // Step 4.5: X11 override-redirect windows (all outputs, based on position)
+                        if !or_elems.is_empty() {
                             draw_render_elements(&mut f, 1.0, &or_elems, &[dmg])?;
                         }
 
