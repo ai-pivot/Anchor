@@ -5346,8 +5346,6 @@ impl smithay::xwayland::XwmHandler for App {
                 | Some(WmWindowType::PopupMenu)
                 | Some(WmWindowType::DropdownMenu)
                 | Some(WmWindowType::Notification)
-                | Some(WmWindowType::Utility)  // 微信托盘/工具窗口
-                | Some(WmWindowType::Dialog)   // 微信对话框
         );
 
         tracing::info!(
@@ -5377,16 +5375,35 @@ impl smithay::xwayland::XwmHandler for App {
         } else {
             // 普通窗口：跟随 transient_for 父窗口所在的 workspace
             let target_ws = if let Some(parent) = window.is_transient_for() {
-                let mut found_ws = self.active_ws;
+                let mut found_ws = None;
                 'search: for ws_i in 0..self.workspaces.len() {
                     for xs in &self.workspaces[ws_i].x11_surfaces {
                         if xs.window_id() == parent {
-                            found_ws = ws_i;
+                            found_ws = Some(ws_i);
                             break 'search;
                         }
                     }
                 }
-                found_ws
+                // 也搜索 or_surfaces（父窗口可能是 Utility 类型的浮动窗）
+                if found_ws.is_none() {
+                    if let Some(parent_xs) = self.xw.or_surfaces.iter().find(|s| s.window_id() == parent) {
+                        let geo = parent_xs.geometry();
+                        // 根据父窗口的 X11 坐标推断所在 output/ws
+                        for (oi, &ws_i) in self.output_active_ws.iter().enumerate() {
+                            if let Some(&(ox, oy, ow, oh)) = self.output_sizes.get(oi) {
+                                if geo.loc.x >= ox && geo.loc.x < ox + ow as i32 {
+                                    found_ws = Some(ws_i);
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+                tracing::info!(
+                    "🔗 transient_for search: class='{}' parent_id={} found_ws={:?}",
+                    window.class(), parent, found_ws
+                );
+                found_ws.unwrap_or(self.active_ws)
             } else {
                 self.active_ws
             };
