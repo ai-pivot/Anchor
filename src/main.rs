@@ -1265,7 +1265,7 @@ impl App {
     }
 
     /// 用方向键交换窗口位置（Super+Shift+方向键）
-    /// 按屏幕真实几何位置：找到当前窗口在指定方向上最近的邻居
+    /// 按屏幕真实几何位置：找到当前窗口在指定方向上最近的邻居并交换
     fn swap_window(&mut self, direction: Keysym) {
         let fi = match self.focus_idx() {
             Some(i) => i,
@@ -1275,57 +1275,91 @@ impl App {
         ws.rebuild_order();
         let order = ws.effective_order();
         let n = order.len();
-        if n <= 1 {
-            return;
-        }
+        if n <= 1 { return; }
 
-        let bar_h = if self.cfg.bar.enabled {
-            self.cfg.bar.height
-        } else {
-            0
-        };
-        // 计算所有窗口的 slot 位置
+        let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
+
+        // 使用焦点窗口所在的 output 尺寸（不是 self.osize）
+        let (ow, oh) = self.output_sizes
+            .get(self.focused_output)
+            .map(|&(_, _, w, h)| (w, h))
+            .unwrap_or((self.osize.w, self.osize.h));
+
         let slots: Vec<(i32, i32, i32, i32)> = (0..n)
-            .map(|i| {
-                layout::slot(
-                    i,
-                    n,
-                    self.osize.w,
-                    self.osize.h,
-                    bar_h,
-                    &self.cfg,
-                    ws.layout,
-                    ws.split,
-                )
-            })
+            .map(|i| layout::slot(i, n, ow, oh, bar_h, &self.cfg, ws.layout, ws.split))
             .collect();
 
         let (fx, fy, fw, fh) = slots[fi];
-        // 焦点窗口中心
-        let fcx = fx + fw / 2;
-        let fcy = fy + fh / 2;
 
-        // 找到在指定方向上最近的窗口
+        // 找到指定方向上最合适的邻居
         let mut best_idx: Option<usize> = None;
-        let mut best_dist: i32 = i32::MAX;
+        let mut best_score: i64 = i64::MAX;
 
         for (i, &(sx, sy, sw, sh)) in slots.iter().enumerate() {
-            if i == fi {
-                continue;
-            }
-            let scx = sx + sw / 2;
-            let scy = sy + sh / 2;
+            if i == fi { continue; }
 
-            let (is_valid, dist) = match direction {
-                Keysym::Left => (scx < fcx, (fcx - scx).abs()),
-                Keysym::Right => (scx > fcx, (scx - fcx).abs()),
-                Keysym::Up => (scy < fcy, (fcy - scy).abs()),
-                Keysym::Down => (scy > fcy, (scy - fcy).abs()),
-                _ => (false, i32::MAX),
+            // 计算 y-overlap 分数（用于 Left/Right 判断是否同一行）
+            let y_overlap = (fy + fh).min(sy + sh) - fy.max(sy).max(0);
+            let y_overlap_ratio = y_overlap as f32 / (fh.min(sh).max(1)) as f32;
+            // x-overlap 分数（用于 Up/Down 判断是否同一列）
+            let x_overlap = (fx + fw).min(sx + sw) - fx.max(sx).max(0);
+            let x_overlap_ratio = x_overlap as f32 / (fw.min(sw).max(1)) as f32;
+
+            let (is_candidate, primary_dist) = match direction {
+                // Left: 窗口在焦点左侧。优先同行的（y-overlap 大），其次距离近的
+                Keysym::Left => {
+                    let right_edge = sx + sw;
+                    let left_of = right_edge <= fx + 4; // 4px 容差
+                    if left_of {
+                        let dist = (fx - right_edge) as i64;
+                        // 分数越小越好：距离优先，但同行权重更高
+                        let score = dist + ((1.0 - y_overlap_ratio) * 10000.0) as i64;
+                        (true, score)
+                    } else {
+                        (false, 0)
+                    }
+                }
+                // Right: 窗口在焦点右侧
+                Keysym::Right => {
+                    let left_edge = sx;
+                    let right_of = left_edge >= fx + fw - 4;
+                    if right_of {
+                        let dist = (left_edge - (fx + fw)) as i64;
+                        let score = dist + ((1.0 - y_overlap_ratio) * 10000.0) as i64;
+                        (true, score)
+                    } else {
+                        (false, 0)
+                    }
+                }
+                // Up: 窗口在焦点上方。优先同列的（x-overlap 大）
+                Keysym::Up => {
+                    let bottom_edge = sy + sh;
+                    let above = bottom_edge <= fy + 4;
+                    if above {
+                        let dist = (fy - bottom_edge) as i64;
+                        let score = dist + ((1.0 - x_overlap_ratio) * 10000.0) as i64;
+                        (true, score)
+                    } else {
+                        (false, 0)
+                    }
+                }
+                // Down: 窗口在焦点下方
+                Keysym::Down => {
+                    let top_edge = sy;
+                    let below = top_edge >= fy + fh - 4;
+                    if below {
+                        let dist = (top_edge - (fy + fh)) as i64;
+                        let score = dist + ((1.0 - x_overlap_ratio) * 10000.0) as i64;
+                        (true, score)
+                    } else {
+                        (false, 0)
+                    }
+                }
+                _ => (false, 0),
             };
 
-            if is_valid && dist < best_dist {
-                best_dist = dist;
+            if is_candidate && primary_dist < best_score {
+                best_score = primary_dist;
                 best_idx = Some(i);
             }
         }
@@ -1336,15 +1370,10 @@ impl App {
         };
 
         ws.window_order.swap(fi, target);
-
         if let Some(fs) = ws.fullscreen {
-            if fs == fi {
-                ws.fullscreen = Some(target);
-            } else if fs == target {
-                ws.fullscreen = Some(fi);
-            }
+            if fs == fi { ws.fullscreen = Some(target); }
+            else if fs == target { ws.fullscreen = Some(fi); }
         }
-
         drop(ws);
         self.do_layout_animated();
         self.dirty = true;
