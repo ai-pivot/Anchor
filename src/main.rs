@@ -464,6 +464,23 @@ impl App {
             }
         }
 
+        // Check X11 override-redirect windows BEFORE slot hit-test
+        // OR 窗口（右键菜单、输入法候选框等）可能超出 slot 区域，必须优先匹配
+        for xs in &self.xw.or_surfaces {
+            if let Some(wl) = xs.wl_surface() {
+                let geo = xs.geometry();
+                let local_x = (geo.loc.x - ox as i32) as f64;
+                let local_y = (geo.loc.y - oy as i32) as f64;
+                let local_w = geo.size.w as f64;
+                let local_h = geo.size.h as f64;
+                if px >= local_x && px < local_x + local_w
+                    && py >= local_y && py < local_y + local_h
+                {
+                    return Some((wl, Point::from((local_x, local_y))));
+                }
+            }
+        }
+
         // Hit-test window slots using unified order
         let n_all = order.len();
         for (i, slot) in order.iter().enumerate() {
@@ -506,23 +523,6 @@ impl App {
                             return Some((s, Point::from((x as f64, y as f64))));
                         }
                     }
-                }
-            }
-        }
-
-        // Check X11 override-redirect windows (file dialogs, tooltips, etc.)
-        // OR 窗口使用全局坐标，转为 output 局部后做 hit-test
-        for xs in &self.xw.or_surfaces {
-            if let Some(wl) = xs.wl_surface() {
-                let geo = xs.geometry();
-                let local_x = (geo.loc.x - ox as i32) as f64;
-                let local_y = (geo.loc.y - oy as i32) as f64;
-                let local_w = geo.size.w as f64;
-                let local_h = geo.size.h as f64;
-                if px >= local_x && px < local_x + local_w
-                    && py >= local_y && py < local_y + local_h
-                {
-                    return Some((wl, Point::from((local_x, local_y))));
                 }
             }
         }
