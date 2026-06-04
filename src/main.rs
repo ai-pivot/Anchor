@@ -2495,6 +2495,59 @@ impl XdgShellHandler for App {
         }
         surface.send_configure();
     }
+    /// XDG toplevel 被销毁 — 比 CompositorHandler::destroyed 更可靠
+    /// （浏览器等复杂应用内部 wl_surface 可能和 tops 中存储的不一致）
+    fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
+        let wl = surface.wl_surface().clone();
+        // 搜索所有工作区
+        for ws_idx in 0..self.workspaces.len() {
+            let closed_idx = self.workspaces[ws_idx].tops.iter().position(|tl| {
+                tl.wl_surface() == &wl
+            });
+            if let Some(idx) = closed_idx {
+                info!("🗑️ toplevel_destroyed (ws={}, idx={})", ws_idx, idx);
+                self.workspaces[ws_idx].tops.retain(|tl| tl.wl_surface() != &wl);
+                self.remap_prev_after_remove(&WindowSlot::Wl(idx));
+                // 关闭动画
+                self.window_anims.push((ws_idx, std::time::Instant::now(), false));
+                self.dirty = true;
+                // fullscreen 清理
+                if let Some(fi) = self.workspaces[ws_idx].fullscreen {
+                    let order = self.workspaces[ws_idx].effective_order();
+                    match order.get(fi) {
+                        Some(WindowSlot::Wl(i)) if *i == idx => {
+                            self.workspaces[ws_idx].fullscreen = None;
+                        }
+                        _ => {}
+                    }
+                }
+                self.workspaces[ws_idx].rebuild_order();
+                // focus 更新
+                if self.workspaces[ws_idx].focus.as_ref() == Some(&wl) {
+                    let order = self.workspaces[ws_idx].effective_order();
+                    self.workspaces[ws_idx].focus = order.last().and_then(|s| match s {
+                        WindowSlot::Wl(i) => self.workspaces[ws_idx].tops.get(*i).map(|tl| tl.wl_surface().clone()),
+                        WindowSlot::X11(i) => self.workspaces[ws_idx].x11_surfaces.get(*i).and_then(|xs| xs.wl_surface()),
+                    });
+                }
+                // relayout
+                if ws_idx != self.active_ws {
+                    self.layout_workspace(ws_idx);
+                } else {
+                    self.do_layout_animated();
+                    self.dirty = true;
+                    if let Some(ref s) = self.workspaces[self.active_ws].focus {
+                        let kbd = self.kbd.clone();
+                        let serial = SERIAL_COUNTER.next_serial();
+                        kbd.set_focus(self, Some(s.clone()), serial);
+                    }
+                }
+                return;
+            }
+        }
+        // 也检查 pending_tops
+        self.pending_tops.retain(|tl| tl.wl_surface() != &wl);
+    }
     fn app_id_changed(&mut self, surface: ToplevelSurface) {
         use smithay::wayland::compositor::with_states;
         use smithay::wayland::shell::xdg::XdgToplevelSurfaceData;
@@ -2769,6 +2822,22 @@ impl CompositorHandler for App {
         self.popup_manager.commit(s);
     }
     fn destroyed(&mut self, surface: &WlSurface) {
+        // Debug: 记录收到的 destroyed surface
+        let mut found_in = String::new();
+        for ws_idx in 0..self.workspaces.len() {
+            for (i, tl) in self.workspaces[ws_idx].tops.iter().enumerate() {
+                if tl.wl_surface() == surface {
+                    found_in = format!("ws{}:tops[{}]", ws_idx, i);
+                }
+            }
+        }
+        for (i, tl) in self.pending_tops.iter().enumerate() {
+            if tl.wl_surface() == surface {
+                found_in = format!("pending_tops[{}]", i);
+            }
+        }
+        info!("🗑️ destroyed surface: found_in='{}'", found_in);
+
         // 搜索所有工作区找到被销毁的窗口
         for ws_idx in 0..self.workspaces.len() {
             let before = self.workspaces[ws_idx].tops.len();
@@ -3630,9 +3699,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
 
+            let before_tops = state.workspaces[state.active_ws].tops.len();
             state.workspaces[state.active_ws]
                 .tops
                 .retain(|tl| tl.alive());
+            // 安全网：如果 tops.retain 移除了死掉的 toplevel（比如浏览器）
+            // 触发 relayout 确保剩余窗口正确调整大小
+            if state.workspaces[state.active_ws].tops.len() < before_tops {
+                state.do_layout_animated();
+                state.dirty = true;
+            }
             let bar_h = if state.cfg.bar.enabled {
                 state.cfg.bar.height
             } else {
