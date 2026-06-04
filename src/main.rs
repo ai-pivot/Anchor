@@ -2822,22 +2822,6 @@ impl CompositorHandler for App {
         self.popup_manager.commit(s);
     }
     fn destroyed(&mut self, surface: &WlSurface) {
-        // Debug: 记录收到的 destroyed surface
-        let mut found_in = String::new();
-        for ws_idx in 0..self.workspaces.len() {
-            for (i, tl) in self.workspaces[ws_idx].tops.iter().enumerate() {
-                if tl.wl_surface() == surface {
-                    found_in = format!("ws{}:tops[{}]", ws_idx, i);
-                }
-            }
-        }
-        for (i, tl) in self.pending_tops.iter().enumerate() {
-            if tl.wl_surface() == surface {
-                found_in = format!("pending_tops[{}]", i);
-            }
-        }
-        info!("🗑️ destroyed surface: found_in='{}'", found_in);
-
         // 搜索所有工作区找到被销毁的窗口
         for ws_idx in 0..self.workspaces.len() {
             let before = self.workspaces[ws_idx].tops.len();
@@ -4208,11 +4192,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     Point::<i32, Physical>::from((geo.loc.x - ox, geo.loc.y - oy));
                                 // 检查 OR 窗口是否在此 output 的可见范围内（带 200px 容差）
                                 let margin = 200;
-                                if render_pos.x + geo.size.w + margin >= 0
+                                let visible = render_pos.x + geo.size.w + margin >= 0
                                     && render_pos.x <= ow + margin
                                     && render_pos.y + geo.size.h + margin >= 0
-                                    && render_pos.y <= oh + margin
-                                {
+                                    && render_pos.y <= oh + margin;
+                                if visible {
                                     or_elems.extend(render_elements_from_surface_tree(
                                         &mut renderer,
                                         &wl,
