@@ -527,44 +527,7 @@ impl App {
             }
         }
 
-        // Last resort: last window in order (使用 output 局部尺寸，不是全局 osize)
-        if let Some((i, slot)) = order.iter().enumerate().last() {
-            let (x, y, _w, _h) = layout::slot(
-                i,
-                order.len(),
-                ow,
-                oh,
-                bar_h,
-                &self.cfg,
-                ws.layout,
-                ws.split,
-            );
-            match slot {
-                WindowSlot::Wl(idx) => {
-                    if let Some(tl) = ws.tops.get(*idx) {
-                        let s = tl.wl_surface().clone();
-                        let geo = smithay::wayland::compositor::with_states(&s, |states| {
-                            states
-                                .cached_state
-                                .get::<smithay::wayland::shell::xdg::SurfaceCachedState>()
-                                .current()
-                                .geometry
-                        })
-                        .unwrap_or_default();
-                        return Some((
-                            s,
-                            Point::from((x as f64 - geo.loc.x as f64, y as f64 - geo.loc.y as f64)),
-                        ));
-                    }
-                }
-                WindowSlot::X11(idx) => {
-                    if let Some(s) = ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()) {
-                        return Some((s, Point::from((x as f64, y as f64))));
-                    }
-                }
-            }
-        }
-
+        // 鼠标不在任何窗口、popup 或 OR 窗口内 → 无焦点
         None
     }
 
@@ -5383,6 +5346,8 @@ impl smithay::xwayland::XwmHandler for App {
                 | Some(WmWindowType::PopupMenu)
                 | Some(WmWindowType::DropdownMenu)
                 | Some(WmWindowType::Notification)
+                | Some(WmWindowType::Utility)  // 微信托盘/工具窗口
+                | Some(WmWindowType::Dialog)   // 微信对话框
         );
 
         tracing::info!(
