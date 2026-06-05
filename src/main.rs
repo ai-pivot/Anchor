@@ -5604,6 +5604,31 @@ impl smithay::xwayland::XwmHandler for App {
         _reorder: Option<smithay::xwayland::xwm::Reorder>,
     ) {
         self.xw.on_configure_request(&window, x, y, w, h);
+
+        // Clamp OR 窗口（输入法候选框等）到屏幕可视区域内
+        let is_or = self.xw.or_surfaces.iter().any(|s| s.window_id() == window.window_id());
+        if is_or && window.wl_surface().is_some() {
+            let geo = window.geometry();
+            let new_x = x.unwrap_or(geo.loc.x);
+            let new_y = y.unwrap_or(geo.loc.y);
+            let new_w = w.map(|v| v as i32).unwrap_or(geo.size.w);
+            let new_h = h.map(|v| v as i32).unwrap_or(geo.size.h);
+
+            // 找到包含此窗口（或最近的）output 来计算 clamp 范围
+            let screen_w = self.osize.w;
+            let screen_h = self.osize.h;
+            let margin: i32 = 8; // 留 8px 边距
+
+            let clamp_x = new_x.max(margin).min(screen_w - new_w.max(100) - margin);
+            let clamp_y = new_y.max(0).min(screen_h - new_h.max(20) - margin);
+
+            if clamp_x != new_x || clamp_y != new_y {
+                let _ = window.configure(Some(Rectangle::from_loc_and_size(
+                    (clamp_x, clamp_y),
+                    (new_w, new_h),
+                )));
+            }
+        }
     }
 
     fn configure_notify(
