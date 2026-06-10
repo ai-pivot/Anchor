@@ -318,6 +318,13 @@ For SDDM: Create `/usr/share/wayland-sessions/anchor.desktop` with same content.
 25. **新增窗口 vs 布局切换需要不同的动画策略。** `do_layout_animated` 自动
     检测：纯新增窗口场景（窗口数增加、旧窗口全存在）→ 已有窗口零偏移；
     布局变化场景 → 所有窗口从旧位置动画到新位置。
+26. **X11 窗口的 `wl_surface` 是异步关联的。** `map_window_request` 时
+    `window.wl_surface()` 通常返回 `None`（Wayland surface 尚未创建）。
+    必须在 `surface_associated` 回调中补设 `ws.focus` + `kbd.set_focus` +
+    `do_layout_animated()`（触发 ConfigureWindow）。否则 X11 窗口（如飞书
+    打开的 MPV）进入 tiling 布局后：没有 focus → 无法交互、Super+Q 关不掉；
+    没有 configure → 客户端不渲染 → 窗口透明。`surface_associated` 不能只
+    设 `dirty = true`，必须完整处理 focus + layout。
 
 ## 渲染循环与动画架构
 

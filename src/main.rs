@@ -1654,6 +1654,8 @@ impl App {
                                     return FilterResult::Intercept(());
                                 }
                                 Keysym::q => {
+                                    // 关闭焦点窗口，或鼠标位置命中的窗口
+                                    let mut closed = false;
                                     if let Some(ref surf) =
                                         data.workspaces[data.active_ws].focus.clone()
                                     {
@@ -1663,14 +1665,70 @@ impl App {
                                             ws.tops.iter().find(|tl| tl.wl_surface() == surf)
                                         {
                                             tl.send_close();
+                                            closed = true;
                                         }
-                                        // Try X11 surface
+                                        // Try X11 surface in tiling layout
                                         if let Some(xs) = ws
                                             .x11_surfaces
                                             .iter()
                                             .find(|xs| xs.wl_surface().as_ref() == Some(surf))
                                         {
                                             let _ = xs.close();
+                                            closed = true;
+                                        }
+                                    }
+
+                                    // 焦点窗口关闭失败：通过鼠标位置 hit-test 关闭窗口
+                                    // 覆盖：OR 窗口 + tiling 中的 X11 窗口（可能没有 focus）
+                                    if !closed {
+                                        let px_global = data.pointer_pos.0 as i32;
+                                        let py_global = data.pointer_pos.1 as i32;
+
+                                        // 1) 尝试关闭鼠标位置下的 OR 窗口
+                                        if let Some(xs) = data.xw.or_surfaces.iter().find(|xs| {
+                                            let geo = xs.geometry();
+                                            px_global >= geo.loc.x && px_global < geo.loc.x + geo.size.w
+                                                && py_global >= geo.loc.y && py_global < geo.loc.y + geo.size.h
+                                        }) {
+                                            tracing::info!("🔒 Closing OR window at pointer: class='{}'", xs.class());
+                                            let _ = xs.close();
+                                            closed = true;
+                                        }
+
+                                        // 2) 尝试关闭鼠标位置下的 tiling X11 窗口
+                                        if !closed {
+                                            let oi = data.output_at_pointer();
+                                            let (ox, oy, ow, oh) = data.output_sizes.get(oi)
+                                                .copied().unwrap_or((0, 0, data.osize.w, data.osize.h));
+                                            let bar_h = if data.cfg.bar.enabled { data.cfg.bar.height } else { 0 };
+                                            let local_px = px_global - ox;
+                                            let local_py = py_global - oy;
+                                            let ws_idx = data.output_active_ws.get(oi)
+                                                .copied().unwrap_or(data.active_ws);
+                                            let ws = &data.workspaces[ws_idx];
+                                            let order = ws.effective_order();
+                                            let n = order.len();
+                                            for (i, slot) in order.iter().enumerate() {
+                                                let (x, y, w, h) = layout::slot(
+                                                    i, n, ow, oh, bar_h, &data.cfg,
+                                                    ws.layout, ws.split,
+                                                );
+                                                if local_px >= x && local_px < x + w
+                                                    && local_py >= y && local_py < y + h
+                                                {
+                                                    if let WindowSlot::X11(idx) = slot {
+                                                        if let Some(xs) = ws.x11_surfaces.get(*idx) {
+                                                            tracing::info!(
+                                                                "🔒 Closing X11 tiling window at pointer: class='{}'",
+                                                                xs.class()
+                                                            );
+                                                            let _ = xs.close();
+                                                            closed = true;
+                                                        }
+                                                    }
+                                                    break;
+                                                }
+                                            }
                                         }
                                     }
                                     return FilterResult::Intercept(());
@@ -5322,10 +5380,51 @@ impl smithay::wayland::xwayland_shell::XWaylandShellHandler for App {
     fn surface_associated(
         &mut self,
         _xwm: smithay::xwayland::xwm::XwmId,
-        _wl_surface: WlSurface,
-        _surface: smithay::xwayland::X11Surface,
+        wl_surface: WlSurface,
+        surface: smithay::xwayland::X11Surface,
     ) {
-        tracing::info!("🔗 XWayland surface associated (wl_surface ready)");
+        tracing::info!(
+            "🔗 XWayland surface associated: class='{}' title='{}'",
+            surface.class(),
+            surface.title()
+        );
+
+        // wl_surface 现在就绪了。如果这个 X11 窗口在 tiling 布局中但之前
+        // 没有被 focus（因为 map_window_request 时 wl_surface 还是 None），
+        // 现在补上 focus 和 configure。
+        let wid = surface.window_id();
+        let mut found_and_focused = false;
+        for ws_idx in 0..self.workspaces.len() {
+            let ws = &self.workspaces[ws_idx];
+            if ws.x11_surfaces.iter().any(|xs| xs.window_id() == wid) {
+                // 找到了这个窗口所在的 workspace
+                // 设置 focus
+                self.workspaces[ws_idx].focus = Some(wl_surface.clone());
+                let kbd = self.kbd.clone();
+                let serial = SERIAL_COUNTER.next_serial();
+                kbd.set_focus(self, Some(wl_surface.clone()), serial);
+
+                // 重新 layout（configure 尺寸给 X11 客户端）
+                if ws_idx == self.active_ws {
+                    self.do_layout_animated();
+                } else {
+                    self.layout_workspace(ws_idx);
+                }
+
+                tracing::info!(
+                    "🔗 surface_associated: focused + layout for ws={}",
+                    ws_idx
+                );
+                found_and_focused = true;
+                break;
+            }
+        }
+
+        if !found_and_focused {
+            // 窗口可能在 or_surfaces 中（OR 窗口），不需要 tiling layout
+            tracing::info!("🔗 surface_associated: window not in tiling (OR window?)");
+        }
+
         self.dirty = true;
     }
 }
@@ -5355,6 +5454,35 @@ impl smithay::xwayland::XwmHandler for App {
         _xwm: smithay::xwayland::xwm::XwmId,
         window: smithay::xwayland::X11Surface,
     ) {
+        use smithay::xwayland::xwm::WmWindowType;
+        tracing::info!(
+            "🆕 X11 OR window: class='{}' title='{}' type={:?} transient={:?}",
+            window.class(),
+            window.title(),
+            window.window_type(),
+            window.is_transient_for()
+        );
+
+        // 检查是否为辅助窗口（tooltip、popup 等）
+        // 某些应用（如飞书打开 MPV）可能意外以 OR 模式创建普通窗口
+        let is_aux = matches!(
+            window.window_type(),
+            Some(WmWindowType::Tooltip)
+                | Some(WmWindowType::PopupMenu)
+                | Some(WmWindowType::DropdownMenu)
+                | Some(WmWindowType::Notification)
+        );
+
+        // 非 auxiliary OR 窗口（如 MPV 视频窗口、Dialog 等）也需要能关闭和交互
+        // 记录警告以便调试，但仍然加入 or_surfaces 以避免丢失窗口
+        if !is_aux {
+            tracing::warn!(
+                "⚠️  Non-aux X11 OR window: class='{}' type={:?} — may need manual close",
+                window.class(),
+                window.window_type()
+            );
+        }
+
         self.xw.on_new_or_window(window);
         self.dirty = true;
     }
@@ -5378,12 +5506,13 @@ impl smithay::xwayland::XwmHandler for App {
         );
 
         tracing::info!(
-            "🗺️  X11 map_request: class='{}' title='{}' type={:?} transient={:?} aux={}",
+            "🗺️  X11 map_request: class='{}' title='{}' type={:?} transient={:?} aux={} has_wl_surface={}",
             window.class(),
             window.title(),
             window.window_type(),
             window.is_transient_for(),
-            is_aux
+            is_aux,
+            window.wl_surface().is_some()
         );
 
         if let Err(e) = window.set_mapped(true) {
