@@ -171,4 +171,26 @@ if command -v systemctl &>/dev/null; then
     systemctl --user start graphical-session.target 2>/dev/null || true
 fi
 
+# ─── 启动 xdg-desktop-portal ───
+# 即使 systemd 用户服务没起来，也直接以后台进程启动。
+# 按优先级尝试后端：gtk → wlr（自动回退）。
+# WAYLAND_DISPLAY 已在上面 export，子进程自动继承。
+PORTAL_BACKEND=""
+for candidate in /usr/libexec/xdg-desktop-portal-gtk \
+                  /usr/libexec/xdg-desktop-portal-wlr \
+                  /usr/lib/xdg-desktop-portal-gtk \
+                  /usr/lib/xdg-desktop-portal-wlr; do
+    if [ -x "$candidate" ]; then
+        "$candidate" &
+        PORTAL_BACKEND="$candidate"
+        break
+    fi
+done
+
+if [ -x /usr/libexec/xdg-desktop-portal ]; then
+    /usr/libexec/xdg-desktop-portal &
+elif [ -x /usr/lib/xdg-desktop-portal ]; then
+    /usr/lib/xdg-desktop-portal &
+fi
+
 exec "$ANCHOR_BIN" 2>&1 | tee /tmp/anchor-session.log
