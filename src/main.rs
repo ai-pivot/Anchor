@@ -3633,29 +3633,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // ── 启动 xdg-desktop-portal ──
     // Portal 后端按优先级：gtk → wlr。主 daemon 最后启动。
-    // 和 fcitx5 一样用 spawn() 启动，继承 WAYLAND_DISPLAY
+    // 用 --replace 保持常驻，避免空闲超时退出导致
+    // XWayland 应用（Edge等）后续 D-Bus 调用时 portal 不在。
     let uid = unsafe { libc::getuid() };
+    let xdg_runtime = format!("/run/user/{uid}");
+    // 先启动 backend
     let backend = ["/usr/libexec/xdg-desktop-portal-gtk", "/usr/libexec/xdg-desktop-portal-wlr"]
         .iter()
         .find(|p| std::path::Path::new(p).exists());
     if let Some(backend) = backend {
         std::process::Command::new(*backend)
             .env("WAYLAND_DISPLAY", "wayland-anchor")
-            .env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"))
+            .env("XDG_RUNTIME_DIR", &xdg_runtime)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .spawn()
             .ok();
         info!("✅ Portal backend: {backend}");
     }
+    // 再启动主 daemon，--replace 保持常驻
     std::process::Command::new("/usr/libexec/xdg-desktop-portal")
+        .arg("--replace")
         .env("WAYLAND_DISPLAY", "wayland-anchor")
-        .env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"))
+        .env("XDG_RUNTIME_DIR", &xdg_runtime)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
         .spawn()
         .ok();
-    info!("✅ xdg-desktop-portal");
+    info!("✅ xdg-desktop-portal (keep-alive)");
 
     // ── XWayland ──
     {
