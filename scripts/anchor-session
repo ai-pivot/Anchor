@@ -153,15 +153,4 @@ if command -v gnome-keyring-daemon &>/dev/null && \
     eval $(gnome-keyring-daemon --start --replace --components=secrets,ssh 2>/dev/null)
 fi
 
-# ─── 启动 xdg-desktop-portal ───
-# Anchor 是独立合成器，需要手动启动 portal 支持 URI scheme 激活
-# (zcode://, zoommtg://, etc.) 和屏幕共享等功能。
-# 使用 wlr 后端（兼容 wlroots-based 合成器）。
-if [ -x /usr/libexec/xdg-desktop-portal-wlr ]; then
-    /usr/libexec/xdg-desktop-portal-wlr &
-fi
-if [ -x /usr/libexec/xdg-desktop-portal ]; then
-    /usr/libexec/xdg-desktop-portal &
-fi
-
 exec "$ANCHOR_BIN" 2>&1 | tee /tmp/anchor-session.log

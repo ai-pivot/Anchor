@@ -3313,6 +3313,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             format!("/run/user/{}", unsafe { libc::getuid() }),
         );
     }
+
+    // ─── 启动 xdg-desktop-portal ───
+    // Portal 用于 URI scheme 激活（zcode://, zoommtg:// 等）和屏幕共享。
+    // 必须在 WAYLAND_DISPLAY 设置之后启动。
+    for (name, path) in [
+        ("xdg-desktop-portal-wlr", "/usr/libexec/xdg-desktop-portal-wlr"),
+        ("xdg-desktop-portal", "/usr/libexec/xdg-desktop-portal"),
+    ] {
+        if std::path::Path::new(path).exists() {
+            match std::process::Command::new(path)
+                .env("WAYLAND_DISPLAY", "wayland-anchor")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+            {
+                Ok(_) => info!("✅ Started {}", name),
+                Err(e) => warn!("⚠️  Failed to start {}: {}", name, e),
+            }
+        }
+    }
+
     info!("✅ wayland-anchor");
 
     // ─── EventLoop + 等 DRM master 就绪（必须在 EGL 之前！）───
