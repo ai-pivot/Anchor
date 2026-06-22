@@ -30,7 +30,12 @@ thread_local! {
 }
 
 /// 获取 glyph bitmap（命中缓存时零 CPU 光栅化）
-fn cached_rasterize(font: &Font, ch: char, size: f32, key: GlyphRasterConfig) -> (usize, usize, Vec<u8>) {
+fn cached_rasterize(
+    font: &Font,
+    ch: char,
+    size: f32,
+    key: GlyphRasterConfig,
+) -> (usize, usize, Vec<u8>) {
     GLYPH_CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
         let cache_key = (ch, size.to_bits());
@@ -44,7 +49,11 @@ fn cached_rasterize(font: &Font, ch: char, size: f32, key: GlyphRasterConfig) ->
                 let (metrics, bitmap) = font.rasterize_config(key);
                 let w = metrics.width;
                 let h = metrics.height;
-                e.insert(CachedGlyph { width: w, height: h, bitmap: bitmap.clone() });
+                e.insert(CachedGlyph {
+                    width: w,
+                    height: h,
+                    bitmap: bitmap.clone(),
+                });
                 // 缓存膨胀保护：超过 2000 条目时清空
                 if cache.entries.len() > 2000 {
                     cache.entries.clear();

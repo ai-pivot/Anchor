@@ -90,12 +90,14 @@ pub fn render_headbar(
     f.clear(
         opaque(accent.0 * 0.6, accent.1 * 0.6, accent.2 * 0.6),
         &[rect(0, 0, 2, h)],
-    ).ok();
+    )
+    .ok();
     // 发光扩散
     f.clear(
         opaque(accent.0 * 0.15, accent.1 * 0.15, accent.2 * 0.15),
         &[rect(2, 0, 2, h)],
-    ).ok();
+    )
+    .ok();
 
     // ── 录制指示器（红色闪烁圆点）──
     if recording {
@@ -133,18 +135,21 @@ pub fn render_headbar(
         f.clear(
             opaque(accent.0 * 0.3, accent.1 * 0.3, accent.2 * 0.3),
             &[rect(sweep_x - sweep_w / 2, h - 5, sweep_w, 1)],
-        ).ok();
+        )
+        .ok();
         // 光斑拖尾
         f.clear(
             opaque(accent.0 * 0.15, accent.1 * 0.15, accent.2 * 0.15),
             &[rect(sweep_x - sweep_w, h - 5, sweep_w / 2, 1)],
-        ).ok();
+        )
+        .ok();
     }
     // 顶部高亮线（与底部呼应，更细更暗）
     f.clear(
         opaque(accent.0 * 0.3, accent.1 * 0.3, accent.2 * 0.3),
         &[rect(0, 0, ow, 1)],
-    ).ok();
+    )
+    .ok();
 
     let mut x = S4;
 
@@ -154,7 +159,11 @@ pub fn render_headbar(
     // Logo 背景发光块（微妙脉冲）
     let logo_pulse = 0.08 + 0.02 * ((time_secs as f32 * 0.5).sin());
     f.clear(
-        opaque(accent.0 * logo_pulse, accent.1 * logo_pulse, accent.2 * logo_pulse),
+        opaque(
+            accent.0 * logo_pulse,
+            accent.1 * logo_pulse,
+            accent.2 * logo_pulse,
+        ),
         &[rect(x - S1, S2, logo_w + S2 + S1, h - S4)],
     )
     .ok();
@@ -204,11 +213,18 @@ pub fn render_headbar(
             f.clear(
                 opaque(accent.0 * 0.22, accent.1 * 0.22, accent.2 * 0.22),
                 &[rect(x, block_y, block_w, block_h / 2)],
-            ).ok();
+            )
+            .ok();
             f.clear(
                 opaque(accent.0 * 0.14, accent.1 * 0.14, accent.2 * 0.14),
-                &[rect(x, block_y + block_h / 2, block_w, block_h - block_h / 2)],
-            ).ok();
+                &[rect(
+                    x,
+                    block_y + block_h / 2,
+                    block_w,
+                    block_h - block_h / 2,
+                )],
+            )
+            .ok();
             f.clear(
                 opaque(accent.0 * 0.8, accent.1 * 0.8, accent.2 * 0.8),
                 &[rect(x, block_y, block_w, 2)],
@@ -270,7 +286,9 @@ pub fn render_headbar(
         // 计算整个 ws 区域的宽度和起始位置
         let ws_start_x = S4 + logo_w + S4 + S2 + S3;
         // 使用缓存的 ws block 宽度，避免重复 text_width 计算
-        let total_ws_w: i32 = ws_widths.iter().enumerate()
+        let total_ws_w: i32 = ws_widths
+            .iter()
+            .enumerate()
             .map(|(i, &w)| w + if i < max_show - 1 { ws_gap } else { 0 })
             .sum();
         // 指示条宽度 = 单个 ws 方块宽度
@@ -278,28 +296,56 @@ pub fn render_headbar(
         // 计算 scroll_offset 对应的指示条位置
         let frac = scroll_offset - scroll_offset.floor();
         let base_idx = scroll_offset.floor() as i32;
-        let offset_in_block: f64 = ws_widths.iter().take(base_idx as usize).enumerate()
-            .map(|(i, &w)| (w + if i < max_show.saturating_sub(1) { ws_gap } else { 0 }) as f64)
+        let offset_in_block: f64 = ws_widths
+            .iter()
+            .take(base_idx as usize)
+            .enumerate()
+            .map(|(i, &w)| {
+                (w + if i < max_show.saturating_sub(1) {
+                    ws_gap
+                } else {
+                    0
+                }) as f64
+            })
             .sum();
         let current_block_w = ws_widths[(base_idx as usize).min(max_show - 1)];
-        let indicator_x = ws_start_x as f64 + offset_in_block + frac * (current_block_w + ws_gap) as f64;
+        let indicator_x =
+            ws_start_x as f64 + offset_in_block + frac * (current_block_w + ws_gap) as f64;
         let indicator_w = first_block_w as f64 * (1.0 - frac * 0.3).max(0.7);
 
         // 发光底座（宽一点，暗一点）
         f.clear(
             opaque(accent.0 * 0.08, accent.1 * 0.08, accent.2 * 0.08),
-            &[rect(ws_start_x - 2, indicator_y, total_ws_w + 4, indicator_h)],
-        ).ok();
+            &[rect(
+                ws_start_x - 2,
+                indicator_y,
+                total_ws_w + 4,
+                indicator_h,
+            )],
+        )
+        .ok();
         // 主指示条
         f.clear(
             opaque(accent.0 * 0.8, accent.1 * 0.8, accent.2 * 0.8),
-            &[rect(indicator_x as i32, indicator_y, indicator_w as i32, indicator_h)],
-        ).ok();
+            &[rect(
+                indicator_x as i32,
+                indicator_y,
+                indicator_w as i32,
+                indicator_h,
+            )],
+        )
+        .ok();
         // 发光层
         f.clear(
             opaque(accent.0 * 0.3, accent.1 * 0.3, accent.2 * 0.3),
-            &[rect(indicator_x as i32 - 2, indicator_y + indicator_h, (indicator_w + 4.0) as i32, 2)],
-        ).ok();
+            &[rect(
+                indicator_x as i32 - 2,
+                indicator_y + indicator_h,
+                (indicator_w + 4.0) as i32,
+                2,
+            )],
+        )
+        .ok();
     }
 
     // 分隔线
@@ -325,7 +371,8 @@ pub fn render_headbar(
         f.clear(
             opaque(accent.0 * 0.15, accent.1 * 0.15, accent.2 * 0.15),
             &[rect(cx - S2, h - 3, tw + S4, 1)],
-        ).ok();
+        )
+        .ok();
         text_render::draw_text(
             f,
             &info,
@@ -373,7 +420,11 @@ pub fn render_headbar(
         rx - tw,
         ty,
         CLOCK_SIZE,
-        (accent.0 * text_pulse, accent.1 * text_pulse, accent.2 * text_pulse),
+        (
+            accent.0 * text_pulse,
+            accent.1 * text_pulse,
+            accent.2 * text_pulse,
+        ),
     );
     rx -= tw + S4;
 
@@ -404,12 +455,14 @@ pub fn render_headbar(
         f.clear(
             opaque(accent.0 * 0.03, accent.1 * 0.03, accent.2 * 0.03),
             &[rect(rx - dw - S2, S2, dw + S4, h - S4)],
-        ).ok();
+        )
+        .ok();
         // 底部发光线
         f.clear(
             opaque(accent.0 * 0.12, accent.1 * 0.12, accent.2 * 0.12),
             &[rect(rx - dw - S2, h - 3, dw + S4, 1)],
-        ).ok();
+        )
+        .ok();
         text_render::draw_text(
             f,
             &full_str,
@@ -470,17 +523,20 @@ pub fn render_headbar(
             f.clear(
                 opaque(mem_color.0 * 0.3, mem_color.1 * 0.3, mem_color.2 * 0.3),
                 &[rect(bar_x, bar_y - 1, fill_w, 1)],
-            ).ok();
+            )
+            .ok();
             f.clear(
                 opaque(mem_color.0 * 0.12, mem_color.1 * 0.12, mem_color.2 * 0.12),
                 &[rect(bar_x, bar_y - 2, fill_w, 1)],
-            ).ok();
+            )
+            .ok();
             // 进度条尾部发光点
             if fill_w > 2 {
                 f.clear(
                     opaque(mem_color.0 * 0.5, mem_color.1 * 0.5, mem_color.2 * 0.5),
                     &[rect(bar_x + fill_w - 2, bar_y - 1, 2, bar_h + 2)],
-                ).ok();
+                )
+                .ok();
             }
         }
         rx -= mw.max(bar_w) + S3;
@@ -530,17 +586,20 @@ pub fn render_headbar(
             f.clear(
                 opaque(cpu_color.0 * 0.3, cpu_color.1 * 0.3, cpu_color.2 * 0.3),
                 &[rect(bar_x, bar_y - 1, fill_w, 1)],
-            ).ok();
+            )
+            .ok();
             f.clear(
                 opaque(cpu_color.0 * 0.12, cpu_color.1 * 0.12, cpu_color.2 * 0.12),
                 &[rect(bar_x, bar_y - 2, fill_w, 1)],
-            ).ok();
+            )
+            .ok();
             // 进度条尾部发光点
             if fill_w > 2 {
                 f.clear(
                     opaque(cpu_color.0 * 0.5, cpu_color.1 * 0.5, cpu_color.2 * 0.5),
                     &[rect(bar_x + fill_w - 2, bar_y - 1, 2, bar_h + 2)],
-                ).ok();
+                )
+                .ok();
             }
         }
         rx -= cw.max(bar_w) + S3;

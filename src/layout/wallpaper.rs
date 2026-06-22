@@ -37,7 +37,8 @@ pub fn render_wallpaper(f: &mut impl Frame, cfg: &Config, ow: i32, oh: i32, fram
         f.clear(
             opaque(warm_r, warm_g, warm_b),
             &[Rectangle::from_size(Size::new(ow, oh))],
-        ).ok();
+        )
+        .ok();
     }
 
     // Batch grid lines: one draw call for all horizontal, one for all vertical
@@ -73,9 +74,18 @@ pub fn render_wallpaper(f: &mut impl Frame, cfg: &Config, ow: i32, oh: i32, fram
     let dot = opaque(accent.0 * 0.05, accent.1 * 0.05, accent.2 * 0.05);
     let dots: Vec<Rectangle<i32, Physical>> = GRID_CACHE.with(|cache| {
         let cache = cache.borrow();
-        cache.as_ref().and_then(|(_, _, _, _, d)| {
-            if d.is_empty() { None } else { Some(d.clone()) }
-        }).unwrap_or_default()
+        cache
+            .as_ref()
+            .and_then(
+                |(_, _, _, _, d)| {
+                    if d.is_empty() {
+                        None
+                    } else {
+                        Some(d.clone())
+                    }
+                },
+            )
+            .unwrap_or_default()
     });
     if !dots.is_empty() {
         f.clear(dot, &dots).ok();
@@ -86,7 +96,8 @@ pub fn render_wallpaper(f: &mut impl Frame, cfg: &Config, ow: i32, oh: i32, fram
     f.clear(
         opaque(accent.0 * breathe, accent.1 * breathe, accent.2 * breathe),
         &[rect(0, 0, ow, oh)],
-    ).ok();
+    )
+    .ok();
 
     // Animated glow spots (6 calls — fine)
     let t = frame as f32 * 0.012;
@@ -97,14 +108,16 @@ pub fn render_wallpaper(f: &mut impl Frame, cfg: &Config, ow: i32, oh: i32, fram
             (t * 0.6 + 2.1).cos(),
             0.25,
             0.65,
-            140, 0.03,
+            140,
+            0.03,
         ),
         (
             (t * 0.4 + 4.2).sin(),
             (t * 0.4 + 4.2).cos(),
             0.75,
             0.35,
-            100, 0.025,
+            100,
+            0.025,
         ),
         // 新增：更多光斑，营造更动感的效果
         (
@@ -112,14 +125,16 @@ pub fn render_wallpaper(f: &mut impl Frame, cfg: &Config, ow: i32, oh: i32, fram
             (t * 0.5 + 3.0).sin(),
             0.6,
             0.7,
-            80, 0.02,
+            80,
+            0.02,
         ),
         (
             (t * 0.3 + 5.0).sin(),
             (t * 0.7 + 1.5).cos(),
             0.15,
             0.4,
-            110, 0.025,
+            110,
+            0.025,
         ),
     ];
     for (sx, sy, cx, cy, size, brightness) in spots {

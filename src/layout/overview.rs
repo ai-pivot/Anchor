@@ -7,9 +7,7 @@
 //! To simulate transparency/fade-in, all colors must be modulated by raw `progress`
 //! (NOT eased progress) to ramp from near-background-color to the target color.
 
-use super::util::{
-    ease_out_expo, opaque, rect, S2, S3, S4, TITLE_SIZE,
-};
+use super::util::{ease_out_expo, opaque, rect, S2, S3, S4, TITLE_SIZE};
 use crate::config::Config;
 use crate::text_render;
 use smithay::backend::renderer::{Color32F, Frame};
@@ -50,12 +48,19 @@ pub fn render_task_panel(
     // Background — dark panel (modulated by raw progress to prevent flash)
     let br = 0.04 * color_alpha;
     let bg = (br, br, (br + 0.04 * color_alpha).min(0.12));
-    f.clear(opaque(bg.0, bg.1, bg.2), &[rect(panel_x, panel_y, panel_w, panel_h)])
-        .ok();
+    f.clear(
+        opaque(bg.0, bg.1, bg.2),
+        &[rect(panel_x, panel_y, panel_w, panel_h)],
+    )
+    .ok();
 
     // Top accent line
     f.clear(
-        opaque(accent.0 * 0.6 * color_alpha, accent.1 * 0.6 * color_alpha, accent.2 * 0.6 * color_alpha),
+        opaque(
+            accent.0 * 0.6 * color_alpha,
+            accent.1 * 0.6 * color_alpha,
+            accent.2 * 0.6 * color_alpha,
+        ),
         &[rect(panel_x, panel_y, panel_w, 1)],
     )
     .ok();
@@ -63,7 +68,11 @@ pub fn render_task_panel(
     // Glow below accent line
     for (off, glow_br) in [(1, 0.3f32), (2, 0.12), (3, 0.04)] {
         f.clear(
-            opaque(accent.0 * glow_br * color_alpha, accent.1 * glow_br * color_alpha, accent.2 * glow_br * color_alpha),
+            opaque(
+                accent.0 * glow_br * color_alpha,
+                accent.1 * glow_br * color_alpha,
+                accent.2 * glow_br * color_alpha,
+            ),
             &[rect(panel_x, panel_y + off, panel_w, 1)],
         )
         .ok();
@@ -77,7 +86,11 @@ pub fn render_task_panel(
         panel_x + S4,
         panel_y + S2,
         TITLE_SIZE,
-        (accent.0 * 0.7 * color_alpha, accent.1 * 0.7 * color_alpha, accent.2 * 0.7 * color_alpha),
+        (
+            accent.0 * 0.7 * color_alpha,
+            accent.1 * 0.7 * color_alpha,
+            accent.2 * 0.7 * color_alpha,
+        ),
     );
 
     // Window thumbnails are now rendered in main.rs Phase 1.5 + Step 4.8
@@ -88,6 +101,7 @@ pub fn render_task_panel(
         f.clear(
             Color32F::new(0.0, 0.0, 0.0, sb * color_alpha),
             &[rect(panel_x - 4, panel_y - 2 - si, panel_w + 8, 2)],
-        ).ok();
+        )
+        .ok();
     }
 }

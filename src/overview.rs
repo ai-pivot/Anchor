@@ -65,17 +65,35 @@ impl OverviewState {
     pub fn progress(&self) -> f64 {
         match self {
             Self::Inactive => 0.0,
-            Self::TaskPanel { start, opening, duration_ms, .. } => {
+            Self::TaskPanel {
+                start,
+                opening,
+                duration_ms,
+                ..
+            } => {
                 let elapsed = start.elapsed().as_millis() as u64;
                 let t = (elapsed as f32 / *duration_ms as f32).min(1.0);
                 let eased = 1.0 - (1.0 - t).powi(3); // ease_out_cubic
-                if *opening { eased as f64 } else { 1.0 - eased as f64 }
+                if *opening {
+                    eased as f64
+                } else {
+                    1.0 - eased as f64
+                }
             }
-            Self::Expose { start, opening, duration_ms, .. } => {
+            Self::Expose {
+                start,
+                opening,
+                duration_ms,
+                ..
+            } => {
                 let elapsed = start.elapsed().as_millis() as u64;
                 let t = (elapsed as f32 / *duration_ms as f32).min(1.0);
                 let eased = 1.0 - (1.0 - t).powi(3); // ease_out_cubic
-                if *opening { eased as f64 } else { 1.0 - eased as f64 }
+                if *opening {
+                    eased as f64
+                } else {
+                    1.0 - eased as f64
+                }
             }
         }
     }
@@ -116,7 +134,11 @@ impl OverviewState {
                     target_offset: snap,
                 };
             }
-            Self::Expose { selected_idx, total_windows, .. } => {
+            Self::Expose {
+                selected_idx,
+                total_windows,
+                ..
+            } => {
                 let sel = *selected_idx;
                 let total = *total_windows;
                 *self = Self::Expose {
@@ -133,9 +155,7 @@ impl OverviewState {
     /// Get the workspace index that the task panel is currently snapped to.
     pub fn task_panel_ws(&self) -> usize {
         match self {
-            Self::TaskPanel { scroll_offset, .. } => {
-                scroll_offset.round().max(0.0) as usize
-            }
+            Self::TaskPanel { scroll_offset, .. } => scroll_offset.round().max(0.0) as usize,
             Self::Inactive => 0,
             _ => 0,
         }
@@ -161,7 +181,12 @@ impl OverviewState {
 
     /// Move Expose selection left/right by one window.
     pub fn expose_scroll(&mut self, delta: i32) {
-        if let Self::Expose { selected_idx, total_windows, .. } = self {
+        if let Self::Expose {
+            selected_idx,
+            total_windows,
+            ..
+        } = self
+        {
             let total = *total_windows;
             if total > 0 {
                 let new_idx = (*selected_idx as i32 + delta).rem_euclid(total as i32) as usize;
@@ -173,7 +198,12 @@ impl OverviewState {
     /// Update task panel snap animation (spring towards target).
     /// Returns true if animation is still running.
     pub fn update_snap(&mut self, dt: f64) -> bool {
-        if let Self::TaskPanel { scroll_offset, target_offset, .. } = self {
+        if let Self::TaskPanel {
+            scroll_offset,
+            target_offset,
+            ..
+        } = self
+        {
             let diff = *target_offset - *scroll_offset;
             if diff.abs() < 0.001 {
                 *scroll_offset = *target_offset;
@@ -190,7 +220,12 @@ impl OverviewState {
     pub fn update_progress(&mut self, _dt: f64) -> bool {
         match self {
             Self::Inactive => false,
-            Self::TaskPanel { start, opening, duration_ms, .. } => {
+            Self::TaskPanel {
+                start,
+                opening,
+                duration_ms,
+                ..
+            } => {
                 let elapsed = start.elapsed().as_millis() as u64;
                 if elapsed >= *duration_ms {
                     if *opening {
@@ -203,7 +238,12 @@ impl OverviewState {
                     true
                 }
             }
-            Self::Expose { start, opening, duration_ms, .. } => {
+            Self::Expose {
+                start,
+                opening,
+                duration_ms,
+                ..
+            } => {
                 let elapsed = start.elapsed().as_millis() as u64;
                 if elapsed >= *duration_ms {
                     if *opening {

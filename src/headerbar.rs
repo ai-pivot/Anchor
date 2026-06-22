@@ -24,8 +24,8 @@ mod generated {
         use wayland_server::protocol::*;
 
         pub mod __interfaces {
-            use wayland_server::protocol::__interfaces::*;
             use wayland_backend;
+            use wayland_server::protocol::__interfaces::*;
             // 导入 xdg_toplevel 接口（协议 XML 引用了它）
             pub use wayland_protocols::xdg::shell::server::__interfaces::xdg_toplevel_interface;
             pub use wayland_protocols::xdg::shell::server::__interfaces::XDG_TOPLEVEL_INTERFACE;

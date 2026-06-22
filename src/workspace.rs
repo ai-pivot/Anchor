@@ -22,7 +22,7 @@ pub enum WindowSlot {
 }
 
 /// A single workspace holding both Wayland and X11 windows.
-    pub struct Workspace {
+pub struct Workspace {
     /// Wayland toplevel surfaces on this workspace.
     pub tops: Vec<ToplevelSurface>,
     /// Currently focused surface (if any).

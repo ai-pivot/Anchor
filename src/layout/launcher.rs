@@ -82,9 +82,14 @@ pub fn render_launcher(
         // 闪烁光标
         let cursor_alpha = 0.3 + 0.7 * (frame as f32 * 0.06).sin().max(0.0);
         f.clear(
-            opaque(accent.0 * cursor_alpha, accent.1 * cursor_alpha, accent.2 * cursor_alpha),
+            opaque(
+                accent.0 * cursor_alpha,
+                accent.1 * cursor_alpha,
+                accent.2 * cursor_alpha,
+            ),
             &[rect(lx + 38, search_y + 8, 2, search_h - 16)],
-        ).ok();
+        )
+        .ok();
         text_render::draw_text(
             f,
             "Type to search...",

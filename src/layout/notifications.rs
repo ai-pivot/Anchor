@@ -100,7 +100,8 @@ pub fn render_notifications(
             f.clear(
                 Color32F::new(0.0, 0.0, 0.0, sb * alpha),
                 &[rect(nx - 2, ny + content_h + si, actual_w + 4, 2)],
-            ).ok();
+            )
+            .ok();
         }
 
         // ── 左侧 accent 竖条 + 发光 ──

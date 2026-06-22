@@ -35,7 +35,7 @@ pub fn render_window_bg_anim(
     split: SplitDir,
     offset_x: i32,
     offset_y: i32,
-    anim_glow: f32,  // 窗口打开/关闭时的额外发光脉冲强度
+    anim_glow: f32, // 窗口打开/关闭时的额外发光脉冲强度
 ) {
     if n == 0 {
         return;
@@ -69,7 +69,9 @@ pub fn render_window_decorations(
     layout: LayoutPreset,
     split: SplitDir,
 ) {
-    render_window_decorations_anim(f, cfg, i, n, focus_idx, ow, oh, bar_h, layout, split, 0, 0, 0.0, false, 0);
+    render_window_decorations_anim(
+        f, cfg, i, n, focus_idx, ow, oh, bar_h, layout, split, 0, 0, 0.0, false, 0,
+    );
 }
 
 /// 渲染窗口装饰
@@ -89,8 +91,8 @@ pub fn render_window_decorations_anim(
     split: SplitDir,
     offset_x: i32,
     offset_y: i32,
-    anim_glow: f32,  // 窗口打开/关闭时的额外发光脉冲强度
-    is_csd: bool,    // 客户端是否自己绘制装饰
+    anim_glow: f32,    // 窗口打开/关闭时的额外发光脉冲强度
+    is_csd: bool,      // 客户端是否自己绘制装饰
     header_bar_h: i32, // header bar 高度
 ) {
     if n == 0 {
@@ -99,7 +101,9 @@ pub fn render_window_decorations_anim(
 
     // CSD 窗口：只渲染最少的边框高亮，不画标题/按钮/发光
     if is_csd {
-        render_csd_decorations(f, cfg, i, n, focus_idx, ow, oh, bar_h, layout, split, offset_x, offset_y);
+        render_csd_decorations(
+            f, cfg, i, n, focus_idx, ow, oh, bar_h, layout, split, offset_x, offset_y,
+        );
         return;
     }
 
@@ -122,15 +126,40 @@ pub fn render_window_decorations_anim(
         // ── 外层发光（4 层递减亮度）── 动画时增强发光
         let glow_boost = 1.0 + anim_glow * 3.0;
         for (expand, brightness) in [(4, 0.03f32), (3, 0.06), (2, 0.12), (1, 0.22)] {
-            let glow = opaque(accent.0 * brightness * glow_boost, accent.1 * brightness * glow_boost, accent.2 * brightness * glow_boost);
-            f.clear(glow, &[rect(x - bw - expand, y - bw - expand, w + 2 * (bw + expand), expand)]).ok();
-            f.clear(glow, &[rect(x - bw - expand, y + h + bw, w + 2 * (bw + expand), expand)]).ok();
-            f.clear(glow, &[rect(x - bw - expand, y - bw, expand, h + 2 * bw)]).ok();
-            f.clear(glow, &[rect(x + w + bw, y - bw, expand, h + 2 * bw)]).ok();
+            let glow = opaque(
+                accent.0 * brightness * glow_boost,
+                accent.1 * brightness * glow_boost,
+                accent.2 * brightness * glow_boost,
+            );
+            f.clear(
+                glow,
+                &[rect(
+                    x - bw - expand,
+                    y - bw - expand,
+                    w + 2 * (bw + expand),
+                    expand,
+                )],
+            )
+            .ok();
+            f.clear(
+                glow,
+                &[rect(
+                    x - bw - expand,
+                    y + h + bw,
+                    w + 2 * (bw + expand),
+                    expand,
+                )],
+            )
+            .ok();
+            f.clear(glow, &[rect(x - bw - expand, y - bw, expand, h + 2 * bw)])
+                .ok();
+            f.clear(glow, &[rect(x + w + bw, y - bw, expand, h + 2 * bw)])
+                .ok();
         }
 
         // ── 主边框 ──
-        f.clear(border, &[rect(x - bw, y - bw, w + 2 * bw, bw)]).ok();
+        f.clear(border, &[rect(x - bw, y - bw, w + 2 * bw, bw)])
+            .ok();
         f.clear(border, &[rect(x - bw, y + h, w + 2 * bw, bw)]).ok();
         // ── 左右边框（从上到下渐变：顶部亮 → 底部暗）──
         let grad_steps = 4;
@@ -140,7 +169,11 @@ pub fn render_window_decorations_anim(
             let br = 1.0 - t * 0.4;
             let grad_color = opaque(accent.0 * br, accent.1 * br, accent.2 * br);
             let sy = y + g * seg_h;
-            let sh = if g == grad_steps - 1 { h - g * seg_h } else { seg_h };
+            let sh = if g == grad_steps - 1 {
+                h - g * seg_h
+            } else {
+                seg_h
+            };
             f.clear(grad_color, &[rect(x - bw, sy, bw, sh)]).ok();
             f.clear(grad_color, &[rect(x + w, sy, bw, sh)]).ok();
         }
@@ -148,11 +181,13 @@ pub fn render_window_decorations_anim(
         // ── 顶部高亮线 ──
         f.clear(bright, &[rect(x - bw, y - bw, w + 2 * bw, 2)]).ok();
         // ── 底部暗线 ──
-        f.clear(dark, &[rect(x - bw, y + h + bw - 3, w + 2 * bw, 3)]).ok();
+        f.clear(dark, &[rect(x - bw, y + h + bw - 3, w + 2 * bw, 3)])
+            .ok();
         // ── 左上角发光点 ──
         f.clear(bright, &[rect(x - bw - 1, y - bw - 1, 4, 4)]).ok();
         // ── 右上角发光点 ──
-        f.clear(bright, &[rect(x + w + bw - 3, y - bw - 1, 4, 4)]).ok();
+        f.clear(bright, &[rect(x + w + bw - 3, y - bw - 1, 4, 4)])
+            .ok();
 
         // ── Header bar 分隔线（如果窗口有 header bar）──
         if header_bar_h > 0 {
@@ -172,17 +207,20 @@ pub fn render_window_decorations_anim(
             f.clear(
                 opaque(0.8, 0.2, 0.2),
                 &[rect(x + w - 12 - bw, btn_y, btn_r, btn_r)],
-            ).ok();
+            )
+            .ok();
             // 最小化按钮（黄色）
             f.clear(
                 opaque(0.7, 0.6, 0.15),
                 &[rect(x + w - 12 - bw - btn_gap, btn_y, btn_r, btn_r)],
-            ).ok();
+            )
+            .ok();
             // 全屏按钮（绿色）
             f.clear(
                 opaque(0.2, 0.7, 0.3),
                 &[rect(x + w - 12 - bw - btn_gap * 2, btn_y, btn_r, btn_r)],
-            ).ok();
+            )
+            .ok();
         }
 
         // 窗口编号（暗底 + 亮字）— 只在没有 header bar 时显示
@@ -203,7 +241,11 @@ pub fn render_window_decorations_anim(
         let border = opaque(unfocus.0, unfocus.1, unfocus.2);
         // 微弱发光 — 动画时增强
         let boost = 1.0 + anim_glow * 2.5;
-        let glow = opaque(unfocus.0 * 0.15 * boost, unfocus.1 * 0.15 * boost, unfocus.2 * 0.15 * boost);
+        let glow = opaque(
+            unfocus.0 * 0.15 * boost,
+            unfocus.1 * 0.15 * boost,
+            unfocus.2 * 0.15 * boost,
+        );
         f.clear(glow, &[rect(x - 1, y - 1, w + 2, 1)]).ok();
         f.clear(glow, &[rect(x - 1, y + h, w + 2, 1)]).ok();
         f.clear(glow, &[rect(x - 1, y, 1, h)]).ok();

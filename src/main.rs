@@ -8,6 +8,7 @@ use layout::LayoutPreset;
 mod auth;
 mod block_linear;
 mod cursor;
+mod lock;
 mod notify;
 mod record;
 mod screenshot;
@@ -15,22 +16,26 @@ mod text_render;
 mod wallpaper;
 mod workspace;
 mod xwayland;
-mod lock;
 use lock::LockState;
 mod launcher;
 use launcher::LauncherState;
 mod scratchpad;
 use scratchpad::ScratchpadState;
 mod physics;
-use physics::{Spring, Momentum};
+use physics::{Momentum, Spring};
 use workspace::{WindowSlot, Workspace, NUM_WORKSPACES};
 mod overview;
 use overview::OverviewState;
 mod headerbar;
-use headerbar::{HeaderBarData, ensure_header_bar_data, get_header_bar_info, set_header_bar_height, set_client_decoration};
+use headerbar::{
+    ensure_header_bar_data, get_header_bar_info, set_client_decoration, set_header_bar_height,
+    HeaderBarData,
+};
 
 /// 预分配的工作区标签，避免渲染热路径中的 format! 分配
-const WS_LABELS: [&str; 9] = ["WS 1", "WS 2", "WS 3", "WS 4", "WS 5", "WS 6", "WS 7", "WS 8", "WS 9"];
+const WS_LABELS: [&str; 9] = [
+    "WS 1", "WS 2", "WS 3", "WS 4", "WS 5", "WS 6", "WS 7", "WS 8", "WS 9",
+];
 
 use std::{
     os::fd::AsRawFd,
@@ -62,7 +67,8 @@ use smithay::{
     },
     delegate_compositor, delegate_data_device, delegate_input_method_manager, delegate_output,
     delegate_primary_selection, delegate_seat, delegate_shm, delegate_text_input_manager,
-    delegate_virtual_keyboard_manager, delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_virtual_keyboard_manager, delegate_xdg_activation, delegate_xdg_decoration,
+    delegate_xdg_shell,
     desktop::{PopupKind, PopupManager},
     input::{
         keyboard::{FilterResult, Keysym, ModifiersState, XkbConfig},
@@ -103,7 +109,9 @@ use smithay::{
         shm::{ShmHandler, ShmState},
         text_input::TextInputManagerState,
         virtual_keyboard::VirtualKeyboardManagerState,
-        xdg_activation::{XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData},
+        xdg_activation::{
+            XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
+        },
     },
 };
 use tracing::{error, info, warn};
@@ -477,8 +485,10 @@ impl App {
                 let local_y = (geo.loc.y - oy as i32) as f64;
                 let local_w = geo.size.w as f64;
                 let local_h = geo.size.h as f64;
-                if px >= local_x && px < local_x + local_w
-                    && py >= local_y && py < local_y + local_h
+                if px >= local_x
+                    && px < local_x + local_w
+                    && py >= local_y
+                    && py < local_y + local_h
                 {
                     return Some((wl, Point::from((local_x, local_y))));
                 }
@@ -568,8 +578,10 @@ impl App {
             let popup_w = popup_geo.size.w as f64;
             let popup_h = popup_geo.size.h as f64;
 
-            if local_px >= popup_x && local_px < popup_x + popup_w
-                && local_py >= popup_y && local_py < popup_y + popup_h
+            if local_px >= popup_x
+                && local_px < popup_x + popup_w
+                && local_py >= popup_y
+                && local_py < popup_y + popup_h
             {
                 return Some((popup.wl_surface().clone(), Point::from((popup_x, popup_y))));
             }
@@ -585,7 +597,11 @@ impl App {
         tl_pos: Point<f64, Logical>,
     ) -> Option<(WlSurface, Point<f64, Logical>)> {
         let oi = self.output_at_pointer();
-        let (ox, oy, _, _) = self.output_sizes.get(oi).copied().unwrap_or((0, 0, self.osize.w, self.osize.h));
+        let (ox, oy, _, _) =
+            self.output_sizes
+                .get(oi)
+                .copied()
+                .unwrap_or((0, 0, self.osize.w, self.osize.h));
         let local_px = self.pointer_pos.0 - ox as f64;
         let local_py = self.pointer_pos.1 - oy as f64;
         self.popup_at_pointer_local(tl, tl_pos, local_px, local_py)
@@ -791,13 +807,16 @@ impl App {
 
         // 3. 检测是否为 "纯新增窗口" 场景
         //    条件：新窗口数 > 旧窗口数，且旧窗口全部仍存在
-        let is_pure_add = new_n > old_n && old_snapshot.iter().all(|(old_slot, _)| {
-            new_positions.iter().any(|(new_slot, _)| match (old_slot, new_slot) {
-                (WindowSlot::Wl(a), WindowSlot::Wl(b)) => a == b,
-                (WindowSlot::X11(a), WindowSlot::X11(b)) => a == b,
-                _ => false,
-            })
-        });
+        let is_pure_add = new_n > old_n
+            && old_snapshot.iter().all(|(old_slot, _)| {
+                new_positions
+                    .iter()
+                    .any(|(new_slot, _)| match (old_slot, new_slot) {
+                        (WindowSlot::Wl(a), WindowSlot::Wl(b)) => a == b,
+                        (WindowSlot::X11(a), WindowSlot::X11(b)) => a == b,
+                        _ => false,
+                    })
+            });
 
         // 4. 构建 anim_positions
         // 记录窗口出现事件（用于渐入动画）
@@ -986,7 +1005,11 @@ impl App {
                     self.focused_output = oi;
                     self.active_ws = target;
                     // 同步 scroll 状态到目标 output
-                    self.scroll_offset = self.scroll_offsets.get(oi).copied().unwrap_or(target as f64);
+                    self.scroll_offset = self
+                        .scroll_offsets
+                        .get(oi)
+                        .copied()
+                        .unwrap_or(target as f64);
                     self.scroll_spring.set(self.scroll_offset);
                     self.scroll_spring.set_target(self.scroll_offset);
                     self.scroll_momentum.reset();
@@ -1168,7 +1191,11 @@ impl App {
             self.pointer_pos = (ox as f64 + ow as f64 / 2.0, oy as f64 + oh as f64 / 2.0);
             self.focused_output = t_oi;
             self.active_ws = target;
-            self.scroll_offset = self.scroll_offsets.get(t_oi).copied().unwrap_or(target as f64);
+            self.scroll_offset = self
+                .scroll_offsets
+                .get(t_oi)
+                .copied()
+                .unwrap_or(target as f64);
             self.scroll_spring.set(self.scroll_offset);
             self.scroll_spring.set_target(self.scroll_offset);
             self.scroll_momentum.reset();
@@ -1279,12 +1306,19 @@ impl App {
         ws.rebuild_order();
         let order = ws.effective_order();
         let n = order.len();
-        if n <= 1 { return; }
+        if n <= 1 {
+            return;
+        }
 
-        let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height } else { 0 };
+        let bar_h = if self.cfg.bar.enabled {
+            self.cfg.bar.height
+        } else {
+            0
+        };
 
         // 使用焦点窗口所在的 output 尺寸（不是 self.osize）
-        let (ow, oh) = self.output_sizes
+        let (ow, oh) = self
+            .output_sizes
             .get(self.focused_output)
             .map(|&(_, _, w, h)| (w, h))
             .unwrap_or((self.osize.w, self.osize.h));
@@ -1300,7 +1334,9 @@ impl App {
         let mut best_score: i64 = i64::MAX;
 
         for (i, &(sx, sy, sw, sh)) in slots.iter().enumerate() {
-            if i == fi { continue; }
+            if i == fi {
+                continue;
+            }
 
             // 计算 y-overlap 分数（用于 Left/Right 判断是否同一行）
             let y_overlap = (fy + fh).min(sy + sh) - fy.max(sy).max(0);
@@ -1375,8 +1411,11 @@ impl App {
 
         ws.window_order.swap(fi, target);
         if let Some(fs) = ws.fullscreen {
-            if fs == fi { ws.fullscreen = Some(target); }
-            else if fs == target { ws.fullscreen = Some(fi); }
+            if fs == fi {
+                ws.fullscreen = Some(target);
+            } else if fs == target {
+                ws.fullscreen = Some(fi);
+            }
         }
         drop(ws);
         self.do_layout_animated();
@@ -1521,9 +1560,13 @@ impl App {
                                 Keysym::Return => {
                                     // 全局视图：通过 expose_thumbs 找到选中窗口并 switch_workspace
                                     let sel = data.overview.expose_selected();
-                                    if let Some(&(tx, ty, tw, th, target_ws, ref slot)) = data.expose_thumbs.get(sel) {
+                                    if let Some(&(tx, ty, tw, th, target_ws, ref slot)) =
+                                        data.expose_thumbs.get(sel)
+                                    {
                                         // 在目标 ws 中找到选中窗口的 slot
-                                        let sel_in_ws = data.expose_thumbs.iter()
+                                        let sel_in_ws = data
+                                            .expose_thumbs
+                                            .iter()
                                             .filter(|t| t.4 == target_ws)
                                             .position(|t| t.0 == tx && t.1 == ty)
                                             .unwrap_or(0);
@@ -1539,18 +1582,21 @@ impl App {
                                                             (Some(tl.wl_surface().clone()), None)
                                                         })
                                                     }
-                                                    WindowSlot::X11(idx) => {
-                                                        ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()).map(|wl| {
-                                                            (None, Some(wl.clone()))
-                                                        })
-                                                    }
+                                                    WindowSlot::X11(idx) => ws
+                                                        .x11_surfaces
+                                                        .get(*idx)
+                                                        .and_then(|xs| xs.wl_surface())
+                                                        .map(|wl| (None, Some(wl.clone()))),
                                                 }
-                                            } else { None }
+                                            } else {
+                                                None
+                                            }
                                         };
 
                                         if let Some((wl_surf, x11_surf)) = action {
                                             let focus_surf = wl_surf.or(x11_surf).unwrap();
-                                            data.workspaces[target_ws].focus = Some(focus_surf.clone());
+                                            data.workspaces[target_ws].focus =
+                                                Some(focus_surf.clone());
                                             let kbd = data.kbd.clone();
                                             let serial = SERIAL_COUNTER.next_serial();
                                             kbd.set_focus(data, Some(focus_surf), serial);
@@ -1562,7 +1608,9 @@ impl App {
                                                 if let WindowSlot::Wl(idx) = target_slot {
                                                     if let Some(tl) = ws.tops.get(*idx) {
                                                         tl.with_pending_state(|st| {
-                                                            st.states.set(xdg_toplevel::State::Activated);
+                                                            st.states.set(
+                                                                xdg_toplevel::State::Activated,
+                                                            );
                                                         });
                                                         tl.send_configure();
                                                     }
@@ -1620,7 +1668,6 @@ impl App {
                                 _ => {}
                             }
                         }
-
 
                         if state == KeyState::Pressed && mods.logo {
                             let uid = unsafe { libc::getuid() };
@@ -1691,10 +1738,15 @@ impl App {
                                         // 1) 尝试关闭鼠标位置下的 OR 窗口
                                         if let Some(xs) = data.xw.or_surfaces.iter().find(|xs| {
                                             let geo = xs.geometry();
-                                            px_global >= geo.loc.x && px_global < geo.loc.x + geo.size.w
-                                                && py_global >= geo.loc.y && py_global < geo.loc.y + geo.size.h
+                                            px_global >= geo.loc.x
+                                                && px_global < geo.loc.x + geo.size.w
+                                                && py_global >= geo.loc.y
+                                                && py_global < geo.loc.y + geo.size.h
                                         }) {
-                                            tracing::info!("🔒 Closing OR window at pointer: class='{}'", xs.class());
+                                            tracing::info!(
+                                                "🔒 Closing OR window at pointer: class='{}'",
+                                                xs.class()
+                                            );
                                             let _ = xs.close();
                                             closed = true;
                                         }
@@ -1702,26 +1754,39 @@ impl App {
                                         // 2) 尝试关闭鼠标位置下的 tiling X11 窗口
                                         if !closed {
                                             let oi = data.output_at_pointer();
-                                            let (ox, oy, ow, oh) = data.output_sizes.get(oi)
-                                                .copied().unwrap_or((0, 0, data.osize.w, data.osize.h));
-                                            let bar_h = if data.cfg.bar.enabled { data.cfg.bar.height } else { 0 };
+                                            let (ox, oy, ow, oh) = data
+                                                .output_sizes
+                                                .get(oi)
+                                                .copied()
+                                                .unwrap_or((0, 0, data.osize.w, data.osize.h));
+                                            let bar_h = if data.cfg.bar.enabled {
+                                                data.cfg.bar.height
+                                            } else {
+                                                0
+                                            };
                                             let local_px = px_global - ox;
                                             let local_py = py_global - oy;
-                                            let ws_idx = data.output_active_ws.get(oi)
-                                                .copied().unwrap_or(data.active_ws);
+                                            let ws_idx = data
+                                                .output_active_ws
+                                                .get(oi)
+                                                .copied()
+                                                .unwrap_or(data.active_ws);
                                             let ws = &data.workspaces[ws_idx];
                                             let order = ws.effective_order();
                                             let n = order.len();
                                             for (i, slot) in order.iter().enumerate() {
                                                 let (x, y, w, h) = layout::slot(
-                                                    i, n, ow, oh, bar_h, &data.cfg,
-                                                    ws.layout, ws.split,
+                                                    i, n, ow, oh, bar_h, &data.cfg, ws.layout,
+                                                    ws.split,
                                                 );
-                                                if local_px >= x && local_px < x + w
-                                                    && local_py >= y && local_py < y + h
+                                                if local_px >= x
+                                                    && local_px < x + w
+                                                    && local_py >= y
+                                                    && local_py < y + h
                                                 {
                                                     if let WindowSlot::X11(idx) = slot {
-                                                        if let Some(xs) = ws.x11_surfaces.get(*idx) {
+                                                        if let Some(xs) = ws.x11_surfaces.get(*idx)
+                                                        {
                                                             tracing::info!(
                                                                 "🔒 Closing X11 tiling window at pointer: class='{}'",
                                                                 xs.class()
@@ -1799,7 +1864,10 @@ impl App {
                                         data.overview.close();
                                     } else {
                                         let total: usize = (0..NUM_WORKSPACES)
-                                            .map(|i| data.workspaces[i].tops.len() + data.workspaces[i].x11_surfaces.len())
+                                            .map(|i| {
+                                                data.workspaces[i].tops.len()
+                                                    + data.workspaces[i].x11_surfaces.len()
+                                            })
                                             .sum();
                                         if total > 0 {
                                             data.overview.open_expose(total, 0);
@@ -1956,14 +2024,19 @@ impl App {
             }
             InputEvent::GestureSwipeUpdate { event } => {
                 use smithay::backend::input::GestureSwipeUpdateEvent as _;
-                if !self.gesture_active { return; }
+                if !self.gesture_active {
+                    return;
+                }
                 self.gesture_dx += event.delta_x();
                 self.gesture_dy += event.delta_y();
                 // 3指水平滑动 → 连续滚动
                 if self.gesture_fingers == 3 {
                     let delta_normalized = event.delta_x() / {
-                        let (_ox, _oy, ow, _oh) = self.output_sizes.get(self.focused_output)
-                            .copied().unwrap_or((0, 0, self.osize.w, self.osize.h));
+                        let (_ox, _oy, ow, _oh) = self
+                            .output_sizes
+                            .get(self.focused_output)
+                            .copied()
+                            .unwrap_or((0, 0, self.osize.w, self.osize.h));
                         ow as f64
                     };
                     self.scroll_offset += delta_normalized;
@@ -2054,7 +2127,11 @@ impl App {
                     // 关键：同步 scroll_offset 到目标 output 的值，终止弹簧动画
                     // 否则 scroll_offset 还在旧 output 的中间值（如 2.3），
                     // 新 output 的 ws_offset = (new_ws - 2.3) * screen_w → 窗口飞到屏幕外
-                    self.scroll_offset = self.scroll_offsets.get(new_focused).copied().unwrap_or(self.active_ws as f64);
+                    self.scroll_offset = self
+                        .scroll_offsets
+                        .get(new_focused)
+                        .copied()
+                        .unwrap_or(self.active_ws as f64);
                     self.scroll_spring.set(self.scroll_offset);
                     self.scroll_spring.set_target(self.scroll_offset);
                     self.scroll_momentum.reset();
@@ -2113,96 +2190,121 @@ impl App {
                     if event.state() == ButtonState::Released {
                         let px = self.pointer_pos.0 as i32;
                         let py = self.pointer_pos.1 as i32;
-                        let (ox, oy, ow, oh) = self.output_sizes.get(self.focused_output)
-                            .copied().unwrap_or_default();
-                        let bar_h = if self.cfg.bar.enabled { self.cfg.bar.height as i32 } else { 0 };
+                        let (ox, oy, ow, oh) = self
+                            .output_sizes
+                            .get(self.focused_output)
+                            .copied()
+                            .unwrap_or_default();
+                        let bar_h = if self.cfg.bar.enabled {
+                            self.cfg.bar.height as i32
+                        } else {
+                            0
+                        };
 
                         if self.overview.is_task_panel() {
-                         // Task Panel：用真实 slot 缩放布局计算点击区域
-                         let panel_h = (oh as f32 * 0.35) as i32;
-                         let thumb_scale = (panel_h as f32 - 40.0) / oh as f32;
-                         let thumb_ow = (ow as f32 * thumb_scale) as i32;
-                         let thumb_ox = (ow - thumb_ow) / 2;
-                         let panel_y = oh - panel_h;
+                            // Task Panel：用真实 slot 缩放布局计算点击区域
+                            let panel_h = (oh as f32 * 0.35) as i32;
+                            let thumb_scale = (panel_h as f32 - 40.0) / oh as f32;
+                            let thumb_ow = (ow as f32 * thumb_scale) as i32;
+                            let thumb_ox = (ow - thumb_ow) / 2;
+                            let panel_y = oh - panel_h;
 
-                         // 收集点击区域（释放 ws 借用后再操作）
-                         let hit_slots: Vec<(WindowSlot, i32, i32, i32, i32)> = {
-                              let ws = &self.workspaces[self.active_ws];
-                              let order = ws.effective_order();
-                              let n = order.len();
-                              order.iter().enumerate().map(|(i, slot)| {
-                                    let (sx, sy, sw, sh) = layout::slot(
-                                         i, n, ow, oh, bar_h, &self.cfg,
-                                         ws.layout, ws.split,
-                                    );
-                                    (slot.clone(),
-                                     thumb_ox + (sx as f32 * thumb_scale) as i32,
-                                     panel_y + 20 + (sy as f32 * thumb_scale) as i32,
-                                     (sw as f32 * thumb_scale) as i32,
-                                     (sh as f32 * thumb_scale) as i32)
-                              }).collect()
-                         };
+                            // 收集点击区域（释放 ws 借用后再操作）
+                            let hit_slots: Vec<(WindowSlot, i32, i32, i32, i32)> = {
+                                let ws = &self.workspaces[self.active_ws];
+                                let order = ws.effective_order();
+                                let n = order.len();
+                                order
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, slot)| {
+                                        let (sx, sy, sw, sh) = layout::slot(
+                                            i, n, ow, oh, bar_h, &self.cfg, ws.layout, ws.split,
+                                        );
+                                        (
+                                            slot.clone(),
+                                            thumb_ox + (sx as f32 * thumb_scale) as i32,
+                                            panel_y + 20 + (sy as f32 * thumb_scale) as i32,
+                                            (sw as f32 * thumb_scale) as i32,
+                                            (sh as f32 * thumb_scale) as i32,
+                                        )
+                                    })
+                                    .collect()
+                            };
 
-                         for (slot, tx, ty, tw, th) in &hit_slots {
-                              if px >= *tx && px < *tx + *tw && py >= *ty && py < *ty + *th {
+                            for (slot, tx, ty, tw, th) in &hit_slots {
+                                if px >= *tx && px < *tx + *tw && py >= *ty && py < *ty + *th {
                                     match slot {
-                                         WindowSlot::Wl(idx) => {
-                                              let surf = {
-                                                   let ws = &self.workspaces[self.active_ws];
-                                                   ws.tops.get(*idx).map(|tl| tl.wl_surface().clone())
-                                              };
-                                              if let Some(surf) = surf {
-                                                   self.workspaces[self.active_ws].focus = Some(surf.clone());
-                                                   let kbd = self.kbd.clone();
-                                                   let serial = SERIAL_COUNTER.next_serial();
-                                                   kbd.set_focus(self, Some(surf.clone()), serial);
-                                                   let ws = &self.workspaces[self.active_ws];
-                                                   if let Some(tl) = ws.tops.get(*idx) {
-                                                        tl.with_pending_state(|st| {
-                                                             st.states.set(xdg_toplevel::State::Activated);
-                                                        });
-                                                        tl.send_configure();
-                                                   }
-                                              }
-                                         }
-                                         WindowSlot::X11(idx) => {
-                                              let wl = {
-                                                   let ws = &self.workspaces[self.active_ws];
-                                                   ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface().map(|s| s.clone()))
-                                              };
-                                              if let Some(wl) = wl {
-                                                   self.workspaces[self.active_ws].focus = Some(wl.clone());
-                                                   let kbd = self.kbd.clone();
-                                                   let serial = SERIAL_COUNTER.next_serial();
-                                                   kbd.set_focus(self, Some(wl.clone()), serial);
-                                              }
-                                         }
+                                        WindowSlot::Wl(idx) => {
+                                            let surf = {
+                                                let ws = &self.workspaces[self.active_ws];
+                                                ws.tops.get(*idx).map(|tl| tl.wl_surface().clone())
+                                            };
+                                            if let Some(surf) = surf {
+                                                self.workspaces[self.active_ws].focus =
+                                                    Some(surf.clone());
+                                                let kbd = self.kbd.clone();
+                                                let serial = SERIAL_COUNTER.next_serial();
+                                                kbd.set_focus(self, Some(surf.clone()), serial);
+                                                let ws = &self.workspaces[self.active_ws];
+                                                if let Some(tl) = ws.tops.get(*idx) {
+                                                    tl.with_pending_state(|st| {
+                                                        st.states
+                                                            .set(xdg_toplevel::State::Activated);
+                                                    });
+                                                    tl.send_configure();
+                                                }
+                                            }
+                                        }
+                                        WindowSlot::X11(idx) => {
+                                            let wl = {
+                                                let ws = &self.workspaces[self.active_ws];
+                                                ws.x11_surfaces.get(*idx).and_then(|xs| {
+                                                    xs.wl_surface().map(|s| s.clone())
+                                                })
+                                            };
+                                            if let Some(wl) = wl {
+                                                self.workspaces[self.active_ws].focus =
+                                                    Some(wl.clone());
+                                                let kbd = self.kbd.clone();
+                                                let serial = SERIAL_COUNTER.next_serial();
+                                                kbd.set_focus(self, Some(wl.clone()), serial);
+                                            }
+                                        }
                                     }
                                     self.overview.close();
                                     self.dirty = true;
                                     return;
-                              }
-                         }
-                         // 点击面板空白区域 → 关闭
-                         if py >= panel_y {
-                              self.overview.close();
-                              self.dirty = true;
-                         }
+                                }
+                            }
+                            // 点击面板空白区域 → 关闭
+                            if py >= panel_y {
+                                self.overview.close();
+                                self.dirty = true;
+                            }
                         }
                         // Expose 模式：点击选窗口（全局视图，通过 expose_thumbs 做命中测试）
                         if self.overview.is_expose() {
                             // 先收集命中信息，再执行操作，避免借用冲突
-                            let hit: Option<(usize, WindowSlot)> = self.expose_thumbs.iter()
-                                .find(|(tx, ty, tw, th, _, _)| px >= *tx && px < *tx + *tw && py >= *ty && py < *ty + *th)
-                                .map(|&(_, _, _, _, target_ws, ref slot)| (target_ws, slot.clone()));
+                            let hit: Option<(usize, WindowSlot)> = self
+                                .expose_thumbs
+                                .iter()
+                                .find(|(tx, ty, tw, th, _, _)| {
+                                    px >= *tx && px < *tx + *tw && py >= *ty && py < *ty + *th
+                                })
+                                .map(|&(_, _, _, _, target_ws, ref slot)| {
+                                    (target_ws, slot.clone())
+                                });
                             if let Some((target_ws, slot)) = hit {
                                 let focus_surf: Option<WlSurface> = match &slot {
-                                    WindowSlot::Wl(idx) => {
-                                        self.workspaces[target_ws].tops.get(*idx).map(|tl| tl.wl_surface().clone())
-                                    }
-                                    WindowSlot::X11(idx) => {
-                                        self.workspaces[target_ws].x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface())
-                                    }
+                                    WindowSlot::Wl(idx) => self.workspaces[target_ws]
+                                        .tops
+                                        .get(*idx)
+                                        .map(|tl| tl.wl_surface().clone()),
+                                    WindowSlot::X11(idx) => self.workspaces[target_ws]
+                                        .x11_surfaces
+                                        .get(*idx)
+                                        .and_then(|xs| xs.wl_surface()),
                                 };
                                 if let Some(surf) = focus_surf {
                                     self.workspaces[target_ws].focus = Some(surf.clone());
@@ -2311,10 +2413,12 @@ impl App {
                             if let Some(fi) = ws.fullscreen {
                                 if let Some(slot) = order.get(fi) {
                                     let surf = match slot {
-                                        WindowSlot::Wl(idx) => ws.tops.get(*idx)
-                                            .map(|tl| tl.wl_surface().clone()),
-                                        WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx)
-                                            .and_then(|xs| xs.wl_surface()),
+                                        WindowSlot::Wl(idx) => {
+                                            ws.tops.get(*idx).map(|tl| tl.wl_surface().clone())
+                                        }
+                                        WindowSlot::X11(idx) => {
+                                            ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface())
+                                        }
                                     };
                                     if let Some(surf) = surf {
                                         self.workspaces[ws_idx].focus = Some(surf.clone());
@@ -2467,7 +2571,8 @@ impl XdgShellHandler for App {
 
         self.pending_tops.push(s);
         // 标记打开动画（pending 确认后实际加入 ws 时再触发）
-        self.window_anims.push((self.active_ws, std::time::Instant::now(), true));
+        self.window_anims
+            .push((self.active_ws, std::time::Instant::now(), true));
         self.dirty = true;
     }
     fn new_popup(&mut self, popup: PopupSurface, _positioner: PositionerState) {
@@ -2555,15 +2660,19 @@ impl XdgShellHandler for App {
         let wl = surface.wl_surface().clone();
         // 搜索所有工作区
         for ws_idx in 0..self.workspaces.len() {
-            let closed_idx = self.workspaces[ws_idx].tops.iter().position(|tl| {
-                tl.wl_surface() == &wl
-            });
+            let closed_idx = self.workspaces[ws_idx]
+                .tops
+                .iter()
+                .position(|tl| tl.wl_surface() == &wl);
             if let Some(idx) = closed_idx {
                 info!("🗑️ toplevel_destroyed (ws={}, idx={})", ws_idx, idx);
-                self.workspaces[ws_idx].tops.retain(|tl| tl.wl_surface() != &wl);
+                self.workspaces[ws_idx]
+                    .tops
+                    .retain(|tl| tl.wl_surface() != &wl);
                 self.remap_prev_after_remove(&WindowSlot::Wl(idx));
                 // 关闭动画
-                self.window_anims.push((ws_idx, std::time::Instant::now(), false));
+                self.window_anims
+                    .push((ws_idx, std::time::Instant::now(), false));
                 self.dirty = true;
                 // fullscreen 清理
                 if let Some(fi) = self.workspaces[ws_idx].fullscreen {
@@ -2580,8 +2689,14 @@ impl XdgShellHandler for App {
                 if self.workspaces[ws_idx].focus.as_ref() == Some(&wl) {
                     let order = self.workspaces[ws_idx].effective_order();
                     self.workspaces[ws_idx].focus = order.last().and_then(|s| match s {
-                        WindowSlot::Wl(i) => self.workspaces[ws_idx].tops.get(*i).map(|tl| tl.wl_surface().clone()),
-                        WindowSlot::X11(i) => self.workspaces[ws_idx].x11_surfaces.get(*i).and_then(|xs| xs.wl_surface()),
+                        WindowSlot::Wl(i) => self.workspaces[ws_idx]
+                            .tops
+                            .get(*i)
+                            .map(|tl| tl.wl_surface().clone()),
+                        WindowSlot::X11(i) => self.workspaces[ws_idx]
+                            .x11_surfaces
+                            .get(*i)
+                            .and_then(|xs| xs.wl_surface()),
                     });
                 }
                 // relayout
@@ -2893,7 +3008,8 @@ impl CompositorHandler for App {
                 }
                 info!("🗑️ 窗口关闭 (工作区 {})", ws_idx + 1);
                 // 触发关闭动画（装饰层发光脉冲）
-                self.window_anims.push((ws_idx, std::time::Instant::now(), false));
+                self.window_anims
+                    .push((ws_idx, std::time::Instant::now(), false));
                 self.dirty = true;
                 // 清理 fullscreen：只在关闭的窗口是全屏窗口时才清除
                 if let Some(fi) = self.workspaces[ws_idx].fullscreen {
@@ -3636,10 +3752,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // stderr 不重定向，让错误出现在 session log。
     let uid = unsafe { libc::getuid() };
     let xdg_runtime = format!("/run/user/{uid}");
-    let backend_path = ["/usr/libexec/xdg-desktop-portal-gtk", "/usr/libexec/xdg-desktop-portal-wlr"]
-        .iter()
-        .find(|p| std::path::Path::new(p).exists())
-        .copied();
+    let backend_path = [
+        "/usr/libexec/xdg-desktop-portal-gtk",
+        "/usr/libexec/xdg-desktop-portal-wlr",
+    ]
+    .iter()
+    .find(|p| std::path::Path::new(p).exists())
+    .copied();
     if let Some(backend) = backend_path {
         if std::process::Command::new(backend)
             .env("WAYLAND_DISPLAY", "wayland-anchor")
@@ -3805,7 +3924,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ws_anim_elapsed = state.ws_anim.start.map(|s| s.elapsed().as_millis() as u64);
 
             // ── 预计算工作区窗口数（避免 Step 4.8 + Step 5 重复计算）──
-            let ws_counts: Vec<usize> = state.workspaces.iter()
+            let ws_counts: Vec<usize> = state
+                .workspaces
+                .iter()
                 .map(|w| w.tops.len() + w.x11_surfaces.len())
                 .collect();
 
@@ -3818,7 +3939,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                 if !state.gesture_active {
                     state.scroll_offset = state.scroll_spring.update(dt);
-                    if state.scroll_momentum.is_stopped(0.5) && state.scroll_spring.is_settled(0.001) {
+                    if state.scroll_momentum.is_stopped(0.5)
+                        && state.scroll_spring.is_settled(0.001)
+                    {
                         let snapped = state.scroll_offset.round();
                         state.scroll_spring.set(snapped);
                         state.scroll_offset = snapped;
@@ -3949,7 +4072,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         let mut task_panel_thumbs: Vec<ThumbItem> = Vec::new();
                         let mut scratchpad_data: Option<(i32, i32, i32, i32)> = None; // (x, y, w, h)
-                        // 预计算 slot 位置缓存（在正常模式分支中填充，Step 3 复用）
+                                                                                      // 预计算 slot 位置缓存（在正常模式分支中填充，Step 3 复用）
                         let mut slot_cache: Vec<(i32, i32, i32, i32)> = Vec::new();
 
                         // 每个 output 都渲染自己工作区的窗口（不再限制 is_primary）
@@ -4033,10 +4156,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 // 渲染当前 ws 的窗口（和之前一样）
                                 let order = &out_order;
                                 // 预计算所有 slot 位置（避免 Phase 1 + Step 3 重复计算）
-                                slot_cache = order.iter().enumerate().map(|(i, _)| {
-                                    layout::slot(i, order.len(), ow, oh, bar_h, &state.cfg,
-                                        state.workspaces[out_ws_idx].layout, state.workspaces[out_ws_idx].split)
-                                }).collect();
+                                slot_cache = order
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, _)| {
+                                        layout::slot(
+                                            i,
+                                            order.len(),
+                                            ow,
+                                            oh,
+                                            bar_h,
+                                            &state.cfg,
+                                            state.workspaces[out_ws_idx].layout,
+                                            state.workspaces[out_ws_idx].split,
+                                        )
+                                    })
+                                    .collect();
                                 for (i, slot) in order.iter().enumerate() {
                                     let (x, y, _w, _h) = slot_cache[i];
                                     let (layout_dx, layout_dy) = if is_focused_output {
@@ -4124,7 +4259,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             vec![current_int - 1]
                                         };
                                         for neighbor_ws in neighbors {
-                                            if neighbor_ws < 0 || neighbor_ws as usize >= NUM_WORKSPACES {
+                                            if neighbor_ws < 0
+                                                || neighbor_ws as usize >= NUM_WORKSPACES
+                                            {
                                                 continue;
                                             }
                                             let nws_idx = neighbor_ws as usize;
@@ -4136,12 +4273,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             let n_order = nws.effective_order();
                                             let n_n = n_order.len();
                                             // 这个相邻 ws 相对于 scroll_offset 的偏移
-                                            let n_ws_offset = ((nws_idx as f64 - state.scroll_offset) * ow as f64) as i32;
+                                            let n_ws_offset = ((nws_idx as f64
+                                                - state.scroll_offset)
+                                                * ow as f64)
+                                                as i32;
 
                                             for (i, nslot) in n_order.iter().enumerate() {
                                                 let (nx, ny, _, _) = layout::slot(
-                                                    i, n_n, ow, oh, bar_h, &state.cfg,
-                                                    nws.layout, nws.split,
+                                                    i, n_n, ow, oh, bar_h, &state.cfg, nws.layout,
+                                                    nws.split,
                                                 );
                                                 match nslot {
                                                     WindowSlot::Wl(idx) => {
@@ -4149,19 +4289,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                             let tl_geo = smithay::wayland::compositor::with_states(tl.wl_surface(), |states| {
                                                                 states.cached_state.get::<smithay::wayland::shell::xdg::SurfaceCachedState>().current().geometry
                                                             }).unwrap_or_default();
-                                                            let bx = nx - tl_geo.loc.x + n_ws_offset;
+                                                            let bx =
+                                                                nx - tl_geo.loc.x + n_ws_offset;
                                                             let by = ny - tl_geo.loc.y;
-                                                            win_elems.push(render_elements_from_surface_tree(
-                                                                &mut renderer,
-                                                                tl.wl_surface(),
-                                                                Point::<i32, Physical>::from((bx, by)),
-                                                                1.0, 1.0, Kind::Unspecified,
-                                                            ));
+                                                            win_elems.push(
+                                                                render_elements_from_surface_tree(
+                                                                    &mut renderer,
+                                                                    tl.wl_surface(),
+                                                                    Point::<i32, Physical>::from((
+                                                                        bx, by,
+                                                                    )),
+                                                                    1.0,
+                                                                    1.0,
+                                                                    Kind::Unspecified,
+                                                                ),
+                                                            );
                                                             popup_elems.push(Vec::new());
                                                         }
                                                     }
                                                     WindowSlot::X11(idx) => {
-                                                        if let Some(xs) = nws.x11_surfaces.get(*idx) {
+                                                        if let Some(xs) = nws.x11_surfaces.get(*idx)
+                                                        {
                                                             if let Some(wl) = xs.wl_surface() {
                                                                 win_elems.push(render_elements_from_surface_tree(
                                                                     &mut renderer,
@@ -4321,7 +4469,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let base_scale: f32 = 0.55;
                                 let scale: f32 = 1.0 - (1.0 - base_scale) * progress as f32;
                                 let scroll_offset = match &state.overview {
-                                    OverviewState::TaskPanel { scroll_offset, .. } => *scroll_offset,
+                                    OverviewState::TaskPanel { scroll_offset, .. } => {
+                                        *scroll_offset
+                                    }
                                     _ => state.active_ws as f64,
                                 };
                                 let scaled_w = (ow as f32 * scale) as i32;
@@ -4337,20 +4487,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let ws = &state.workspaces[ws_i];
                                     let order = ws.effective_order();
                                     let n = order.len();
-                                    if n == 0 { continue; }
+                                    if n == 0 {
+                                        continue;
+                                    }
 
                                     // 这个 ws 的水平偏移（相对于 scroll_offset）
-                                    let ws_screen_x = center_offset + (ws_i as f32 - scroll_offset as f32) * ws_spacing;
+                                    let ws_screen_x = center_offset
+                                        + (ws_i as f32 - scroll_offset as f32) * ws_spacing;
                                     // 只收集可见范围内的 ws（略大于屏幕）
-                                    if (ws_screen_x + ws_spacing) < -(scaled_w as f32 * 0.5) { continue; }
-                                    if ws_screen_x > (ow as f32 + scaled_w as f32 * 0.5) { continue; }
+                                    if (ws_screen_x + ws_spacing) < -(scaled_w as f32 * 0.5) {
+                                        continue;
+                                    }
+                                    if ws_screen_x > (ow as f32 + scaled_w as f32 * 0.5) {
+                                        continue;
+                                    }
 
                                     let ws_offset_x = ws_screen_x as i32;
 
                                     for (i, slot) in order.iter().enumerate() {
                                         let (sx, sy, sw, sh) = layout::slot(
-                                            i, n, ow, oh, bar_h, &state.cfg,
-                                            ws.layout, ws.split,
+                                            i, n, ow, oh, bar_h, &state.cfg, ws.layout, ws.split,
                                         );
                                         let tx = ws_offset_x + (sx as f32 * scale) as i32;
                                         let ty = base_y + (sy as f32 * scale) as i32;
@@ -4370,33 +4526,48 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         if let Some(elems) = match slot {
                                             WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| {
                                                 render_elements_from_surface_tree(
-                                                    &mut renderer, tl.wl_surface(),
+                                                    &mut renderer,
+                                                    tl.wl_surface(),
                                                     Point::<i32, Physical>::from((loc_x, loc_y)),
-                                                    1.0, 1.0, Kind::Unspecified,
+                                                    1.0,
+                                                    1.0,
+                                                    Kind::Unspecified,
                                                 )
                                             }),
-                                            WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()).map(|wl| {
-                                                render_elements_from_surface_tree(
-                                                    &mut renderer, &wl,
-                                                    Point::<i32, Physical>::from((loc_x, loc_y)),
-                                                    1.0, 1.0, Kind::Unspecified,
-                                                )
-                                            }),
+                                            WindowSlot::X11(idx) => ws
+                                                .x11_surfaces
+                                                .get(*idx)
+                                                .and_then(|xs| xs.wl_surface())
+                                                .map(|wl| {
+                                                    render_elements_from_surface_tree(
+                                                        &mut renderer,
+                                                        &wl,
+                                                        Point::<i32, Physical>::from((
+                                                            loc_x, loc_y,
+                                                        )),
+                                                        1.0,
+                                                        1.0,
+                                                        Kind::Unspecified,
+                                                    )
+                                                }),
                                         } {
                                             if !elems.is_empty() {
                                                 let title = match slot {
-                                                    WindowSlot::Wl(idx) => {
-                                                        state.window_app_ids.get(idx).cloned()
-                                                            .unwrap_or_else(|| "Window".to_string())
-                                                    }
-                                                    WindowSlot::X11(xidx) => {
-                                                        ws.x11_surfaces.get(*xidx)
-                                                            .map(|xs| xs.class())
-                                                            .unwrap_or_else(|| "X11".to_string())
-                                                    }
+                                                    WindowSlot::Wl(idx) => state
+                                                        .window_app_ids
+                                                        .get(idx)
+                                                        .cloned()
+                                                        .unwrap_or_else(|| "Window".to_string()),
+                                                    WindowSlot::X11(xidx) => ws
+                                                        .x11_surfaces
+                                                        .get(*xidx)
+                                                        .map(|xs| xs.class())
+                                                        .unwrap_or_else(|| "X11".to_string()),
                                                 };
                                                 task_panel_thumbs.push(ThumbItem {
-                                                    elems, tx, ty,
+                                                    elems,
+                                                    tx,
+                                                    ty,
                                                     tw: (sw as f32 * scale) as i32,
                                                     th: (sh as f32 * scale) as i32,
                                                     scale: scale as f64,
@@ -4428,13 +4599,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let grid_w = ow - 2 * margin;
                                     let grid_h = oh - top_margin - margin;
 
-                                    let active_ws_count = (0..NUM_WORKSPACES).filter(|&i| {
-                                        state.workspaces[i].tops.len() + state.workspaces[i].x11_surfaces.len() > 0
-                                    }).count();
+                                    let active_ws_count = (0..NUM_WORKSPACES)
+                                        .filter(|&i| {
+                                            state.workspaces[i].tops.len()
+                                                + state.workspaces[i].x11_surfaces.len()
+                                                > 0
+                                        })
+                                        .count();
 
                                     let card_w = if active_ws_count > 0 {
-                                        (grid_w - (active_ws_count as i32 - 1).max(0) * ws_gap) / active_ws_count as i32
-                                    } else { grid_w };
+                                        (grid_w - (active_ws_count as i32 - 1).max(0) * ws_gap)
+                                            / active_ws_count as i32
+                                    } else {
+                                        grid_w
+                                    };
                                     let card_h = grid_h;
 
                                     let mut card_x_offset = margin;
@@ -4442,24 +4620,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         let ws = &state.workspaces[ws_i];
                                         let order = ws.effective_order();
                                         let n = order.len();
-                                        if n == 0 { continue; }
+                                        if n == 0 {
+                                            continue;
+                                        }
 
                                         let cols = (n as f32).sqrt().ceil() as usize;
                                         let rows = (n + cols - 1) / cols;
-                                        let cell_w = (card_w - (cols as i32 - 1).max(0) * gap) / cols as i32;
-                                        let cell_h = (card_h - 24 - (rows as i32 - 1).max(0) * gap) / rows as i32;
-                                        let thumb_scale = (cell_w as f32 / ow as f32).min(cell_h as f32 / oh as f32);
+                                        let cell_w =
+                                            (card_w - (cols as i32 - 1).max(0) * gap) / cols as i32;
+                                        let cell_h = (card_h - 24 - (rows as i32 - 1).max(0) * gap)
+                                            / rows as i32;
+                                        let thumb_scale = (cell_w as f32 / ow as f32)
+                                            .min(cell_h as f32 / oh as f32);
                                         let thumb_w = (ow as f32 * thumb_scale) as i32;
                                         let thumb_h = (oh as f32 * thumb_scale) as i32;
 
                                         for (i, slot) in order.iter().enumerate() {
                                             let col = i % cols;
                                             let row = i / cols;
-                                            let tx = card_x_offset + col as i32 * (cell_w + gap) + (cell_w - thumb_w) / 2;
-                                            let ty = top_margin + 24 + row as i32 * (cell_h + gap) + (cell_h - thumb_h) / 2;
+                                            let tx = card_x_offset
+                                                + col as i32 * (cell_w + gap)
+                                                + (cell_w - thumb_w) / 2;
+                                            let ty = top_margin
+                                                + 24
+                                                + row as i32 * (cell_h + gap)
+                                                + (cell_h - thumb_h) / 2;
 
                                             // 性能优化：跳过屏幕外的缩略图
-                                            if tx + thumb_w < 0 || tx > ow { continue; }
+                                            if tx + thumb_w < 0 || tx > ow {
+                                                continue;
+                                            }
 
                                             let (gx, gy) = match slot {
                                                 WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| {
@@ -4474,49 +4664,79 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             let loc_y = ty - (gy as f32 * thumb_scale) as i32;
 
                                             if let Some(elems) = match slot {
-                                                WindowSlot::Wl(idx) => ws.tops.get(*idx).map(|tl| {
-                                                    render_elements_from_surface_tree(
-                                                        &mut renderer, tl.wl_surface(),
-                                                        Point::<i32, Physical>::from((loc_x, loc_y)),
-                                                        1.0, 1.0, Kind::Unspecified,
-                                                    )
-                                                }),
-                                                WindowSlot::X11(idx) => ws.x11_surfaces.get(*idx).and_then(|xs| xs.wl_surface()).map(|wl| {
-                                                    render_elements_from_surface_tree(
-                                                        &mut renderer, &wl,
-                                                        Point::<i32, Physical>::from((loc_x, loc_y)),
-                                                        1.0, 1.0, Kind::Unspecified,
-                                                    )
-                                                }),
+                                                WindowSlot::Wl(idx) => {
+                                                    ws.tops.get(*idx).map(|tl| {
+                                                        render_elements_from_surface_tree(
+                                                            &mut renderer,
+                                                            tl.wl_surface(),
+                                                            Point::<i32, Physical>::from((
+                                                                loc_x, loc_y,
+                                                            )),
+                                                            1.0,
+                                                            1.0,
+                                                            Kind::Unspecified,
+                                                        )
+                                                    })
+                                                }
+                                                WindowSlot::X11(idx) => ws
+                                                    .x11_surfaces
+                                                    .get(*idx)
+                                                    .and_then(|xs| xs.wl_surface())
+                                                    .map(|wl| {
+                                                        render_elements_from_surface_tree(
+                                                            &mut renderer,
+                                                            &wl,
+                                                            Point::<i32, Physical>::from((
+                                                                loc_x, loc_y,
+                                                            )),
+                                                            1.0,
+                                                            1.0,
+                                                            Kind::Unspecified,
+                                                        )
+                                                    }),
                                             } {
                                                 if !elems.is_empty() {
                                                     let title = match slot {
-                                                        WindowSlot::Wl(idx) => {
-                                                            state.window_app_ids.get(idx).cloned()
-                                                                .unwrap_or_else(|| "Window".to_string())
-                                                        }
-                                                        WindowSlot::X11(xidx) => {
-                                                            ws.x11_surfaces.get(*xidx)
-                                                                .map(|xs| xs.class())
-                                                                .unwrap_or_else(|| "X11".to_string())
-                                                        }
+                                                        WindowSlot::Wl(idx) => state
+                                                            .window_app_ids
+                                                            .get(idx)
+                                                            .cloned()
+                                                            .unwrap_or_else(|| {
+                                                                "Window".to_string()
+                                                            }),
+                                                        WindowSlot::X11(xidx) => ws
+                                                            .x11_surfaces
+                                                            .get(*xidx)
+                                                            .map(|xs| xs.class())
+                                                            .unwrap_or_else(|| "X11".to_string()),
                                                     };
 
                                                     // 动画起点：active_ws 窗口使用原始 slot 位置，其他 ws 窗口从目标位置开始
-                                                    let (from_x, from_y) = if ws_i == state.active_ws {
-                                                        let (sx, sy, _, _) = layout::slot(
-                                                            i, n, ow, oh, bar_h, &state.cfg, ws.layout, ws.split,
-                                                        );
-                                                        (sx, sy)
-                                                    } else {
-                                                        (tx, ty)
-                                                    };
+                                                    let (from_x, from_y) =
+                                                        if ws_i == state.active_ws {
+                                                            let (sx, sy, _, _) = layout::slot(
+                                                                i, n, ow, oh, bar_h, &state.cfg,
+                                                                ws.layout, ws.split,
+                                                            );
+                                                            (sx, sy)
+                                                        } else {
+                                                            (tx, ty)
+                                                        };
 
                                                     // 存储点击区域信息
-                                                    state.expose_thumbs.push((tx, ty, thumb_w, thumb_h, ws_i, slot.clone()));
+                                                    state.expose_thumbs.push((
+                                                        tx,
+                                                        ty,
+                                                        thumb_w,
+                                                        thumb_h,
+                                                        ws_i,
+                                                        slot.clone(),
+                                                    ));
 
                                                     task_panel_thumbs.push(ThumbItem {
-                                                        elems, tx, ty,
+                                                        elems,
+                                                        tx,
+                                                        ty,
                                                         tw: thumb_w,
                                                         th: thumb_h,
                                                         scale: thumb_scale as f64,
@@ -4585,9 +4805,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                         // ── 视差偏移：壁纸层移动较慢（×0.3）产生深度感 ──
                         let parallax_wallpaper = if is_focused_output {
-                            let fractional = state.scroll_offset - (state.scroll_offset.round() as f64);
+                            let fractional =
+                                state.scroll_offset - (state.scroll_offset.round() as f64);
                             (fractional * ow as f64 * 0.3) as i32
-                        } else { 0 };
+                        } else {
+                            0
+                        };
 
                         if let Some(ref _tex) = state.wallpaper_texture {
                             if let Some(ref wp) = state.wallpaper_cache.pixels {
@@ -4660,7 +4883,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Step 3: Window decorations — 每个 output 都渲染自己工作区的装饰
                         if fullscreen.is_none() {
                             // 计算窗口打开/关闭动画的发光脉冲强度
-                            let anim_glow: f32 = state.window_anims.iter()
+                            let anim_glow: f32 = state
+                                .window_anims
+                                .iter()
                                 .filter(|(ws_i, _, _)| *ws_i == out_ws_idx)
                                 .map(|(_, time, is_open): &(_, std::time::Instant, bool)| {
                                     let elapsed = time.elapsed().as_millis() as f32;
@@ -4670,7 +4895,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     pulse * 0.6
                                 })
                                 .fold(0.0f32, |a, b| a.max(b));
-                            state.window_anims.retain(|(_, t, _): &(usize, std::time::Instant, bool)| t.elapsed().as_millis() < 500);
+                            state.window_anims.retain(
+                                |(_, t, _): &(usize, std::time::Instant, bool)| {
+                                    t.elapsed().as_millis() < 500
+                                },
+                            );
 
                             let order = &out_order;
                             for (i, slot) in order.iter().enumerate() {
@@ -4689,7 +4918,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         if let Some(tl) = out_ws.tops.get(*idx) {
                                             let (h, csd) = get_header_bar_info(tl);
                                             // 全局配置作为 fallback
-                                            let final_h = if h > 0 { h } else if !csd { state.cfg.layout.header_bar_height } else { 0 };
+                                            let final_h = if h > 0 {
+                                                h
+                                            } else if !csd {
+                                                state.cfg.layout.header_bar_height
+                                            } else {
+                                                0
+                                            };
                                             (final_h, csd)
                                         } else {
                                             (state.cfg.layout.header_bar_height, false)
@@ -4753,15 +4988,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 .ok();
                             // 顶部发光扩散
                             for (off, br) in [(1, 0.3f32), (2, 0.15), (3, 0.06)].iter() {
-                                let glow = layout::opaque(accent.0 * br, accent.1 * br, accent.2 * br);
-                                f.clear(glow, &[layout::rect(sp_x - bw - off, sp_y - bw - off, sp_w + 2 * (bw + off), *off)]).ok();
+                                let glow =
+                                    layout::opaque(accent.0 * br, accent.1 * br, accent.2 * br);
+                                f.clear(
+                                    glow,
+                                    &[layout::rect(
+                                        sp_x - bw - off,
+                                        sp_y - bw - off,
+                                        sp_w + 2 * (bw + off),
+                                        *off,
+                                    )],
+                                )
+                                .ok();
                             }
                             // 底部阴影
                             for (off, br) in [(0i32, 0.10f32), (1, 0.05), (2, 0.02)].iter() {
                                 f.clear(
                                     layout::opaque(0.0 * br, 0.0 * br, 0.0 * br),
-                                    &[layout::rect(sp_x - bw - 2, sp_y + sp_h + bw + off, sp_w + 2 * bw + 4, 1)],
-                                ).ok();
+                                    &[layout::rect(
+                                        sp_x - bw - 2,
+                                        sp_y + sp_h + bw + off,
+                                        sp_w + 2 * bw + 4,
+                                        1,
+                                    )],
+                                )
+                                .ok();
                             }
                             f.clear(border, &[layout::rect(sp_x + sp_w, sp_y, bw, sp_h)])
                                 .ok();
@@ -4786,7 +5037,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // Step 4.8: Overview overlay (Task Panel / Bird's Eye View)
                         if is_focused_output && state.overview.is_active() {
                             let progress = state.overview.progress();
-                            let titles: Vec<String> = (0..state.workspaces[state.active_ws].tops.len() + state.workspaces[state.active_ws].x11_surfaces.len())
+                            let titles: Vec<String> = (0..state.workspaces[state.active_ws]
+                                .tops
+                                .len()
+                                + state.workspaces[state.active_ws].x11_surfaces.len())
                                 .map(|i| state.window_titles.get(&i).cloned().unwrap_or_default())
                                 .collect();
 
@@ -4797,11 +5051,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 f.clear(
                                     Color32F::new(0.02, 0.02, 0.06, alpha),
                                     &[Rectangle::from_size((ow, oh).into())],
-                                ).ok();
+                                )
+                                .ok();
 
-                                let focus_color = layout::opaque(state.cached_focus_color.0, state.cached_focus_color.1, state.cached_focus_color.2);
+                                let focus_color = layout::opaque(
+                                    state.cached_focus_color.0,
+                                    state.cached_focus_color.1,
+                                    state.cached_focus_color.2,
+                                );
                                 let scroll_offset = match &state.overview {
-                                    OverviewState::TaskPanel { scroll_offset, .. } => *scroll_offset,
+                                    OverviewState::TaskPanel { scroll_offset, .. } => {
+                                        *scroll_offset
+                                    }
                                     _ => state.active_ws as f64,
                                 };
                                 // scale 从 1.0→0.55 随 progress 插值（视角拉远动画）
@@ -4817,9 +5078,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 for ws_i in 0..NUM_WORKSPACES {
                                     let ws = &state.workspaces[ws_i];
                                     let n = ws.tops.len() + ws.x11_surfaces.len();
-                                    let ws_screen_x = center_offset + (ws_i as f32 - scroll_offset as f32) * ws_spacing;
-                                    if (ws_screen_x + ws_spacing) < -(scaled_w as f32 * 0.5) { continue; }
-                                    if ws_screen_x > (ow as f32 + scaled_w as f32 * 0.5) { continue; }
+                                    let ws_screen_x = center_offset
+                                        + (ws_i as f32 - scroll_offset as f32) * ws_spacing;
+                                    if (ws_screen_x + ws_spacing) < -(scaled_w as f32 * 0.5) {
+                                        continue;
+                                    }
+                                    if ws_screen_x > (ow as f32 + scaled_w as f32 * 0.5) {
+                                        continue;
+                                    }
 
                                     let card_x = ws_screen_x as i32;
                                     let card_y = base_y;
@@ -4831,22 +5097,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     } else {
                                         Color32F::new(0.08, 0.08, 0.14, 0.3)
                                     };
-                                    f.clear(card_bg, &[Rectangle::from_loc_and_size((card_x, card_y), (scaled_w, scaled_h))]).ok();
+                                    f.clear(
+                                        card_bg,
+                                        &[Rectangle::from_loc_and_size(
+                                            (card_x, card_y),
+                                            (scaled_w, scaled_h),
+                                        )],
+                                    )
+                                    .ok();
 
                                     // ws 边框
                                     let border_br: f32 = if is_selected { 0.5 } else { 0.15 };
-                                    let bc = Color32F::new(focus_color.r() * border_br, focus_color.g() * border_br, focus_color.b() * border_br, 1.0);
-                                    f.clear(bc, &[layout::rect(card_x, card_y, scaled_w, 1)]).ok();
-                                    f.clear(bc, &[layout::rect(card_x, card_y + scaled_h - 1, scaled_w, 1)]).ok();
-                                    f.clear(bc, &[layout::rect(card_x, card_y, 1, scaled_h)]).ok();
-                                    f.clear(bc, &[layout::rect(card_x + scaled_w - 1, card_y, 1, scaled_h)]).ok();
+                                    let bc = Color32F::new(
+                                        focus_color.r() * border_br,
+                                        focus_color.g() * border_br,
+                                        focus_color.b() * border_br,
+                                        1.0,
+                                    );
+                                    f.clear(bc, &[layout::rect(card_x, card_y, scaled_w, 1)])
+                                        .ok();
+                                    f.clear(
+                                        bc,
+                                        &[layout::rect(card_x, card_y + scaled_h - 1, scaled_w, 1)],
+                                    )
+                                    .ok();
+                                    f.clear(bc, &[layout::rect(card_x, card_y, 1, scaled_h)])
+                                        .ok();
+                                    f.clear(
+                                        bc,
+                                        &[layout::rect(card_x + scaled_w - 1, card_y, 1, scaled_h)],
+                                    )
+                                    .ok();
 
                                     // 选中卡片顶部 accent 亮线
                                     if is_selected {
                                         f.clear(
-                                            Color32F::new(focus_color.r() * 0.7, focus_color.g() * 0.7, focus_color.b() * 0.7, 1.0),
+                                            Color32F::new(
+                                                focus_color.r() * 0.7,
+                                                focus_color.g() * 0.7,
+                                                focus_color.b() * 0.7,
+                                                1.0,
+                                            ),
                                             &[layout::rect(card_x, card_y, scaled_w, 2)],
-                                        ).ok();
+                                        )
+                                        .ok();
                                     }
 
                                     // WS 标签
@@ -4857,7 +5151,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         card_x + 8,
                                         card_y - 22,
                                         14.0,
-                                        (focus_color.r() * label_br, focus_color.g() * label_br, focus_color.b() * label_br),
+                                        (
+                                            focus_color.r() * label_br,
+                                            focus_color.g() * label_br,
+                                            focus_color.b() * label_br,
+                                        ),
                                     );
                                     if n > 0 {
                                         crate::text_render::draw_text(
@@ -4866,7 +5164,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             card_x + 8,
                                             card_y - 10,
                                             10.0,
-                                            (focus_color.r() * label_br * 0.5, focus_color.g() * label_br * 0.5, focus_color.b() * label_br * 0.5),
+                                            (
+                                                focus_color.r() * label_br * 0.5,
+                                                focus_color.g() * label_br * 0.5,
+                                                focus_color.b() * label_br * 0.5,
+                                            ),
                                         );
                                     }
                                 }
@@ -4884,21 +5186,55 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     // 缩略图边框（accent 发光）
                                     let border_br: f32 = 0.2;
                                     f.clear(
-                                        Color32F::new(focus_color.r() * border_br, focus_color.g() * border_br, focus_color.b() * border_br, 1.0),
+                                        Color32F::new(
+                                            focus_color.r() * border_br,
+                                            focus_color.g() * border_br,
+                                            focus_color.b() * border_br,
+                                            1.0,
+                                        ),
                                         &[layout::rect(thumb.tx, thumb.ty, thumb.tw, 1)],
-                                    ).ok();
+                                    )
+                                    .ok();
                                     f.clear(
-                                        Color32F::new(focus_color.r() * border_br, focus_color.g() * border_br, focus_color.b() * border_br, 1.0),
-                                        &[layout::rect(thumb.tx, thumb.ty + thumb.th - 1, thumb.tw, 1)],
-                                    ).ok();
+                                        Color32F::new(
+                                            focus_color.r() * border_br,
+                                            focus_color.g() * border_br,
+                                            focus_color.b() * border_br,
+                                            1.0,
+                                        ),
+                                        &[layout::rect(
+                                            thumb.tx,
+                                            thumb.ty + thumb.th - 1,
+                                            thumb.tw,
+                                            1,
+                                        )],
+                                    )
+                                    .ok();
                                     f.clear(
-                                        Color32F::new(focus_color.r() * border_br, focus_color.g() * border_br, focus_color.b() * border_br, 1.0),
+                                        Color32F::new(
+                                            focus_color.r() * border_br,
+                                            focus_color.g() * border_br,
+                                            focus_color.b() * border_br,
+                                            1.0,
+                                        ),
                                         &[layout::rect(thumb.tx, thumb.ty, 1, thumb.th)],
-                                    ).ok();
+                                    )
+                                    .ok();
                                     f.clear(
-                                        Color32F::new(focus_color.r() * border_br, focus_color.g() * border_br, focus_color.b() * border_br, 1.0),
-                                        &[layout::rect(thumb.tx + thumb.tw - 1, thumb.ty, 1, thumb.th)],
-                                    ).ok();
+                                        Color32F::new(
+                                            focus_color.r() * border_br,
+                                            focus_color.g() * border_br,
+                                            focus_color.b() * border_br,
+                                            1.0,
+                                        ),
+                                        &[layout::rect(
+                                            thumb.tx + thumb.tw - 1,
+                                            thumb.ty,
+                                            1,
+                                            thumb.th,
+                                        )],
+                                    )
+                                    .ok();
                                     // 窗口标题
                                     let display_title = if thumb.title.len() > 12 {
                                         format!("{}…", &thumb.title[..12])
@@ -4907,35 +5243,56 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     };
                                     f.clear(
                                         layout::opaque(0.03, 0.03, 0.06),
-                                        &[layout::rect(thumb.tx - 2, thumb.ty + thumb.th + 1, thumb.tw + 4, 14)],
-                                    ).ok();
+                                        &[layout::rect(
+                                            thumb.tx - 2,
+                                            thumb.ty + thumb.th + 1,
+                                            thumb.tw + 4,
+                                            14,
+                                        )],
+                                    )
+                                    .ok();
                                     crate::text_render::draw_text(
                                         &mut f,
                                         &display_title,
                                         thumb.tx,
                                         thumb.ty + thumb.th + 3,
                                         10.0,
-                                        (focus_color.r() * 0.35, focus_color.g() * 0.35, focus_color.b() * 0.35),
+                                        (
+                                            focus_color.r() * 0.35,
+                                            focus_color.g() * 0.35,
+                                            focus_color.b() * 0.35,
+                                        ),
                                     );
                                 }
-                            }
-                            else if state.overview.is_expose() {
+                            } else if state.overview.is_expose() {
                                 // ── Mission Control 全局视图 ──
                                 // 全屏暗色遮罩
                                 let alpha = (progress * 0.85).min(0.85) as f32;
                                 f.clear(
                                     Color32F::new(0.02, 0.02, 0.06, alpha),
                                     &[Rectangle::from_size((ow, oh).into())],
-                                ).ok();
+                                )
+                                .ok();
 
-                                let focus_color = layout::opaque(state.cached_focus_color.0, state.cached_focus_color.1, state.cached_focus_color.2);
+                                let focus_color = layout::opaque(
+                                    state.cached_focus_color.0,
+                                    state.cached_focus_color.1,
+                                    state.cached_focus_color.2,
+                                );
                                 let selected = state.overview.expose_selected();
 
                                 // 标题
                                 crate::text_render::draw_text(
-                                    &mut f, "Mission Control",
-                                    60, 30, 18.0,
-                                    (focus_color.r() * 0.8, focus_color.g() * 0.8, focus_color.b() * 0.8),
+                                    &mut f,
+                                    "Mission Control",
+                                    60,
+                                    30,
+                                    18.0,
+                                    (
+                                        focus_color.r() * 0.8,
+                                        focus_color.g() * 0.8,
+                                        focus_color.b() * 0.8,
+                                    ),
                                 );
 
                                 let margin = 60i32;
@@ -4945,12 +5302,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 let grid_w = ow - 2 * margin;
                                 let grid_h = oh - top_margin - margin;
 
-                                let active_ws_count = (0..NUM_WORKSPACES).filter(|&i| {
-                                    state.workspaces[i].tops.len() + state.workspaces[i].x11_surfaces.len() > 0
-                                }).count();
+                                let active_ws_count = (0..NUM_WORKSPACES)
+                                    .filter(|&i| {
+                                        state.workspaces[i].tops.len()
+                                            + state.workspaces[i].x11_surfaces.len()
+                                            > 0
+                                    })
+                                    .count();
                                 let card_w = if active_ws_count > 0 {
-                                    (grid_w - (active_ws_count as i32 - 1).max(0) * ws_gap) / active_ws_count as i32
-                                } else { grid_w };
+                                    (grid_w - (active_ws_count as i32 - 1).max(0) * ws_gap)
+                                        / active_ws_count as i32
+                                } else {
+                                    grid_w
+                                };
 
                                 // 画每个 ws 的分组
                                 let mut card_x_offset = margin;
@@ -4959,7 +5323,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let ws = &state.workspaces[ws_i];
                                     let order = ws.effective_order();
                                     let n = order.len();
-                                    if n == 0 { continue; }
+                                    if n == 0 {
+                                        continue;
+                                    }
 
                                     let is_current = ws_i == state.active_ws;
 
@@ -4969,17 +5335,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     } else {
                                         Color32F::new(0.05, 0.05, 0.10, 0.25)
                                     };
-                                    f.clear(card_bg, &[Rectangle::from_loc_and_size(
-                                        (card_x_offset - 4, top_margin),
-                                        (card_w + 8, grid_h),
-                                    )]).ok();
+                                    f.clear(
+                                        card_bg,
+                                        &[Rectangle::from_loc_and_size(
+                                            (card_x_offset - 4, top_margin),
+                                            (card_w + 8, grid_h),
+                                        )],
+                                    )
+                                    .ok();
 
                                     // 当前 ws 顶部高亮线
                                     if is_current {
                                         f.clear(
-                                            Color32F::new(focus_color.r() * 0.6, focus_color.g() * 0.6, focus_color.b() * 0.6, 0.8),
-                                            &[layout::rect(card_x_offset - 4, top_margin, card_w + 8, 2)],
-                                        ).ok();
+                                            Color32F::new(
+                                                focus_color.r() * 0.6,
+                                                focus_color.g() * 0.6,
+                                                focus_color.b() * 0.6,
+                                                0.8,
+                                            ),
+                                            &[layout::rect(
+                                                card_x_offset - 4,
+                                                top_margin,
+                                                card_w + 8,
+                                                2,
+                                            )],
+                                        )
+                                        .ok();
                                     }
 
                                     // WS 标签
@@ -4987,21 +5368,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     crate::text_render::draw_text(
                                         &mut f,
                                         &WS_LABELS[ws_i],
-                                        card_x_offset, top_margin + 6, 12.0,
-                                        (focus_color.r() * label_br, focus_color.g() * label_br, focus_color.b() * label_br),
+                                        card_x_offset,
+                                        top_margin + 6,
+                                        12.0,
+                                        (
+                                            focus_color.r() * label_br,
+                                            focus_color.g() * label_br,
+                                            focus_color.b() * label_br,
+                                        ),
                                     );
 
                                     // 画这个 ws 的缩略图（带动画插值）
-                                    for thumb in task_panel_thumbs.iter().filter(|t| t.ws_idx == ws_i) {
+                                    for thumb in
+                                        task_panel_thumbs.iter().filter(|t| t.ws_idx == ws_i)
+                                    {
                                         let is_sel = thumb_global_idx == selected;
 
                                         // 性能优化：跳过屏幕外的缩略图
-                                        if thumb.tx + thumb.tw < 0 || thumb.tx > ow { thumb_global_idx += 1; continue; }
+                                        if thumb.tx + thumb.tw < 0 || thumb.tx > ow {
+                                            thumb_global_idx += 1;
+                                            continue;
+                                        }
 
                                         // 动画插值：active_ws 窗口从原位飞到目标位置，其他 ws 窗口从目标位置淡入
                                         let (render_x, render_y) = if ws_i == state.active_ws {
-                                            let rx = (thumb.from_x as f32 + (thumb.tx - thumb.from_x) as f32 * progress as f32) as i32;
-                                            let ry = (thumb.from_y as f32 + (thumb.ty - thumb.from_y) as f32 * progress as f32) as i32;
+                                            let rx = (thumb.from_x as f32
+                                                + (thumb.tx - thumb.from_x) as f32
+                                                    * progress as f32)
+                                                as i32;
+                                            let ry = (thumb.from_y as f32
+                                                + (thumb.ty - thumb.from_y) as f32
+                                                    * progress as f32)
+                                                as i32;
                                             (rx, ry)
                                         } else {
                                             (thumb.tx, thumb.ty)
@@ -5012,44 +5410,132 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             let shadow_a = (0.12 - off as f32 * 0.03).max(0.01);
                                             f.clear(
                                                 Color32F::new(0.0, 0.0, 0.0, shadow_a),
-                                                &[layout::rect(render_x - off, render_y - off, thumb.tw + 2 * off, thumb.th + 2 * off)],
-                                            ).ok();
+                                                &[layout::rect(
+                                                    render_x - off,
+                                                    render_y - off,
+                                                    thumb.tw + 2 * off,
+                                                    thumb.th + 2 * off,
+                                                )],
+                                            )
+                                            .ok();
                                         }
 
                                         // Render thumbnail
                                         if !thumb.elems.is_empty() {
-                                            let _ = draw_render_elements(&mut f, thumb.scale, &thumb.elems, &[dmg]);
+                                            let _ = draw_render_elements(
+                                                &mut f,
+                                                thumb.scale,
+                                                &thumb.elems,
+                                                &[dmg],
+                                            );
                                         }
 
                                         // Border
                                         let br: f32 = if is_sel { 0.8 } else { 0.15 };
-                                        let bc = Color32F::new(focus_color.r() * br, focus_color.g() * br, focus_color.b() * br, 1.0);
+                                        let bc = Color32F::new(
+                                            focus_color.r() * br,
+                                            focus_color.g() * br,
+                                            focus_color.b() * br,
+                                            1.0,
+                                        );
                                         let bw = if is_sel { 3 } else { 1 };
-                                        f.clear(bc, &[layout::rect(render_x - bw, render_y - bw, thumb.tw + 2 * bw, bw)]).ok();
-                                        f.clear(bc, &[layout::rect(render_x - bw, render_y + thumb.th, thumb.tw + 2 * bw, bw)]).ok();
-                                        f.clear(bc, &[layout::rect(render_x - bw, render_y, bw, thumb.th)]).ok();
-                                        f.clear(bc, &[layout::rect(render_x + thumb.tw, render_y, bw, thumb.th)]).ok();
+                                        f.clear(
+                                            bc,
+                                            &[layout::rect(
+                                                render_x - bw,
+                                                render_y - bw,
+                                                thumb.tw + 2 * bw,
+                                                bw,
+                                            )],
+                                        )
+                                        .ok();
+                                        f.clear(
+                                            bc,
+                                            &[layout::rect(
+                                                render_x - bw,
+                                                render_y + thumb.th,
+                                                thumb.tw + 2 * bw,
+                                                bw,
+                                            )],
+                                        )
+                                        .ok();
+                                        f.clear(
+                                            bc,
+                                            &[layout::rect(render_x - bw, render_y, bw, thumb.th)],
+                                        )
+                                        .ok();
+                                        f.clear(
+                                            bc,
+                                            &[layout::rect(
+                                                render_x + thumb.tw,
+                                                render_y,
+                                                bw,
+                                                thumb.th,
+                                            )],
+                                        )
+                                        .ok();
 
                                         // Selected glow
                                         if is_sel {
                                             for off in 1..=3 {
                                                 let glow_a = (0.15 - off as f32 * 0.04).max(0.02);
-                                                let gc = Color32F::new(focus_color.r() * glow_a, focus_color.g() * glow_a, focus_color.b() * glow_a, 1.0);
-                                                f.clear(gc, &[layout::rect(render_x - bw - off, render_y - bw - off, thumb.tw + 2*(bw+off), off)]).ok();
-                                                f.clear(gc, &[layout::rect(render_x - bw - off, render_y + thumb.th + bw, thumb.tw + 2*(bw+off), off)]).ok();
+                                                let gc = Color32F::new(
+                                                    focus_color.r() * glow_a,
+                                                    focus_color.g() * glow_a,
+                                                    focus_color.b() * glow_a,
+                                                    1.0,
+                                                );
+                                                f.clear(
+                                                    gc,
+                                                    &[layout::rect(
+                                                        render_x - bw - off,
+                                                        render_y - bw - off,
+                                                        thumb.tw + 2 * (bw + off),
+                                                        off,
+                                                    )],
+                                                )
+                                                .ok();
+                                                f.clear(
+                                                    gc,
+                                                    &[layout::rect(
+                                                        render_x - bw - off,
+                                                        render_y + thumb.th + bw,
+                                                        thumb.tw + 2 * (bw + off),
+                                                        off,
+                                                    )],
+                                                )
+                                                .ok();
                                             }
                                         }
 
                                         // Title
                                         let display_title = if thumb.title.len() > 14 {
                                             format!("{}…", &thumb.title[..14])
-                                        } else { thumb.title.clone() };
-                                        f.clear(layout::opaque(0.03, 0.03, 0.06), &[layout::rect(render_x, render_y + thumb.th + 2, thumb.tw, 14)]).ok();
+                                        } else {
+                                            thumb.title.clone()
+                                        };
+                                        f.clear(
+                                            layout::opaque(0.03, 0.03, 0.06),
+                                            &[layout::rect(
+                                                render_x,
+                                                render_y + thumb.th + 2,
+                                                thumb.tw,
+                                                14,
+                                            )],
+                                        )
+                                        .ok();
                                         let title_br: f32 = if is_sel { 0.9 } else { 0.35 };
                                         crate::text_render::draw_text(
-                                            &mut f, &display_title,
-                                            render_x + 3, render_y + thumb.th + 4, 10.0,
-                                            (focus_color.r() * title_br, focus_color.g() * title_br, focus_color.b() * title_br),
+                                            &mut f,
+                                            &display_title,
+                                            render_x + 3,
+                                            render_y + thumb.th + 4,
+                                            10.0,
+                                            (
+                                                focus_color.r() * title_br,
+                                                focus_color.g() * title_br,
+                                                focus_color.b() * title_br,
+                                            ),
                                         );
 
                                         thumb_global_idx += 1;
@@ -5064,11 +5550,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         {
                             // ── 视差偏移：headbar 层移动稍快（×0.1）产生前景感 ──
                             let parallax_headbar = if is_focused_output {
-                                let fractional = state.scroll_offset - (state.scroll_offset.round() as f64);
+                                let fractional =
+                                    state.scroll_offset - (state.scroll_offset.round() as f64);
                                 (fractional * ow as f64 * 0.1) as i32
-                            } else { 0 };
+                            } else {
+                                0
+                            };
                             // 直接获取窗口标题引用，避免提前 clone
-                            let out_window_title = state.window_titles
+                            let out_window_title = state
+                                .window_titles
                                 .get(&out_ws_focus_idx.unwrap_or(0))
                                 .map(|s| s.as_str())
                                 .unwrap_or("");
@@ -5476,10 +5966,7 @@ impl smithay::wayland::xwayland_shell::XWaylandShellHandler for App {
                     self.layout_workspace(ws_idx);
                 }
 
-                tracing::info!(
-                    "🔗 surface_associated: focused + layout for ws={}",
-                    ws_idx
-                );
+                tracing::info!("🔗 surface_associated: focused + layout for ws={}", ws_idx);
                 found_and_focused = true;
                 break;
             }
@@ -5609,7 +6096,9 @@ impl smithay::xwayland::XwmHandler for App {
                 }
                 // 也搜索 or_surfaces（父窗口可能是 Utility 类型的浮动窗）
                 if found_ws.is_none() {
-                    if let Some(parent_xs) = self.xw.or_surfaces.iter().find(|s| s.window_id() == parent) {
+                    if let Some(parent_xs) =
+                        self.xw.or_surfaces.iter().find(|s| s.window_id() == parent)
+                    {
                         let geo = parent_xs.geometry();
                         // 根据父窗口的 X11 坐标推断所在 output/ws
                         for (oi, &ws_i) in self.output_active_ws.iter().enumerate() {
@@ -5624,7 +6113,9 @@ impl smithay::xwayland::XwmHandler for App {
                 }
                 tracing::info!(
                     "🔗 transient_for search: class='{}' parent_id={} found_ws={:?}",
-                    window.class(), parent, found_ws
+                    window.class(),
+                    parent,
+                    found_ws
                 );
                 found_ws.unwrap_or(self.active_ws)
             } else {
@@ -5800,7 +6291,11 @@ impl smithay::xwayland::XwmHandler for App {
         self.xw.on_configure_request(&window, x, y, w, h);
 
         // Clamp OR 窗口（输入法候选框等）到屏幕可视区域内
-        let is_or = self.xw.or_surfaces.iter().any(|s| s.window_id() == window.window_id());
+        let is_or = self
+            .xw
+            .or_surfaces
+            .iter()
+            .any(|s| s.window_id() == window.window_id());
         if is_or && window.wl_surface().is_some() {
             let geo = window.geometry();
             let new_x = x.unwrap_or(geo.loc.x);
@@ -6139,7 +6634,10 @@ impl XdgActivationHandler for App {
     ) {
         let elapsed = token_data.timestamp.elapsed().as_secs();
         if elapsed > 30 {
-            info!("⏰ XDG activation token expired ({}s old), ignoring", elapsed);
+            info!(
+                "⏰ XDG activation token expired ({}s old), ignoring",
+                elapsed
+            );
             return;
         }
 
@@ -6162,7 +6660,9 @@ impl XdgActivationHandler for App {
                     break;
                 }
             }
-            if target.is_some() { break; }
+            if target.is_some() {
+                break;
+            }
             // X11 surfaces
             for xs in &ws.x11_surfaces {
                 if xs.wl_surface().as_ref() == Some(&wl_surf) {
@@ -6170,7 +6670,9 @@ impl XdgActivationHandler for App {
                     break;
                 }
             }
-            if target.is_some() { break; }
+            if target.is_some() {
+                break;
+            }
         }
 
         // 第二阶段：执行焦点切换
@@ -6209,7 +6711,9 @@ use wayland_server::Resource as _Resource;
 // ── GlobalDispatch: anchor_header_bar_manager_v1 ──
 // 必须实现 GlobalDispatch 才能创建 global
 
-impl wayland_server::GlobalDispatch<anchor_header_bar_manager_v1::AnchorHeaderBarManagerV1, ()> for App {
+impl wayland_server::GlobalDispatch<anchor_header_bar_manager_v1::AnchorHeaderBarManagerV1, ()>
+    for App
+{
     fn bind(
         _state: &mut Self,
         _dh: &smithay::reexports::wayland_server::DisplayHandle,
@@ -6241,7 +6745,10 @@ impl Dispatch<anchor_header_bar_manager_v1::AnchorHeaderBarManagerV1, ()> for Ap
                 let header_bar = data_init.init(id, toplevel_id.clone());
                 // 发送初始 configured 事件（高度为 0，表示尚未设置）
                 header_bar.configured(0);
-                tracing::info!("🏷️ Header bar protocol: client requested header bar for toplevel {:?}", toplevel_id);
+                tracing::info!(
+                    "🏷️ Header bar protocol: client requested header bar for toplevel {:?}",
+                    toplevel_id
+                );
             }
             anchor_header_bar_manager_v1::Request::Destroy => {}
             _ => {}
@@ -6271,7 +6778,9 @@ impl Dispatch<anchor_header_bar_v1::AnchorHeaderBarV1, ObjectId> for App {
                     return;
                 }
                 // 查找对应的 ToplevelSurface
-                let found = state.workspaces.iter()
+                let found = state
+                    .workspaces
+                    .iter()
                     .flat_map(|ws| ws.tops.iter())
                     .chain(state.pending_tops.iter())
                     .find(|tl| tl.wl_surface().id() == *toplevel_id)
@@ -6281,7 +6790,11 @@ impl Dispatch<anchor_header_bar_v1::AnchorHeaderBarV1, ObjectId> for App {
                     let actual_height = if height > 0 { height } else { 0 };
                     set_header_bar_height(&tl, actual_height);
                     resource.configured(actual_height);
-                    tracing::info!("🏷️ Header bar height set to {} for toplevel {:?}", actual_height, toplevel_id);
+                    tracing::info!(
+                        "🏷️ Header bar height set to {} for toplevel {:?}",
+                        actual_height,
+                        toplevel_id
+                    );
                     state.do_layout();
                     state.dirty = true;
                 } else {
@@ -6293,4 +6806,3 @@ impl Dispatch<anchor_header_bar_v1::AnchorHeaderBarV1, ObjectId> for App {
         }
     }
 }
-

@@ -53,7 +53,11 @@ pub fn ease_out_cubic(t: f32) -> f32 {
 /// Fast deceleration — ease-out exponential
 #[inline(always)]
 pub fn ease_out_expo(t: f32) -> f32 {
-    if t == 0.0 { 0.0 } else { 1.0 - 2.0f32.powf(-10.0 * t) }
+    if t == 0.0 {
+        0.0
+    } else {
+        1.0 - 2.0f32.powf(-10.0 * t)
+    }
 }
 
 /// Smooth in-out — cubic
@@ -83,8 +87,12 @@ pub fn ease_out_quart(t: f32) -> f32 {
 /// Quick deceleration with slight bounce — ease-out elastic
 #[inline(always)]
 pub fn ease_out_elastic(t: f32) -> f32 {
-    if t == 0.0 { return 0.0; }
-    if t == 1.0 { return 1.0; }
+    if t == 0.0 {
+        return 0.0;
+    }
+    if t == 1.0 {
+        return 1.0;
+    }
     const C4: f32 = (2.0 * std::f32::consts::PI) / 3.0;
     2.0f32.powf(-10.0 * t) * ((t * 10.0 - 0.75) * C4).sin() + 1.0
 }

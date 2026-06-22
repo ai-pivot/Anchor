@@ -252,11 +252,21 @@ impl Default for ScrollConfig {
 }
 
 impl ScrollConfig {
-    fn default_enabled() -> bool { true }
-    fn default_stiffness() -> f64 { 300.0 }
-    fn default_damping() -> f64 { 30.0 }
-    fn default_friction() -> f64 { 0.92 }
-    fn default_swipe_threshold() -> f64 { 0.15 }
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_stiffness() -> f64 {
+        300.0
+    }
+    fn default_damping() -> f64 {
+        30.0
+    }
+    fn default_friction() -> f64 {
+        0.92
+    }
+    fn default_swipe_threshold() -> f64 {
+        0.15
+    }
 }
 
 pub fn parse_color(hex: &str) -> (f32, f32, f32) {

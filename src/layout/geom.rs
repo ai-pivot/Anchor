@@ -101,99 +101,83 @@ pub fn slot_with_header_bar(
 
     // 计算 slot 位置（窗口占用的完整区域包括 header bar）
     let (x, y, w, h) = match layout {
-        LayoutPreset::MasterStack => {
-            match n {
-                1 => (margin, bar_h + margin, usable_w, usable_h),
-                _ => {
-                    match split {
-                        SplitDir::Horizontal => {
-                            let master_w = (usable_w - gap) * 2 / 3;
-                            if i == 0 {
-                                (margin, bar_h + margin, master_w, usable_h)
-                            } else {
-                                let stack_n = n - 1;
-                                let stack_w = usable_w - master_w - gap;
-                                let stack_h =
-                                    (usable_h - gap * (stack_n - 1) as i32) / stack_n as i32;
-                                let extra =
-                                    (usable_h - gap * (stack_n - 1) as i32) % stack_n as i32;
-                                let si = i - 1;
-                                let sy = bar_h
-                                    + margin
-                                    + si as i32 * (stack_h + gap)
-                                    + extra.min(si as i32);
-                                let sh = stack_h + if si < extra as usize { 1 } else { 0 };
-                                (margin + master_w + gap, sy, stack_w, sh)
-                            }
-                        }
-                        SplitDir::Vertical => {
-                            let master_h = (usable_h - gap) * 2 / 3;
-                            if i == 0 {
-                                (margin, bar_h + margin, usable_w, master_h)
-                            } else {
-                                let stack_n = n - 1;
-                                let stack_y = bar_h + margin + master_h + gap;
-                                let stack_h = usable_h - master_h - gap;
-                                let stack_w =
-                                    (usable_w - gap * (stack_n - 1) as i32) / stack_n as i32;
-                                let extra =
-                                    (usable_w - gap * (stack_n - 1) as i32) % stack_n as i32;
-                                let si = i - 1;
-                                let sx =
-                                    margin + si as i32 * (stack_w + gap) + extra.min(si as i32);
-                                let sw = stack_w + if si < extra as usize { 1 } else { 0 };
-                                (sx, stack_y, sw, stack_h)
-                            }
-                        }
+        LayoutPreset::MasterStack => match n {
+            1 => (margin, bar_h + margin, usable_w, usable_h),
+            _ => match split {
+                SplitDir::Horizontal => {
+                    let master_w = (usable_w - gap) * 2 / 3;
+                    if i == 0 {
+                        (margin, bar_h + margin, master_w, usable_h)
+                    } else {
+                        let stack_n = n - 1;
+                        let stack_w = usable_w - master_w - gap;
+                        let stack_h = (usable_h - gap * (stack_n - 1) as i32) / stack_n as i32;
+                        let extra = (usable_h - gap * (stack_n - 1) as i32) % stack_n as i32;
+                        let si = i - 1;
+                        let sy =
+                            bar_h + margin + si as i32 * (stack_h + gap) + extra.min(si as i32);
+                        let sh = stack_h + if si < extra as usize { 1 } else { 0 };
+                        (margin + master_w + gap, sy, stack_w, sh)
                     }
                 }
-            }
-        }
-        LayoutPreset::Columns => {
-            match split {
-                SplitDir::Horizontal => {
-                    let col_w = (usable_w - gap * (n as i32 - 1)) / n as i32;
-                    let extra = (usable_w - gap * (n as i32 - 1)) % n as i32;
-                    let x = margin + i as i32 * (col_w + gap) + extra.min(i as i32);
-                    let w = col_w + if i < extra as usize { 1 } else { 0 };
-                    (x, bar_h + margin, w, usable_h)
-                }
                 SplitDir::Vertical => {
-                    let row_h = (usable_h - gap * (n as i32 - 1)) / n as i32;
-                    let extra = (usable_h - gap * (n as i32 - 1)) % n as i32;
-                    let y = bar_h + margin + i as i32 * (row_h + gap) + extra.min(i as i32);
-                    let h = row_h + if i < extra as usize { 1 } else { 0 };
-                    (margin, y, usable_w, h)
+                    let master_h = (usable_h - gap) * 2 / 3;
+                    if i == 0 {
+                        (margin, bar_h + margin, usable_w, master_h)
+                    } else {
+                        let stack_n = n - 1;
+                        let stack_y = bar_h + margin + master_h + gap;
+                        let stack_h = usable_h - master_h - gap;
+                        let stack_w = (usable_w - gap * (stack_n - 1) as i32) / stack_n as i32;
+                        let extra = (usable_w - gap * (stack_n - 1) as i32) % stack_n as i32;
+                        let si = i - 1;
+                        let sx = margin + si as i32 * (stack_w + gap) + extra.min(si as i32);
+                        let sw = stack_w + if si < extra as usize { 1 } else { 0 };
+                        (sx, stack_y, sw, stack_h)
+                    }
                 }
+            },
+        },
+        LayoutPreset::Columns => match split {
+            SplitDir::Horizontal => {
+                let col_w = (usable_w - gap * (n as i32 - 1)) / n as i32;
+                let extra = (usable_w - gap * (n as i32 - 1)) % n as i32;
+                let x = margin + i as i32 * (col_w + gap) + extra.min(i as i32);
+                let w = col_w + if i < extra as usize { 1 } else { 0 };
+                (x, bar_h + margin, w, usable_h)
             }
-        }
-        LayoutPreset::Center => {
-            match split {
-                SplitDir::Horizontal => {
-                    let max_w = 1200.min(ow * 7 / 10);
-                    let cw = (max_w - gap * (n as i32 - 1)) / n as i32;
-                    let extra = (max_w - gap * (n as i32 - 1)) % n as i32;
-                    let start_x = ow / 2 - max_w / 2;
-                    let x = start_x + i as i32 * (cw + gap) + extra.min(i as i32);
-                    let w = cw + if i < extra as usize { 1 } else { 0 };
-                    (x, bar_h + margin, w, usable_h)
-                }
-                SplitDir::Vertical => {
-                    let max_h = 800.min(oh * 7 / 10);
-                    let rh = (max_h - gap * (n as i32 - 1)) / n as i32;
-                    let extra = (max_h - gap * (n as i32 - 1)) % n as i32;
-                    let total_w =
-                        (usable_w).min(n as i32 * (800 / n as i32) + gap * (n as i32 - 1));
-                    let start_x = ow / 2 - total_w / 2;
-                    let start_y = (bar_h + oh) / 2 - max_h / 2;
-                    let cw = (total_w - gap * (n as i32 - 1)) / n as i32;
-                    let extra_w = (total_w - gap * (n as i32 - 1)) % n as i32;
-                    let x = start_x + i as i32 * (cw + gap) + extra_w.min(i as i32);
-                    let w = cw + if i < extra_w as usize { 1 } else { 0 };
-                    (x, start_y, w, rh + if i < extra as usize { 1 } else { 0 })
-                }
+            SplitDir::Vertical => {
+                let row_h = (usable_h - gap * (n as i32 - 1)) / n as i32;
+                let extra = (usable_h - gap * (n as i32 - 1)) % n as i32;
+                let y = bar_h + margin + i as i32 * (row_h + gap) + extra.min(i as i32);
+                let h = row_h + if i < extra as usize { 1 } else { 0 };
+                (margin, y, usable_w, h)
             }
-        }
+        },
+        LayoutPreset::Center => match split {
+            SplitDir::Horizontal => {
+                let max_w = 1200.min(ow * 7 / 10);
+                let cw = (max_w - gap * (n as i32 - 1)) / n as i32;
+                let extra = (max_w - gap * (n as i32 - 1)) % n as i32;
+                let start_x = ow / 2 - max_w / 2;
+                let x = start_x + i as i32 * (cw + gap) + extra.min(i as i32);
+                let w = cw + if i < extra as usize { 1 } else { 0 };
+                (x, bar_h + margin, w, usable_h)
+            }
+            SplitDir::Vertical => {
+                let max_h = 800.min(oh * 7 / 10);
+                let rh = (max_h - gap * (n as i32 - 1)) / n as i32;
+                let extra = (max_h - gap * (n as i32 - 1)) % n as i32;
+                let total_w = (usable_w).min(n as i32 * (800 / n as i32) + gap * (n as i32 - 1));
+                let start_x = ow / 2 - total_w / 2;
+                let start_y = (bar_h + oh) / 2 - max_h / 2;
+                let cw = (total_w - gap * (n as i32 - 1)) / n as i32;
+                let extra_w = (total_w - gap * (n as i32 - 1)) % n as i32;
+                let x = start_x + i as i32 * (cw + gap) + extra_w.min(i as i32);
+                let w = cw + if i < extra_w as usize { 1 } else { 0 };
+                (x, start_y, w, rh + if i < extra as usize { 1 } else { 0 })
+            }
+        },
         LayoutPreset::Grid => {
             let cols = (n as f32).sqrt().ceil() as i32;
             let rows = (n as i32 + cols - 1) / cols;

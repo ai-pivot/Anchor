@@ -134,7 +134,10 @@ pub struct Momentum {
 
 impl Momentum {
     pub fn new(friction: f64) -> Self {
-        Self { velocity: 0.0, friction }
+        Self {
+            velocity: 0.0,
+            friction,
+        }
     }
 
     /// Reset velocity to zero.
