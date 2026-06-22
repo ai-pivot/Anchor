@@ -150,6 +150,8 @@ rm -f "$HOME/.config/systemd/user/xdg-desktop-portal.service.d/override.conf" 2>
 rmdir "$HOME/.config/systemd/user/xdg-desktop-portal.service.d" 2>/dev/null
 # 阻止 fake-portal 抢占 D-Bus 名称
 kill $(pgrep -f "fake-portal" 2>/dev/null) 2>/dev/null || true
+# 删除指向 fake-portal 的 D-Bus 服务文件（会拦截 org.freedesktop.portal.Desktop 激活）
+rm -f "$HOME/.local/share/dbus-1/services/org.freedesktop.portal.Desktop.service" 2>/dev/null
 
 # ─── Session 守护进程恢复（仅对 session 内重启有效）───
 # 注意：电源键物理重启场景下，这段代码**不起作用**——全新 session 启动
