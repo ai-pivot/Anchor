@@ -3502,13 +3502,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         wl_output.create_global::<App>(&dh);
 
-        // ── 注册 Anchor Header Bar 协议 global ──
-        // 客户端通过 anchor_header_bar_manager_v1 请求 header bar 区域
-        dh.create_global::<App, anchor_header_bar_manager_v1::AnchorHeaderBarManagerV1, ()>(
-            1,
-            (),
-        );
-
         // 匹配配置中的 output 设置（工作区、位置）
         let output_cfg = state.cfg.outputs.iter().find(|oc| {
             if oc.connector.is_empty() {

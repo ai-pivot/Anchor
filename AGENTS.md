@@ -396,3 +396,25 @@ header_bar_height = 0  # 全局默认，0=禁用
 - 协议实现：`src/headerbar.rs`（辅助函数）+ `src/main.rs`（Dispatch handler）
 - 装饰渲染：`src/layout/decorations.rs`（`is_csd` 和 `header_bar_h` 参数）
 - 配置：`src/config.rs`（`Layout.header_bar_height`）
+
+### XDG Activation 协议 (xdg-activation-v1)
+
+支持跨应用焦点激活。典型场景：
+- 浏览器点击链接 → 打开/聚焦外部应用（邮件客户端、Zoom 等）
+- VS Code 点击 URL → 切换到已打开的浏览器窗口
+
+**关键代码**：
+- App struct: `xdg_activation: XdgActivationState`
+- Handler: `impl XdgActivationHandler for App`（`src/main.rs:6095-6162`）
+- delegate: `delegate_xdg_activation!(App)`（`src/main.rs:5393`）
+- 初始化: `XdgActivationState::new::<App>(&dh)`（`src/main.rs:3237`）
+
+**工作流**：
+1. 应用 A（如浏览器）创建 `XdgActivationToken`
+2. Token 通过环境变量 `XDG_ACTIVATION_TOKEN` 传递给应用 B
+3. 应用 B 通过 `xdg_activation_v1.activate` 提交 token
+4. 合成器调用 `request_activation` → 查找目标 surface → 切换工作区 + 设置焦点
+5. 超过 30 秒的旧 token 自动忽略
+
+**已知限制**：Anchor 的 launcher 启动应用时尚未自动生成 activation token。
+未来需要在 `src/launcher.rs` 的 `spawn()` 中集成 token 创建和传递。
