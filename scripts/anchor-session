@@ -138,6 +138,19 @@ mkdir -p "$XDG_RUNTIME_DIR"
 # Sway/Hyprland 等合成器都这样做。
 export WAYLAND_DISPLAY=wayland-anchor
 
+# ─── 清理可能阻止 portal 启动的残留配置 ───
+# 某些发行版或用户配置可能留有 mask/override 阻挡 portal 自动启动。
+# 这里做一次无害清理，不影响其他桌面环境。
+for svc in xdg-desktop-portal xdg-desktop-portal-gtk xdg-desktop-portal-wlr xdg-desktop-portal-gnome; do
+    systemctl --user unmask "$svc.service" 2>/dev/null || true
+    rm -f "$HOME/.config/systemd/user/$svc.service" 2>/dev/null
+done
+# 移除 "sleep infinity" 式 override
+rm -f "$HOME/.config/systemd/user/xdg-desktop-portal.service.d/override.conf" 2>/dev/null
+rmdir "$HOME/.config/systemd/user/xdg-desktop-portal.service.d" 2>/dev/null
+# 阻止 fake-portal 抢占 D-Bus 名称
+kill $(pgrep -f "fake-portal" 2>/dev/null) 2>/dev/null || true
+
 # ─── Session 守护进程恢复（仅对 session 内重启有效）───
 # 注意：电源键物理重启场景下，这段代码**不起作用**——全新 session 启动
 # 时没有 keyring 加密密钥，gnome-keyring-daemon 即使启动也是 locked 状态。
