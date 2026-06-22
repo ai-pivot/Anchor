@@ -44,6 +44,11 @@ block_height_gobs = 0
 border_width = 4
 gap = 14
 margin = 6
+# Header bar 高度（逻辑像素）。
+# 0 = 不预留 header bar 空间（默认，纯 SSD 装饰）
+# >0 = 在每个窗口顶部预留该高度区域，客户端可渲染自定义标题栏
+# 客户端可通过 anchor-header-bar-v1 协议覆盖此值
+header_bar_height = 0
 
 [keybindings]
 "super+return" = "terminal"

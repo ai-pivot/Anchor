@@ -26,6 +26,8 @@ use physics::{Spring, Momentum};
 use workspace::{WindowSlot, Workspace, NUM_WORKSPACES};
 mod overview;
 use overview::OverviewState;
+mod headerbar;
+use headerbar::{HeaderBarData, ensure_header_bar_data, get_header_bar_info, set_header_bar_height, set_client_decoration};
 
 /// 预分配的工作区标签，避免渲染热路径中的 format! 分配
 const WS_LABELS: [&str; 9] = ["WS 1", "WS 2", "WS 3", "WS 4", "WS 5", "WS 6", "WS 7", "WS 8", "WS 9"];
@@ -3231,6 +3233,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         primary_sel: PrimarySelectionState::new::<App>(&dh),
         deco: XdgDecorationState::new::<App>(&dh),
         popup_manager: PopupManager::default(),
+        // 注册 Anchor Header Bar 协议 global
+        // 客户端通过此协议声明 header bar 高度
+        // 注意：global 注册需要在 event loop 之前
         osize: Size::new(0, 0),
         workspaces: (0..NUM_WORKSPACES).map(|_| Workspace::new()).collect(),
         active_ws: 0,
@@ -3493,6 +3498,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Some(Point::from((output_x_offset, 0))),
         );
         wl_output.create_global::<App>(&dh);
+
+        // ── 注册 Anchor Header Bar 协议 global ──
+        // 客户端通过 anchor_header_bar_manager_v1 请求 header bar 区域
+        dh.create_global::<App, anchor_header_bar_manager_v1::AnchorHeaderBarManagerV1, ()>(
+            1,
+            (),
+        );
 
         // 匹配配置中的 output 设置（工作区、位置）
         let output_cfg = state.cfg.outputs.iter().find(|oc| {
@@ -4637,6 +4649,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 } else {
                                     (0, 0)
                                 };
+                                // 获取该窗口的 header bar 信息
+                                let (hb_h, is_csd) = match slot {
+                                    WindowSlot::Wl(idx) => {
+                                        if let Some(tl) = out_ws.tops.get(*idx) {
+                                            let (h, csd) = get_header_bar_info(tl);
+                                            // 全局配置作为 fallback
+                                            let final_h = if h > 0 { h } else if !csd { state.cfg.layout.header_bar_height } else { 0 };
+                                            (final_h, csd)
+                                        } else {
+                                            (state.cfg.layout.header_bar_height, false)
+                                        }
+                                    }
+                                    WindowSlot::X11(_) => {
+                                        (state.cfg.layout.header_bar_height, false)
+                                    }
+                                };
                                 layout::render_window_decorations_anim(
                                     &mut f,
                                     &state.cfg,
@@ -4651,6 +4679,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     ws_offset + dx,
                                     dy,
                                     anim_glow,
+                                    is_csd,
+                                    hb_h,
                                 );
                             }
                         }
@@ -6001,31 +6031,155 @@ impl smithay::xwayland::XwmHandler for App {
 }
 
 // ── XDG Decoration Handler ──────────────────────────────────
-// Tell clients to use server-side decorations (no CSD titlebar)
+// 支持 SSD（服务端装饰）和 CSD（客户端装饰）混合模式。
+// 默认使用 SSD，但当客户端请求 CSD 时允许切换。
+// 客户端使用 CSD 时将自己在 toplevel 中渲染 header bar。
 impl XdgDecorationHandler for App {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
         use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
+        // 默认使用 ServerSide 装饰
         toplevel.with_pending_state(|state| {
             state.decoration_mode = Some(Mode::ServerSide);
         });
+        // 初始化 header bar 数据
+        ensure_header_bar_data(&toplevel);
         toplevel.send_configure();
     }
     fn request_mode(
         &mut self,
         toplevel: ToplevelSurface,
-        _mode: smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode,
+        mode: smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode,
     ) {
         use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
-        toplevel.with_pending_state(|state| {
-            state.decoration_mode = Some(Mode::ServerSide);
-        });
+        ensure_header_bar_data(&toplevel);
+
+        match mode {
+            Mode::ClientSide => {
+                // 允许客户端使用 CSD（自行渲染 header bar）
+                toplevel.with_pending_state(|state| {
+                    state.decoration_mode = Some(Mode::ClientSide);
+                });
+                set_client_decoration(&toplevel);
+            }
+            Mode::ServerSide => {
+                // 客户端请求 SSD
+                toplevel.with_pending_state(|state| {
+                    state.decoration_mode = Some(Mode::ServerSide);
+                });
+            }
+            _ => {
+                // 未知模式，默认 SSD
+                toplevel.with_pending_state(|state| {
+                    state.decoration_mode = Some(Mode::ServerSide);
+                });
+            }
+        }
         toplevel.send_configure();
+        self.do_layout();
     }
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {
         use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode;
+        // 客户端取消装饰模式设置 → 回退到 SSD
         toplevel.with_pending_state(|state| {
             state.decoration_mode = Some(Mode::ServerSide);
         });
         toplevel.send_configure();
     }
 }
+
+// ── Anchor Header Bar Protocol Handler ──────────────────────
+// 实现 anchor-header-bar-v1 协议的 Wayland Dispatch
+
+use headerbar::{anchor_header_bar_manager_v1, anchor_header_bar_v1};
+use wayland_server::backend::ObjectId;
+use wayland_server::Dispatch;
+use wayland_server::Resource as _Resource;
+
+// ── GlobalDispatch: anchor_header_bar_manager_v1 ──
+// 必须实现 GlobalDispatch 才能创建 global
+
+impl wayland_server::GlobalDispatch<anchor_header_bar_manager_v1::AnchorHeaderBarManagerV1, ()> for App {
+    fn bind(
+        _state: &mut Self,
+        _dh: &smithay::reexports::wayland_server::DisplayHandle,
+        _client: &wayland_server::Client,
+        resource: wayland_server::New<anchor_header_bar_manager_v1::AnchorHeaderBarManagerV1>,
+        _global_data: &(),
+        _data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        let _manager = _data_init.init(resource, ());
+        tracing::info!("🏷️ Header bar protocol: client bound manager");
+    }
+}
+
+// ── Dispatch: anchor_header_bar_manager_v1 ──
+
+impl Dispatch<anchor_header_bar_manager_v1::AnchorHeaderBarManagerV1, ()> for App {
+    fn request(
+        state: &mut Self,
+        _client: &wayland_server::Client,
+        _resource: &anchor_header_bar_manager_v1::AnchorHeaderBarManagerV1,
+        request: <anchor_header_bar_manager_v1::AnchorHeaderBarManagerV1 as wayland_server::Resource>::Request,
+        _data: &(),
+        _dhandle: &smithay::reexports::wayland_server::DisplayHandle,
+        data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            anchor_header_bar_manager_v1::Request::GetHeaderBar { id, toplevel } => {
+                let toplevel_id = toplevel.id();
+                let header_bar = data_init.init(id, toplevel_id.clone());
+                // 发送初始 configured 事件（高度为 0，表示尚未设置）
+                header_bar.configured(0);
+                tracing::info!("🏷️ Header bar protocol: client requested header bar for toplevel {:?}", toplevel_id);
+            }
+            anchor_header_bar_manager_v1::Request::Destroy => {}
+            _ => {}
+        }
+    }
+}
+
+// ── Dispatch: anchor_header_bar_v1 ──
+
+impl Dispatch<anchor_header_bar_v1::AnchorHeaderBarV1, ObjectId> for App {
+    fn request(
+        state: &mut Self,
+        _client: &wayland_server::Client,
+        resource: &anchor_header_bar_v1::AnchorHeaderBarV1,
+        request: <anchor_header_bar_v1::AnchorHeaderBarV1 as wayland_server::Resource>::Request,
+        toplevel_id: &ObjectId,
+        _dhandle: &smithay::reexports::wayland_server::DisplayHandle,
+        _data_init: &mut wayland_server::DataInit<'_, Self>,
+    ) {
+        match request {
+            anchor_header_bar_v1::Request::SetHeight { height } => {
+                if height < 0 {
+                    resource.post_error(
+                        anchor_header_bar_v1::Error::InvalidHeight as u32,
+                        "Header bar height must be non-negative",
+                    );
+                    return;
+                }
+                // 查找对应的 ToplevelSurface
+                let found = state.workspaces.iter()
+                    .flat_map(|ws| ws.tops.iter())
+                    .chain(state.pending_tops.iter())
+                    .find(|tl| tl.wl_surface().id() == *toplevel_id)
+                    .cloned();
+                if let Some(tl) = found {
+                    ensure_header_bar_data(&tl);
+                    let actual_height = if height > 0 { height } else { 0 };
+                    set_header_bar_height(&tl, actual_height);
+                    resource.configured(actual_height);
+                    tracing::info!("🏷️ Header bar height set to {} for toplevel {:?}", actual_height, toplevel_id);
+                    state.do_layout();
+                    state.dirty = true;
+                } else {
+                    tracing::warn!("🏷️ Header bar: toplevel {:?} not found", toplevel_id);
+                }
+            }
+            anchor_header_bar_v1::Request::Destroy => {}
+            _ => {}
+        }
+    }
+}
+

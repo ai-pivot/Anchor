@@ -135,6 +135,12 @@ pub struct Layout {
     pub gap: i32,
     #[serde(default = "Layout::default_margin")]
     pub margin: i32,
+    /// Header bar 高度（逻辑像素）。
+    /// 0 = 不预留 header bar 空间（默认）。
+    /// >0 = 在每个窗口顶部预留该高度的区域，客户端可在其中渲染自定义标题栏。
+    /// 客户端可通过 anchor-header-bar-v1 协议覆盖此值。
+    #[serde(default = "Layout::default_header_bar_height")]
+    pub header_bar_height: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -398,6 +404,7 @@ impl Default for Layout {
             border_width: 2,
             gap: 6,
             margin: 0,
+            header_bar_height: 0,
         }
     }
 }
@@ -557,6 +564,9 @@ impl Layout {
         6
     }
     fn default_margin() -> i32 {
+        0
+    }
+    fn default_header_bar_height() -> i32 {
         0
     }
 }

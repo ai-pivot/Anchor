@@ -32,6 +32,7 @@ src/
   physics.rs     — Spring physics engine (scroll snap, momentum)
   record.rs      — Screen recording state
   block_linear.rs — Block-linear memory layout helpers (NVIDIA)
+  headerbar.rs   — Header Bar protocol (anchor-header-bar-v1, client-side header bar support)
   layout/
     mod.rs        — Module entry point, re-exports all public API
     geom.rs       — Layout geometry (LayoutPreset, SplitDir, slot calculation)
@@ -146,6 +147,7 @@ height = 48
 border_width = 4
 gap = 14
 margin = 6
+header_bar_height = 0    # 全局 header bar 高度（0=禁用，>0=在每个窗口顶部预留空间）
 
 [terminal]
 command = "foot"
@@ -367,3 +369,30 @@ if state.overview.is_active() { state.dirty = true; }   // ← overview 动画�
 | 弹簧物理（`Spring`） | 连续交互（滚动吸附、手势跟随） | 物理感、可中断、惯性 | 需要精确的 dirty 持久化 |
 
 **选择原则**：如果动画是"从 A 到 B 的一次性过渡"用 Instant+ease；如果动画需要"持续响应输入/有惯性/可中断"用弹簧。
+
+### Header Bar 协议 (anchor-header-bar-v1)
+
+Anchor 实现了混合装饰模式，支持三种方式：
+
+1. **SSD（Server-Side Decoration）**：默认模式，合成器绘制边框、按钮、编号标签
+2. **CSD（Client-Side Decoration）**：客户端请求 `Mode::ClientSide`，合成器只画最小边框高亮
+3. **Header Bar 协议**：客户端通过 `anchor-header-bar-v1` 协议声明 header bar 高度，在窗口顶部预留空间
+
+**配置**：
+```toml
+[layout]
+header_bar_height = 0  # 全局默认，0=禁用
+```
+
+**协议流程**：
+1. 客户端 `get_header_bar` 创建 `anchor_header_bar_v1` 对象
+2. 客户端 `set_height(N)` 声明 header bar 高度
+3. 合成器 `configured(N)` 确认高度
+4. 客户端在 toplevel 表面顶部 N 像素内渲染 header bar 内容（标题、按钮、标签等）
+5. 合成器装饰渲染时跳过该窗口的标题/按钮，只画边框和 header bar 分隔线
+
+**关键代码**：
+- 协议定义：`protocols/anchor-header-bar-v1.xml`
+- 协议实现：`src/headerbar.rs`（辅助函数）+ `src/main.rs`（Dispatch handler）
+- 装饰渲染：`src/layout/decorations.rs`（`is_csd` 和 `header_bar_h` 参数）
+- 配置：`src/config.rs`（`Layout.header_bar_height`）
