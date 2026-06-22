@@ -62,7 +62,7 @@ use smithay::{
     },
     delegate_compositor, delegate_data_device, delegate_input_method_manager, delegate_output,
     delegate_primary_selection, delegate_seat, delegate_shm, delegate_text_input_manager,
-    delegate_virtual_keyboard_manager, delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_virtual_keyboard_manager, delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{PopupKind, PopupManager},
     input::{
         keyboard::{FilterResult, Keysym, ModifiersState, XkbConfig},
@@ -103,6 +103,7 @@ use smithay::{
         shm::{ShmHandler, ShmState},
         text_input::TextInputManagerState,
         virtual_keyboard::VirtualKeyboardManagerState,
+        xdg_activation::{XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData},
     },
 };
 use tracing::{error, info, warn};
@@ -148,6 +149,7 @@ struct App {
     primary_sel: PrimarySelectionState,
     seat: Seat<Self>,
     deco: XdgDecorationState,
+    xdg_activation: XdgActivationState,
     popup_manager: PopupManager,
     osize: Size<i32, Logical>,
     workspaces: Vec<Workspace>,
@@ -3232,6 +3234,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         dd: DataDeviceState::new::<App>(&dh),
         primary_sel: PrimarySelectionState::new::<App>(&dh),
         deco: XdgDecorationState::new::<App>(&dh),
+        xdg_activation: XdgActivationState::new::<App>(&dh),
         popup_manager: PopupManager::default(),
         // 注册 Anchor Header Bar 协议 global
         // 客户端通过此协议声明 header bar 高度
@@ -5387,6 +5390,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 delegate_xdg_shell!(App);
 delegate_xdg_decoration!(App);
+delegate_xdg_activation!(App);
 delegate_compositor!(App);
 delegate_shm!(App);
 delegate_seat!(App);
@@ -6084,6 +6088,82 @@ impl XdgDecorationHandler for App {
             state.decoration_mode = Some(Mode::ServerSide);
         });
         toplevel.send_configure();
+    }
+}
+
+// ── XDG Activation Handler ──────────────────────────────────
+// 实现 xdg-activation-v1 协议，支持跨应用焦点激活
+// （例如：浏览器点击链接 → 打开/激活对应应用窗口）
+
+impl XdgActivationHandler for App {
+    fn activation_state(&mut self) -> &mut XdgActivationState {
+        &mut self.xdg_activation
+    }
+
+    fn request_activation(
+        &mut self,
+        token: XdgActivationToken,
+        token_data: XdgActivationTokenData,
+        surface: WlSurface,
+    ) {
+        let elapsed = token_data.timestamp.elapsed().as_secs();
+        if elapsed > 30 {
+            info!("⏰ XDG activation token expired ({}s old), ignoring", elapsed);
+            return;
+        }
+
+        let app_id_hint = token_data.app_id.clone().unwrap_or_default();
+        info!(
+            "🎯 XDG activation request: app_id={:?}, token_age={}s",
+            app_id_hint, elapsed,
+        );
+        self.xdg_activation.remove_token(&token);
+
+        // 第一阶段：查找目标 surface 所在的工作区
+        let wl_surf = surface;
+        let mut target: Option<(usize, WlSurface)> = None;
+
+        for (ws_idx, ws) in self.workspaces.iter().enumerate() {
+            // Wayland toplevels
+            for tl in &ws.tops {
+                if tl.wl_surface() == &wl_surf {
+                    target = Some((ws_idx, wl_surf.clone()));
+                    break;
+                }
+            }
+            if target.is_some() { break; }
+            // X11 surfaces
+            for xs in &ws.x11_surfaces {
+                if xs.wl_surface().as_ref() == Some(&wl_surf) {
+                    target = Some((ws_idx, wl_surf.clone()));
+                    break;
+                }
+            }
+            if target.is_some() { break; }
+        }
+
+        // 第二阶段：执行焦点切换
+        if let Some((ws_idx, surf)) = target {
+            if ws_idx != self.active_ws {
+                self.switch_workspace(ws_idx);
+            }
+            self.workspaces[ws_idx].focus = Some(surf.clone());
+            let serial = SERIAL_COUNTER.next_serial();
+            let kbd = self.kbd.clone();
+            let _ = kbd.set_focus(self, Some(surf), serial);
+            self.dirty = true;
+            info!("🎯 XDG activation: activated toplevel in ws {}", ws_idx);
+            return;
+        }
+
+        // 检查 pending_tops
+        for tl in &self.pending_tops {
+            if tl.wl_surface() == &wl_surf {
+                info!("🎯 Activation target found in pending_tops, will auto-focus when app_id arrives");
+                return;
+            }
+        }
+        info!("🎯 XDG activation: target surface not found in workspaces");
     }
 }
 
