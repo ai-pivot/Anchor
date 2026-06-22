@@ -130,6 +130,14 @@ esac
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 mkdir -p "$XDG_RUNTIME_DIR"
 
+# ─── 预设 WAYLAND_DISPLAY ───
+# Anchor 使用 "wayland-anchor" 作为 socket 名称（硬编码在 src/main.rs）。
+# 必须在 exec 之前 export，这样：
+#   1. systemd 用户服务（xdg-desktop-portal-*）的 ConditionEnvironment 能通过
+#   2. 子进程（终端、应用）继承正确的 WAYLAND_DISPLAY
+# Sway/Hyprland 等合成器都这样做。
+export WAYLAND_DISPLAY=wayland-anchor
+
 # ─── Session 守护进程恢复（仅对 session 内重启有效）───
 # 注意：电源键物理重启场景下，这段代码**不起作用**——全新 session 启动
 # 时没有 keyring 加密密钥，gnome-keyring-daemon 即使启动也是 locked 状态。
@@ -144,8 +152,8 @@ mkdir -p "$XDG_RUNTIME_DIR"
 # （session 内进程替换，D-Bus session bus 仍存活）。
 if command -v dbus-update-activation-environment &>/dev/null; then
     dbus-update-activation-environment --systemd \
-        XDG_SESSION_TYPE XDG_CURRENT_DESKTOP \
-        DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR 2>/dev/null
+        WAYLAND_DISPLAY DISPLAY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP \
+        XDG_RUNTIME_DIR GTK_IM_MODULE QT_IM_MODULE XMODIFIERS 2>/dev/null
 fi
 
 if command -v gnome-keyring-daemon &>/dev/null && \
@@ -153,9 +161,14 @@ if command -v gnome-keyring-daemon &>/dev/null && \
     eval $(gnome-keyring-daemon --start --replace --components=secrets,ssh 2>/dev/null)
 fi
 
-# ─── 确保 xdg-desktop-portal-gtk 未被屏蔽 ───
-# Anchor 的 Rust 代码会在 WAYLAND_DISPLAY 就绪后启动 portal。
-# 但 systemd 可能将 gtk 后端标记为 masked，需要先解除。
-systemctl --user unmask xdg-desktop-portal-gtk.service 2>/dev/null || true
+# ─── 激活 systemd graphical-session.target ───
+# 这是标准做法：Sway/Hyprland 等 wlroots 合成器都这样做。
+# 激活后 systemd 用户服务（包括 xdg-desktop-portal-*）会看到
+# WAYLAND_DISPLAY 已设置并自动启动。
+if command -v systemctl &>/dev/null; then
+    systemctl --user import-environment WAYLAND_DISPLAY DISPLAY \
+        XDG_SESSION_TYPE XDG_CURRENT_DESKTOP XDG_RUNTIME_DIR 2>/dev/null || true
+    systemctl --user start graphical-session.target 2>/dev/null || true
+fi
 
 exec "$ANCHOR_BIN" 2>&1 | tee /tmp/anchor-session.log

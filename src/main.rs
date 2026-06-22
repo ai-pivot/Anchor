@@ -3314,35 +3314,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
     }
 
-    // ─── 启动 xdg-desktop-portal ───
-    // Portal 用于 URI scheme 激活（zcode://, zoommtg:// 等）和屏幕共享。
-    // 必须在 WAYLAND_DISPLAY 设置之后启动。
-    // 不要用 .env() — 会清除 DBUS_SESSION_BUS_ADDRESS 等继承变量。
-    //
-    // 后端选择：gtk（兼容性好，不依赖 wlroots 协议）优先，
-    // 如果 gtk 被屏蔽则回退到 wlr。
-    let backends: &[(&str, &str)] = if std::path::Path::new("/usr/libexec/xdg-desktop-portal-gtk").exists() {
-        &[
-            ("xdg-desktop-portal-gtk", "/usr/libexec/xdg-desktop-portal-gtk"),
-            ("xdg-desktop-portal", "/usr/libexec/xdg-desktop-portal"),
-        ]
-    } else {
-        &[
-            ("xdg-desktop-portal-wlr", "/usr/libexec/xdg-desktop-portal-wlr"),
-            ("xdg-desktop-portal", "/usr/libexec/xdg-desktop-portal"),
-        ]
-    };
-    for (name, path) in backends {
-        match std::process::Command::new(path)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .spawn()
-        {
-            Ok(_) => info!("✅ Started {}", name),
-            Err(e) => warn!("⚠️  Failed to start {}: {}", name, e),
-        }
-    }
-
     info!("✅ wayland-anchor");
 
     // ─── EventLoop + 等 DRM master 就绪（必须在 EGL 之前！）───
