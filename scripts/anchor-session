@@ -153,4 +153,9 @@ if command -v gnome-keyring-daemon &>/dev/null && \
     eval $(gnome-keyring-daemon --start --replace --components=secrets,ssh 2>/dev/null)
 fi
 
+# ─── 确保 xdg-desktop-portal-gtk 未被屏蔽 ───
+# Anchor 的 Rust 代码会在 WAYLAND_DISPLAY 就绪后启动 portal。
+# 但 systemd 可能将 gtk 后端标记为 masked，需要先解除。
+systemctl --user unmask xdg-desktop-portal-gtk.service 2>/dev/null || true
+
 exec "$ANCHOR_BIN" 2>&1 | tee /tmp/anchor-session.log
