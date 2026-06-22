@@ -3632,37 +3632,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok();
 
     // ── 启动 xdg-desktop-portal ──
-    // Portal 后端按优先级：gtk → wlr。主 daemon 最后启动。
-    // 用 --replace 保持常驻，避免空闲超时退出导致
-    // XWayland 应用（Edge等）后续 D-Bus 调用时 portal 不在。
+    // 先 backend，sleep 等它注册 D-Bus，再主 daemon。
+    // stderr 不重定向，让错误出现在 session log。
     let uid = unsafe { libc::getuid() };
     let xdg_runtime = format!("/run/user/{uid}");
-    // 先启动 backend
-    let backend = ["/usr/libexec/xdg-desktop-portal-gtk", "/usr/libexec/xdg-desktop-portal-wlr"]
+    let backend_path = ["/usr/libexec/xdg-desktop-portal-gtk", "/usr/libexec/xdg-desktop-portal-wlr"]
         .iter()
-        .find(|p| std::path::Path::new(p).exists());
-    if let Some(backend) = backend {
-        std::process::Command::new(*backend)
+        .find(|p| std::path::Path::new(p).exists())
+        .copied();
+    if let Some(backend) = backend_path {
+        if std::process::Command::new(backend)
             .env("WAYLAND_DISPLAY", "wayland-anchor")
             .env("XDG_RUNTIME_DIR", &xdg_runtime)
             .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
             .spawn()
-            .ok();
-        info!("✅ Portal backend: {backend}");
+            .is_ok()
+        {
+            info!("✅ Portal backend: {backend}");
+            // 等 backend 在 D-Bus 注册完毕
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        } else {
+            warn!("⚠️  Failed to start portal backend: {backend}");
+        }
     }
-    // 再启动主 daemon，--replace 保持常驻
-    std::process::Command::new("/usr/libexec/xdg-desktop-portal")
-        .arg("--replace")
+    if std::process::Command::new("/usr/libexec/xdg-desktop-portal")
+        .arg("--idle-timeout=3600000")
         .env("WAYLAND_DISPLAY", "wayland-anchor")
         .env("XDG_RUNTIME_DIR", &xdg_runtime)
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
         .spawn()
-        .ok();
-    info!("✅ xdg-desktop-portal (keep-alive)");
+        .is_ok()
+    {
+        info!("✅ xdg-desktop-portal (idle-timeout=1h)");
+    } else {
+        warn!("⚠️  Failed to start xdg-desktop-portal");
+    }
 
     // ── XWayland ──
     {
