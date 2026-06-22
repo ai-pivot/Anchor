@@ -3631,6 +3631,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .spawn()
         .ok();
 
+    // ── 启动 xdg-desktop-portal ──
+    // Portal 后端按优先级：gtk → wlr。主 daemon 最后启动。
+    // 和 fcitx5 一样用 spawn() 启动，继承 WAYLAND_DISPLAY
+    let uid = unsafe { libc::getuid() };
+    let backend = ["/usr/libexec/xdg-desktop-portal-gtk", "/usr/libexec/xdg-desktop-portal-wlr"]
+        .iter()
+        .find(|p| std::path::Path::new(p).exists());
+    if let Some(backend) = backend {
+        std::process::Command::new(*backend)
+            .env("WAYLAND_DISPLAY", "wayland-anchor")
+            .env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .ok();
+        info!("✅ Portal backend: {backend}");
+    }
+    std::process::Command::new("/usr/libexec/xdg-desktop-portal")
+        .env("WAYLAND_DISPLAY", "wayland-anchor")
+        .env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .ok();
+    info!("✅ xdg-desktop-portal");
+
     // ── XWayland ──
     {
         let eloop_handle = eloop.handle();
