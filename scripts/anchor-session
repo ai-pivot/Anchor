@@ -131,27 +131,8 @@ export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 mkdir -p "$XDG_RUNTIME_DIR"
 
 # ─── 预设 WAYLAND_DISPLAY ───
-# Anchor 使用 "wayland-anchor" 作为 socket 名称（硬编码在 src/main.rs）。
-# 必须在 exec 之前 export，这样：
-#   1. systemd 用户服务（xdg-desktop-portal-*）的 ConditionEnvironment 能通过
-#   2. 子进程（终端、应用）继承正确的 WAYLAND_DISPLAY
-# Sway/Hyprland 等合成器都这样做。
+# Anchor socket 名硬编码在 src/main.rs。Sway/Hyprland 标准做法。
 export WAYLAND_DISPLAY=wayland-anchor
-
-# ─── 清理可能阻止 portal 启动的残留配置 ───
-# 某些发行版或用户配置可能留有 mask/override 阻挡 portal 自动启动。
-# 这里做一次无害清理，不影响其他桌面环境。
-for svc in xdg-desktop-portal xdg-desktop-portal-gtk xdg-desktop-portal-wlr xdg-desktop-portal-gnome; do
-    systemctl --user unmask "$svc.service" 2>/dev/null || true
-    rm -f "$HOME/.config/systemd/user/$svc.service" 2>/dev/null
-done
-# 移除 "sleep infinity" 式 override
-rm -f "$HOME/.config/systemd/user/xdg-desktop-portal.service.d/override.conf" 2>/dev/null
-rmdir "$HOME/.config/systemd/user/xdg-desktop-portal.service.d" 2>/dev/null
-# 阻止 fake-portal 抢占 D-Bus 名称
-kill $(pgrep -f "fake-portal" 2>/dev/null) 2>/dev/null || true
-# 删除指向 fake-portal 的 D-Bus 服务文件（会拦截 org.freedesktop.portal.Desktop 激活）
-rm -f "$HOME/.local/share/dbus-1/services/org.freedesktop.portal.Desktop.service" 2>/dev/null
 
 # ─── Session 守护进程恢复（仅对 session 内重启有效）───
 # 注意：电源键物理重启场景下，这段代码**不起作用**——全新 session 启动
@@ -167,45 +148,13 @@ rm -f "$HOME/.local/share/dbus-1/services/org.freedesktop.portal.Desktop.service
 # （session 内进程替换，D-Bus session bus 仍存活）。
 if command -v dbus-update-activation-environment &>/dev/null; then
     dbus-update-activation-environment --systemd \
-        WAYLAND_DISPLAY DISPLAY XDG_SESSION_TYPE XDG_CURRENT_DESKTOP \
-        XDG_RUNTIME_DIR GTK_IM_MODULE QT_IM_MODULE XMODIFIERS 2>/dev/null
+        XDG_SESSION_TYPE XDG_CURRENT_DESKTOP \
+        DISPLAY WAYLAND_DISPLAY XDG_RUNTIME_DIR 2>/dev/null
 fi
 
 if command -v gnome-keyring-daemon &>/dev/null && \
    [ -z "$GNOME_KEYRING_CONTROL" ]; then
     eval $(gnome-keyring-daemon --start --replace --components=secrets,ssh 2>/dev/null)
-fi
-
-# ─── 激活 systemd graphical-session.target ───
-# 这是标准做法：Sway/Hyprland 等 wlroots 合成器都这样做。
-# 激活后 systemd 用户服务（包括 xdg-desktop-portal-*）会看到
-# WAYLAND_DISPLAY 已设置并自动启动。
-if command -v systemctl &>/dev/null; then
-    systemctl --user import-environment WAYLAND_DISPLAY DISPLAY \
-        XDG_SESSION_TYPE XDG_CURRENT_DESKTOP XDG_RUNTIME_DIR 2>/dev/null || true
-    systemctl --user start graphical-session.target 2>/dev/null || true
-fi
-
-# ─── 启动 xdg-desktop-portal ───
-# 即使 systemd 用户服务没起来，也直接以后台进程启动。
-# 按优先级尝试后端：gtk → wlr（自动回退）。
-# WAYLAND_DISPLAY 已在上面 export，子进程自动继承。
-PORTAL_BACKEND=""
-for candidate in /usr/libexec/xdg-desktop-portal-gtk \
-                  /usr/libexec/xdg-desktop-portal-wlr \
-                  /usr/lib/xdg-desktop-portal-gtk \
-                  /usr/lib/xdg-desktop-portal-wlr; do
-    if [ -x "$candidate" ]; then
-        "$candidate" &
-        PORTAL_BACKEND="$candidate"
-        break
-    fi
-done
-
-if [ -x /usr/libexec/xdg-desktop-portal ]; then
-    /usr/libexec/xdg-desktop-portal &
-elif [ -x /usr/lib/xdg-desktop-portal ]; then
-    /usr/lib/xdg-desktop-portal &
 fi
 
 exec "$ANCHOR_BIN" 2>&1 | tee /tmp/anchor-session.log

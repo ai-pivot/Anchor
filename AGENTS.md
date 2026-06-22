@@ -201,6 +201,13 @@ For SDDM: Create `/usr/share/wayland-sessions/anchor.desktop` with same content.
 
 1. **NEVER `systemctl restart gdm3`** (on NVIDIA) — destroys logind session → NVIDIA modes lost → Anchor broken
 2. **NEVER `sudo reboot`** — same + disconnects remote access
+3. **NEVER add `systemctl --user` to `scripts/anchor-session`** — hangs GDM session startup.
+   The systemd user bus may not be ready when the session script runs. All daemon/portal
+   spawning MUST be done from Rust code (`main.rs`) after the Wayland socket is bound.
+4. **NEVER spawn daemons from `scripts/anchor-session`** — use Rust `Command::spawn()` instead.
+   The shell `&` background processes may be killed by GDM's session wrapper.
+5. **NEVER modify `scripts/anchor-session` to manage services** — it should ONLY set env vars
+   and `exec` the compositor. Service lifecycle belongs in Rust code.
 
 ## Key Lessons
 
