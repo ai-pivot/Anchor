@@ -33,6 +33,8 @@ pub struct LockState {
     pub style: u8,
     /// Pending async PAM verification result.
     auth_result: Option<Arc<Mutex<AuthResult>>>,
+    /// Timestamp of the last unlock (prevents Escape key-repeat oscillation).
+    pub last_unlock: Option<std::time::Instant>,
 }
 
 impl LockState {
@@ -45,6 +47,7 @@ impl LockState {
             wrong: false,
             style: 0,
             auth_result: None,
+            last_unlock: None,
         }
     }
 

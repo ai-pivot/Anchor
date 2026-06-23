@@ -1459,6 +1459,7 @@ impl App {
                             match sym {
                                 Keysym::Escape => {
                                     data.lock_state.clear();
+                                    data.lock_state.last_unlock = Some(std::time::Instant::now());
                                     data.dirty = true;
                                     return FilterResult::Intercept(());
                                 }
@@ -1690,7 +1691,7 @@ impl App {
                                 Keysym::Escape => {
                                     if mods.shift {
                                         data.run = false;
-                                    } else {
+                                    } else if data.lock_state.last_unlock.map_or(true, |t| t.elapsed().as_millis() > 1000) {
                                         data.lock_state.lock(data.pointer_pos.0);
                                         data.dirty = true;
                                     }
