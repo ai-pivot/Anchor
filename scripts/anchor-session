@@ -130,10 +130,6 @@ esac
 export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 mkdir -p "$XDG_RUNTIME_DIR"
 
-# ─── 预设 WAYLAND_DISPLAY ───
-# Anchor socket 名硬编码在 src/main.rs。Sway/Hyprland 标准做法。
-export WAYLAND_DISPLAY=wayland-anchor
-
 # ─── Session 守护进程恢复（仅对 session 内重启有效）───
 # 注意：电源键物理重启场景下，这段代码**不起作用**——全新 session 启动
 # 时没有 keyring 加密密钥，gnome-keyring-daemon 即使启动也是 locked 状态。
