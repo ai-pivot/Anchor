@@ -3748,45 +3748,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .spawn()
         .ok();
 
-    // ── 启动 xdg-desktop-portal ──
-    // 先 backend，sleep 等它注册 D-Bus，再主 daemon。
-    // stderr 不重定向，让错误出现在 session log。
-    let uid = unsafe { libc::getuid() };
-    let xdg_runtime = format!("/run/user/{uid}");
-    let backend_path = [
-        "/usr/libexec/xdg-desktop-portal-gtk",
-        "/usr/libexec/xdg-desktop-portal-wlr",
-    ]
-    .iter()
-    .find(|p| std::path::Path::new(p).exists())
-    .copied();
-    if let Some(backend) = backend_path {
-        if std::process::Command::new(backend)
-            .env("WAYLAND_DISPLAY", "wayland-anchor")
-            .env("XDG_RUNTIME_DIR", &xdg_runtime)
-            .stdin(std::process::Stdio::null())
-            .spawn()
-            .is_ok()
-        {
-            info!("✅ Portal backend: {backend}");
-            // 等 backend 在 D-Bus 注册完毕
-            std::thread::sleep(std::time::Duration::from_millis(500));
-        } else {
-            warn!("⚠️  Failed to start portal backend: {backend}");
-        }
-    }
-    if std::process::Command::new("/usr/libexec/xdg-desktop-portal")
-        .arg("--idle-timeout=3600000")
-        .env("WAYLAND_DISPLAY", "wayland-anchor")
-        .env("XDG_RUNTIME_DIR", &xdg_runtime)
-        .stdin(std::process::Stdio::null())
-        .spawn()
-        .is_ok()
-    {
-        info!("✅ xdg-desktop-portal (idle-timeout=1h)");
-    } else {
-        warn!("⚠️  Failed to start xdg-desktop-portal");
-    }
 
     // ── XWayland ──
     {
