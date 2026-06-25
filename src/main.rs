@@ -3214,27 +3214,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let prefer_vendor = cfg.gpu.vendor.to_lowercase();
 
         if let Ok(entries) = std::fs::read_dir("/dev/dri") {
-            for e in entries.flatten() {
-                let name = e.file_name().to_string_lossy().to_string();
-                if name.starts_with("card") {
-                    if first_card.is_none() {
-                        first_card = Some(e.path().clone());
+            // 收集并排序条目（read_dir 不保证顺序，ext4 按 hash 返回）
+            let mut cards: Vec<(String, std::path::PathBuf)> = entries
+                .flatten()
+                .filter_map(|e| {
+                    let name = e.file_name().to_string_lossy().to_string();
+                    if name.starts_with("card") {
+                        Some((name, e.path()))
+                    } else {
+                        None
                     }
-                    if let Ok(v) =
-                        std::fs::read_to_string(format!("/sys/class/drm/{}/device/vendor", name))
-                    {
-                        let vendor = v.trim();
-                        let matches = match prefer_vendor.as_str() {
-                            "nvidia" => vendor == "0x10de",
-                            "amd" => vendor == "0x1002",
-                            "intel" => vendor == "0x8086",
-                            _ => true,
-                        };
-                        if matches && preferred.is_none() {
-                            preferred = Some(e.path());
-                            if prefer_vendor != "auto" {
-                                break;
-                            }
+                })
+                .collect();
+            cards.sort_by(|a, b| {
+                let na = a.0.trim_start_matches("card").parse::<u32>().unwrap_or(0);
+                let nb = b.0.trim_start_matches("card").parse::<u32>().unwrap_or(0);
+                na.cmp(&nb)
+            });
+            for (name, path) in cards {
+                if first_card.is_none() {
+                    first_card = Some(path.clone());
+                }
+                if let Ok(v) =
+                    std::fs::read_to_string(format!("/sys/class/drm/{}/device/vendor", name))
+                {
+                    let vendor = v.trim();
+                    let matches = match prefer_vendor.as_str() {
+                        "nvidia" => vendor == "0x10de",
+                        "amd" => vendor == "0x1002",
+                        "intel" => vendor == "0x8086",
+                        _ => true,
+                    };
+                    if matches && preferred.is_none() {
+                        preferred = Some(path);
+                        if prefer_vendor != "auto" {
+                            break;
                         }
                     }
                 }
