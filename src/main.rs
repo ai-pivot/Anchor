@@ -5786,10 +5786,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     send_frames(sp_surf.wl_surface(), now);
                 }
             }
-            // X11 surfaces — need frame callbacks to update
-            for xs in &state.workspaces[state.active_ws].x11_surfaces {
-                if let Some(wl) = xs.wl_surface() {
-                    send_frames(&wl, now);
+            // X11 surfaces — 遍历所有工作区（多显示器各自不同 ws，不能只用 active_ws）
+            for ws in &state.workspaces {
+                for xs in &ws.x11_surfaces {
+                    if let Some(wl) = xs.wl_surface() {
+                        send_frames(&wl, now);
+                    }
                 }
             }
             // X11 OR surfaces (input method popups, tooltips)
