@@ -203,32 +203,28 @@ fn parse_xcursor_file(path: &std::path::Path, target_size: usize) -> Option<Curs
     let entry_offset = best_entry?.0;
 
     // Parse image chunk
-    if entry_offset + 36 > data.len() {
+    // XCursor chunk format (libXcursor):
+    //   header(4) + type(4) + subtype(4) + version(4) = 16 bytes chunk header
+    //   For IMAGE: width(4) + height(4) + xhot(4) + yhot(4) + delay(4) = 20 bytes
+    //   Total header = 36 bytes before pixel data
+    if entry_offset + 40 > data.len() {
         return None;
     }
-    let chunk_header = u32::from_le_bytes(data[entry_offset..entry_offset + 4].try_into().ok()?);
-    if chunk_header != 0xFFFD0002 {
+    let chunk_type = u32::from_le_bytes(data[entry_offset + 4..entry_offset + 8].try_into().ok()?);
+    if chunk_type != 0xFFFD0002 {
         return None;
     }
-    let chunk_size =
-        u32::from_le_bytes(data[entry_offset + 8..entry_offset + 12].try_into().ok()?) as usize;
     let width =
-        u32::from_le_bytes(data[entry_offset + 12..entry_offset + 16].try_into().ok()?) as usize;
-    let height =
         u32::from_le_bytes(data[entry_offset + 16..entry_offset + 20].try_into().ok()?) as usize;
-    let hotspot_x =
+    let height =
         u32::from_le_bytes(data[entry_offset + 20..entry_offset + 24].try_into().ok()?) as usize;
-    let hotspot_y =
+    let hotspot_x =
         u32::from_le_bytes(data[entry_offset + 24..entry_offset + 28].try_into().ok()?) as usize;
-    let _delay = u32::from_le_bytes(data[entry_offset + 28..entry_offset + 32].try_into().ok()?);
+    let hotspot_y =
+        u32::from_le_bytes(data[entry_offset + 28..entry_offset + 32].try_into().ok()?) as usize;
+    let _delay = u32::from_le_bytes(data[entry_offset + 32..entry_offset + 36].try_into().ok()?);
 
-    // Pixels start at entry_offset + 36 (8 bytes chunk header + 4 * 7 fields = 36? No.)
-    // Actually: chunk_header(4) + subtype(4) + chunk_size(4) + width(4) + height(4) + xhot(4) + yhot(4) + delay(4) = 32
-    // But the standard says: header is 4 (type) + 4 (subtype) + 4 (version?) ...
-    // Let me re-read: the chunk starts with: type(4), subtype(4), length(4), then the image fields
-    // After the 3 header u32s: width(4), height(4), xhot(4), yhot(4), delay(4), then pixels
-    // So pixels start at entry_offset + 12 + 20 = entry_offset + 32
-    let pixel_data_offset = entry_offset + 32;
+    let pixel_data_offset = entry_offset + 36;
     let expected_len = width * height * 4;
     if pixel_data_offset + expected_len > data.len() {
         return None;

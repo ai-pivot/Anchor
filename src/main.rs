@@ -72,7 +72,7 @@ use smithay::{
     desktop::{PopupKind, PopupManager},
     input::{
         keyboard::{FilterResult, Keysym, ModifiersState, XkbConfig},
-        pointer::{AxisFrame, CursorImageStatus, MotionEvent, PointerHandle},
+        pointer::{AxisFrame, CursorImageStatus, CursorIcon, MotionEvent, PointerHandle},
         Seat, SeatHandler, SeatState,
     },
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
@@ -172,6 +172,10 @@ struct App {
     pointer_pos: (f64, f64),
     cfg: Config,
     cursor_img: cursor::CursorImage,
+    /// 当前光标状态：Named(使用命名光标) / Surface(客户端提供的表面) / Hidden(隐藏)
+    cursor_status: CursorImageStatus,
+    /// 命名光标的缓存（CursorIcon.name() → CursorImage）
+    cursor_cache: std::collections::HashMap<String, cursor::CursorImage>,
     window_titles: std::collections::HashMap<usize, String>,
     window_app_ids: std::collections::HashMap<usize, String>,
     vblank_crtcs: std::collections::HashSet<crtc::Handle>,
@@ -250,6 +254,10 @@ struct App {
     /// 预解析的颜色值（避免每帧 parse_color）
     cached_focus_color: (f32, f32, f32),
     cached_unfocus_color: (f32, f32, f32),
+    /// libseat session（用于 TTY 切换）
+    session: Option<Arc<std::sync::Mutex<LibSeatSession>>>,
+    /// VT 文件描述符（用于 VT mode 设置和切换）
+    vt_fd: Option<std::os::unix::io::OwnedFd>,
 }
 
 /// 工作区切换动画状态
@@ -331,6 +339,22 @@ impl LayoutAnimation {
 
 impl BufferHandler for App {
     fn buffer_destroyed(&mut self, _: &wl_buffer::WlBuffer) {}
+}
+
+// ── VT 切换常量（libc 中未定义）──
+const VT_ACTIVATE: u64 = 0x5606;
+const VT_WAITACTIVE: u64 = 0x5607;
+const VT_SETMODE: u64 = 0x5602;
+const VT_PROCESS: libc::c_char = 1;
+const VT_AUTO: libc::c_char = 0;
+
+#[repr(C)]
+struct VtMode {
+    mode: libc::c_char,
+    waitv: libc::c_char,
+    relsig: libc::c_short,
+    acqsig: libc::c_short,
+    frsig: libc::c_short,
 }
 
 impl App {
@@ -861,6 +885,84 @@ impl App {
             created: std::time::Instant::now(),
             duration: std::time::Duration::from_secs(3),
         });
+    }
+
+    /// 重载配置文件（不关闭窗口）
+    fn reload_config(&mut self) {
+        let new_cfg = Config::load();
+        let old_cursor_theme = self.cfg.cursor.theme.clone();
+        let old_cursor_size = self.cfg.cursor.size;
+
+        // 保留运行时状态（键盘绑定在 config 更新后不重启）
+        self.cfg = new_cfg;
+
+        // 预解析颜色缓存
+        self.cached_focus_color = config::parse_color(&self.cfg.colors.focus_border);
+        self.cached_unfocus_color = config::parse_color(&self.cfg.colors.unfocus_border);
+
+        // 如果光标主题或大小变了，重新加载
+        if self.cfg.cursor.theme != old_cursor_theme || self.cfg.cursor.size != old_cursor_size {
+            self.cursor_img = cursor::CursorImage::load_from_theme(
+                &self.cfg.cursor.theme,
+                &self.cfg.cursor.name,
+                self.cfg.cursor.size,
+            )
+            .unwrap_or_else(|| cursor::CursorImage::builtin(self.cfg.cursor.size));
+            self.cursor_cache.clear();
+        }
+
+        info!("🔄 配置已重载");
+        self.notify("配置已重载 ✓");
+        self.dirty = true;
+    }
+
+    /// 设置 VT 模式：process mode 使内核不拦截 Ctrl+Alt+Fx
+    fn set_vt_process_mode(&mut self, process: bool) {
+        if let Some(ref vt_fd) = self.vt_fd {
+            let mode = VtMode {
+                mode: if process { VT_PROCESS } else { VT_AUTO },
+                waitv: 0,
+                relsig: 0,
+                acqsig: 0,
+                frsig: 0,
+            };
+            unsafe {
+                libc::ioctl(
+                    vt_fd.as_raw_fd(),
+                    VT_SETMODE,
+                    &mode as *const VtMode,
+                );
+            }
+        }
+    }
+
+    /// 切换到指定 TTY
+    fn switch_vt(&mut self, vt: i32) {
+        // 方法 1: 通过 libseat session
+        if let Some(ref session) = self.session {
+            if let Ok(mut s) = session.lock() {
+                if s.change_vt(vt).is_ok() {
+                    info!("🖥️  切换到 TTY {} (libseat)", vt);
+                    return;
+                }
+            }
+        }
+        // 方法 2: 通过 VT ioctl
+        if let Some(ref vt_fd) = self.vt_fd {
+            unsafe {
+                libc::ioctl(vt_fd.as_raw_fd(), VT_ACTIVATE, vt);
+            }
+            unsafe {
+                libc::ioctl(vt_fd.as_raw_fd(), VT_WAITACTIVE, vt);
+            }
+            info!("🖥️  切换到 TTY {} (ioctl)", vt);
+            return;
+        }
+        // 方法 3: chvt 命令
+        let _ = std::process::Command::new("chvt")
+            .arg(vt.to_string())
+            .spawn();
+        info!("🖥️  切换到 TTY {} (chvt)", vt);
     }
 
     /// 将 PNG 图片数据设到剪贴板（image/png）
@@ -1670,6 +1772,29 @@ impl App {
                             }
                         }
 
+                        // ── Ctrl+Alt+F1..F7: 切换 TTY ──
+                        if state == KeyState::Pressed
+                            && mods.ctrl
+                            && mods.alt
+                            && !mods.logo
+                            && !mods.shift
+                        {
+                            let vt = match keysym.modified_sym() {
+                                Keysym::F1 => Some(1),
+                                Keysym::F2 => Some(2),
+                                Keysym::F3 => Some(3),
+                                Keysym::F4 => Some(4),
+                                Keysym::F5 => Some(5),
+                                Keysym::F6 => Some(6),
+                                Keysym::F7 => Some(7),
+                                _ => None,
+                            };
+                            if let Some(vt) = vt {
+                                data.switch_vt(vt);
+                                return FilterResult::Intercept(());
+                            }
+                        }
+
                         if state == KeyState::Pressed && mods.logo {
                             let uid = unsafe { libc::getuid() };
                             match keysym.modified_sym() {
@@ -1698,11 +1823,17 @@ impl App {
                                     return FilterResult::Intercept(());
                                 }
                                 // Super+Shift+R: 区域录制（选区模式）
-                                Keysym::r if mods.shift => {
+                                Keysym::R if mods.shift => {
                                     data.screenshot.begin_selection();
                                     data.record_state.selecting = true;
                                     data.notify("Select area to record (drag, Esc to cancel)");
                                     data.dirty = true;
+                                    return FilterResult::Intercept(());
+                                }
+                                // Super+Shift+C: 重载配置（不关闭窗口）
+                                // 注意：Shift 下 modified_sym() 返回大写 C
+                                Keysym::C if mods.shift => {
+                                    data.reload_config();
                                     return FilterResult::Intercept(());
                                 }
                                 Keysym::q => {
@@ -3151,7 +3282,34 @@ impl SeatHandler for App {
             }
         }
     }
-    fn cursor_image(&mut self, _: &Seat<Self>, _: CursorImageStatus) {}
+    fn cursor_image(&mut self, _: &Seat<Self>, status: CursorImageStatus) {
+        // 如果是命名光标，尝试从主题加载对应光标图像并缓存
+        if let CursorImageStatus::Named(ref icon) = status {
+            let name = icon.name().to_string();
+            if !self.cursor_cache.contains_key(&name) {
+                let theme = self.cfg.cursor.theme.clone();
+                let size = self.cfg.cursor.size;
+                let fallback = self.cursor_img.clone();
+
+                let img = cursor::CursorImage::load_from_theme(&theme, &name, size)
+                    .or_else(|| {
+                        // 尝试 X11 旧名称（如 "hand2"、"xterm" 等）
+                        for alt in icon.alt_names() {
+                            if let Some(img) =
+                                cursor::CursorImage::load_from_theme(&theme, alt, size)
+                            {
+                                return Some(img);
+                            }
+                        }
+                        None
+                    })
+                    .unwrap_or(fallback);
+                self.cursor_cache.insert(name, img);
+            }
+        }
+        self.cursor_status = status;
+        self.dirty = true;
+    }
 }
 
 #[derive(Default)]
@@ -3382,6 +3540,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         pointer,
         cfg,
         cursor_img,
+        cursor_status: CursorImageStatus::Named(CursorIcon::Default),
+        cursor_cache: std::collections::HashMap::new(),
         pointer_pos: (0.0, 0.0),
         window_titles: std::collections::HashMap::new(),
         window_app_ids: std::collections::HashMap::new(),
@@ -3435,6 +3595,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         last_frame_time: std::time::Instant::now(),
         // Overview 状态机
         overview: OverviewState::default(),
+        session: session.clone(),
+        vt_fd: std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open("/dev/tty0")
+            .ok()
+            .map(|f| std::os::unix::io::OwnedFd::from(f)),
     };
     let listener = ListeningSocket::bind("wayland-anchor")?;
     std::env::set_var("WAYLAND_DISPLAY", "wayland-anchor");
@@ -3467,10 +3634,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 SessionEvent::ActivateSession => {
                     info!("▶️  会话激活");
                     state.active = true;
+                    // 设置 VT 为 process mode，使内核不拦截 Ctrl+Alt+Fx
+                    state.set_vt_process_mode(true);
                 }
                 SessionEvent::PauseSession => {
                     info!("⏸️  会话暂停");
                     state.active = false;
+                    // 恢复 VT 为 auto mode
+                    state.set_vt_process_mode(false);
                 }
             })?;
     }
@@ -4733,6 +4904,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         // ═══════════════════════════════════════════════
                         // Phase 2: bind + render everything (full control)
                         // ═══════════════════════════════════════════════
+                        // ── 收集光标表面元素（必须在 bind 之前，因为需要 &mut renderer）──
+                        let mut cursor_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+                            Vec::new();
+                        if let CursorImageStatus::Surface(surface) = &state.cursor_status {
+                            let (ox, oy, _, _) =
+                                state.output_sizes.get(oi).copied().unwrap_or((0, 0, 0, 0));
+                            // 读取客户端设置的光标热点（hotspot），用于正确定位光标
+                            let mut hotspot = Point::<i32, Logical>::from((0, 0));
+                            let _ = smithay::wayland::compositor::with_states(surface, |states| {
+                                if let Some(data) = states.data_map.get::<smithay::input::pointer::CursorImageSurfaceData>() {
+                                    hotspot = data.lock().unwrap().hotspot;
+                                }
+                            });
+                            let cursor_pos = Point::<i32, Physical>::from((
+                                state.pointer_pos.0 as i32 - ox - hotspot.x,
+                                state.pointer_pos.1 as i32 - oy - hotspot.y,
+                            ));
+                            cursor_elems = render_elements_from_surface_tree(
+                                &mut renderer,
+                                surface,
+                                cursor_pos,
+                                1.0,
+                                1.0,
+                                Kind::Unspecified,
+                            );
+                        }
+
                         let mut target = renderer.bind(&mut dmabuf)?;
                         let sp_size = Size::<i32, Physical>::new(ow, oh);
                         let mut f = renderer.render(&mut target, sp_size, Transform::Normal)?;
@@ -5608,14 +5806,50 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                         // Step 8: Cursor — 只在鼠标所在的 output 上渲染（坐标需要转换）
                         if is_focused_output {
-                            let (ox, _oy, _ow, _oh) =
-                                state.output_sizes.get(oi).copied().unwrap_or((0, 0, 0, 0));
-                            let cx =
-                                state.pointer_pos.0 as i32 - ox - state.cursor_img.hotspot_x as i32;
-                            let cy = state.pointer_pos.1 as i32
-                                - _oy
-                                - state.cursor_img.hotspot_y as i32;
-                            state.cursor_img.render_batched(&mut f, cx, cy);
+                            match &state.cursor_status {
+                                CursorImageStatus::Hidden => {
+                                    // 光标隐藏（例如：视频全屏、游戏）
+                                }
+                                CursorImageStatus::Surface(_) => {
+                                    // 客户端提供了自定义光标表面，渲染它
+                                    if !cursor_elems.is_empty() {
+                                        let _ = draw_render_elements(&mut f, 1.0, &cursor_elems, &[dmg]);
+                                    } else {
+                                        // 回退：无元素时使用默认光标
+                                        let (ox, _oy, _, _) = state
+                                            .output_sizes
+                                            .get(oi)
+                                            .copied()
+                                            .unwrap_or((0, 0, 0, 0));
+                                        let cx = state.pointer_pos.0 as i32
+                                            - ox
+                                            - state.cursor_img.hotspot_x as i32;
+                                        let cy = state.pointer_pos.1 as i32
+                                            - _oy
+                                            - state.cursor_img.hotspot_y as i32;
+                                        state.cursor_img.render_batched(&mut f, cx, cy);
+                                    }
+                                }
+                                CursorImageStatus::Named(icon) => {
+                                    // 使用命名光标，优先从缓存取，否则用默认
+                                    let img = state
+                                        .cursor_cache
+                                        .get(icon.name())
+                                        .unwrap_or(&state.cursor_img);
+                                    let (ox, _oy, _, _) = state
+                                        .output_sizes
+                                        .get(oi)
+                                        .copied()
+                                        .unwrap_or((0, 0, 0, 0));
+                                    let cx = state.pointer_pos.0 as i32
+                                        - ox
+                                        - img.hotspot_x as i32;
+                                    let cy = state.pointer_pos.1 as i32
+                                        - _oy
+                                        - img.hotspot_y as i32;
+                                    img.render_batched(&mut f, cx, cy);
+                                }
+                            }
                         }
 
                         // Step 9: Screenshot area selection overlay

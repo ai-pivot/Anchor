@@ -63,7 +63,7 @@ header_bar_height = 0
 "super+w" = "wallpaper_next"
 
 [terminal]
-command = "foot"
+command = "kitty"
 font = "monospace"
 font_size = 12
 
@@ -99,6 +99,10 @@ workspace = 0
 # gpu_device: 指定 DRM 设备路径（优先于 vendor）
 #   "" 或不设置 — 自动检测
 #   "/dev/dri/card1" — 手动指定
+[cursor]
+# X11 cursor theme name. "JokeBear" = Joke Bear - Jikochou Kuma animated cursor
+theme = "JokeBear"
+
 [gpu]
 vendor = "auto"
 device = ""
