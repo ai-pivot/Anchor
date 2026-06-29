@@ -67,6 +67,8 @@ build.rs          — Build script (links libpam)
 | App launcher | `Super+D` | Built-in launcher with search filter, blinking cursor |
 | Fullscreen | `Super+F` | Per-window fullscreen |
 | Move window | `Super+Shift+1-9` | Move focused window to workspace |
+| Cursor theme | config.toml | Custom XCursor theme via `[cursor] theme` |
+| VT switching | Auto | VT_SETMODE ioctl for proper TTY switch |
 | Close | `Super+Q` | Close focused window |
 | XWayland | Auto | X11 app support (Feishu, Chrome, Edge, etc.) |
 | Lock screen | `Super+Esc` | 5 random animated styles, PAM password auth, shake on error |
