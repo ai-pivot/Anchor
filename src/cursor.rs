@@ -107,7 +107,8 @@ impl CursorImage {
                 let r = self.pixels[idx] as f32 / 255.0;
                 let g = self.pixels[idx + 1] as f32 / 255.0;
                 let b = self.pixels[idx + 2] as f32 / 255.0;
-                let color = Color32F::new(r, g, b, 1.0);
+                let alpha = a as f32 / 255.0;
+                let color = Color32F::new(r, g, b, alpha);
                 let _ = f.clear(
                     color,
                     &[Rectangle::new(
@@ -152,7 +153,8 @@ impl CursorImage {
             let r = rgba[0] as f32 / 255.0;
             let g = rgba[1] as f32 / 255.0;
             let b = rgba[2] as f32 / 255.0;
-            let color = Color32F::new(r, g, b, 1.0);
+            let a = rgba[3] as f32 / 255.0;
+            let color = Color32F::new(r, g, b, a);
             let _ = f.clear(color, &rects);
         }
     }

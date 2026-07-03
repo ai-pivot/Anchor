@@ -339,6 +339,11 @@ fn dirs() -> std::path::PathBuf {
     Path::new(&base).join("anchor").to_path_buf()
 }
 
+/// 返回配置文件路径 (~/.config/anchor/config.toml)
+pub fn config_path() -> std::path::PathBuf {
+    dirs().join("config.toml")
+}
+
 // ── Defaults ────────────────────────────────────────
 
 impl Default for Config {

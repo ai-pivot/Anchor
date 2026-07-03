@@ -27,6 +27,8 @@ use workspace::{WindowSlot, Workspace, NUM_WORKSPACES};
 mod overview;
 use overview::OverviewState;
 mod headerbar;
+mod settings;
+use settings::SettingsState;
 use headerbar::{
     ensure_header_bar_data, get_header_bar_info, set_client_decoration, set_header_bar_height,
     HeaderBarData,
@@ -170,6 +172,8 @@ struct App {
     kbd: smithay::input::keyboard::KeyboardHandle<Self>,
     pointer: PointerHandle<Self>,
     pointer_pos: (f64, f64),
+    /// 上一次指针焦点 surface（用于检测焦点切换并重置光标）
+    pointer_focus_surface: Option<WlSurface>,
     cfg: Config,
     cursor_img: cursor::CursorImage,
     /// 当前光标状态：Named(使用命名光标) / Surface(客户端提供的表面) / Hidden(隐藏)
@@ -247,6 +251,8 @@ struct App {
     last_frame_time: std::time::Instant,
     // ── Overview 状态机（任务面板 + 鸟瞰视图）──
     overview: OverviewState,
+    // ── Settings Panel（可视化配置界面）──
+    settings: SettingsState,
     /// 窗口打开/关闭动画（ws_idx, start_time, is_open）
     window_anims: Vec<(usize, std::time::Instant, bool)>,
     /// Mission Control 缩略图点击区域 (tx, ty, tw, th, ws_idx, slot)
@@ -1646,6 +1652,80 @@ impl App {
                             }
                         }
 
+                        // ── Settings Panel 键盘处理 ──
+                        if data.settings.is_active() && state == KeyState::Pressed {
+                            let sym = keysym.modified_sym();
+                            match sym {
+                                Keysym::Escape => {
+                                    data.settings.close();
+                                    data.dirty = true;
+                                    return FilterResult::Intercept(());
+                                }
+                                Keysym::Tab => {
+                                    let tab = if mods.shift {
+                                        data.settings.tab().prev()
+                                    } else {
+                                        data.settings.tab().next()
+                                    };
+                                    data.settings.switch_tab(tab);
+                                    data.dirty = true;
+                                    return FilterResult::Intercept(());
+                                }
+                                Keysym::Up => {
+                                    data.settings.prev_focus();
+                                    data.dirty = true;
+                                    return FilterResult::Intercept(());
+                                }
+                                Keysym::Down => {
+                                    data.settings.next_focus();
+                                    data.dirty = true;
+                                    return FilterResult::Intercept(());
+                                }
+                                Keysym::Left => {
+                                    data.settings.adjust_focus(-1.0);
+                                    data.dirty = true;
+                                    return FilterResult::Intercept(());
+                                }
+                                Keysym::Right => {
+                                    data.settings.adjust_focus(1.0);
+                                    data.dirty = true;
+                                    return FilterResult::Intercept(());
+                                }
+                                Keysym::Return => {
+                                    if mods.ctrl {
+                                        // Ctrl+Enter: Apply (保存到 disk)
+                                        match data.settings.apply() {
+                                            Ok(()) => {
+                                                // 重新加载配置到运行时
+                                                data.cfg = crate::config::Config::load();
+                                                data.cached_focus_color = config::parse_color(&data.cfg.colors.focus_border);
+                                                data.cached_unfocus_color = config::parse_color(&data.cfg.colors.unfocus_border);
+                                                data.notify("✓ Configuration saved");
+                                                data.dirty = true;
+                                            }
+                                            Err(e) => {
+                                                data.notify(&format!("✗ Failed: {}", e));
+                                            }
+                                        }
+                                        return FilterResult::Intercept(());
+                                    }
+                                    // 普通 Enter: 激活当前聚焦控件（toggle/radio）
+                                    data.settings.activate_focus();
+                                    data.dirty = true;
+                                    return FilterResult::Intercept(());
+                                }
+                                Keysym::r if mods.ctrl => {
+                                    // Ctrl+R: 重置编辑
+                                    data.settings.reset(&data.cfg);
+                                    data.dirty = true;
+                                    return FilterResult::Intercept(());
+                                }
+                                _ => {
+                                    return FilterResult::Intercept(());
+                                }
+                            }
+                        }
+
                         // ── Expose 模式：Tab/方向键选窗口 ──
                         if data.overview.is_expose() && state == KeyState::Pressed {
                             let sym = keysym.modified_sym();
@@ -1936,6 +2016,16 @@ impl App {
                                 }
                                 Keysym::d => {
                                     data.launcher.toggle(&data.cfg.terminal.command);
+                                    data.dirty = true;
+                                    return FilterResult::Intercept(());
+                                }
+                                Keysym::comma => {
+                                    // Super + , → 打开 Settings Panel
+                                    if !data.settings.is_active() {
+                                        data.settings.open(&data.cfg);
+                                    } else {
+                                        data.settings.close();
+                                    }
                                     data.dirty = true;
                                     return FilterResult::Intercept(());
                                 }
@@ -2292,6 +2382,16 @@ impl App {
                 let serial = SERIAL_COUNTER.next_serial();
                 let time = (event.time() / 1000) as u32;
                 let focus = self.pointer_focus();
+
+                // 检查指针焦点 surface 是否变化——如果变化，强制重置光标为 Default。
+                // X11 应用在窗口边缘设置的 resize 光标可能残留，需要在离开时清除。
+                let focus_surface = focus.as_ref().map(|(s, _)| s.clone());
+                if focus_surface.as_ref() != self.pointer_focus_surface.as_ref() {
+                    self.pointer_focus_surface = focus_surface;
+                    // 焦点切换 → 重置光标，新焦点 client 会通过 set_cursor 设置正确光标
+                    self.cursor_status = CursorImageStatus::Named(CursorIcon::Default);
+                }
+
                 let ptr = self.pointer.clone();
                 // 转为 output 局部坐标（pointer_focus 返回的 offset 也是 output 局部的）
                 let oi = self.output_at_pointer();
@@ -2315,6 +2415,10 @@ impl App {
             InputEvent::PointerButton { event } => {
                 // 锁屏模式：阻止鼠标按钮
                 if self.lock_state.locked {
+                    return;
+                }
+                // ── Settings Panel 模式：拦截所有鼠标事件 ──
+                if self.settings.is_active() {
                     return;
                 }
                 // ── Overview / Task Panel 模式：拦截所有鼠标事件 ──
@@ -2621,6 +2725,24 @@ impl App {
                     }
                 }
 
+                // 点击浮动 OR 窗口（Dialog/菜单等）时设置键盘焦点
+                if event.state() == ButtonState::Pressed {
+                    let btn_focus = self.pointer_focus();
+                    if let Some((surf, _)) = &btn_focus {
+                        let kbd_focus = self.kbd.clone();
+                        let current_focus = self.workspaces[self.active_ws].focus.as_ref();
+                        if current_focus != Some(surf) {
+                            // 检查是否是 OR surface
+                            let is_or = self.xw.or_surfaces.iter()
+                                .any(|xs| xs.wl_surface().as_ref() == Some(surf));
+                            if is_or {
+                                let focus_serial = SERIAL_COUNTER.next_serial();
+                                kbd_focus.set_focus(self, Some(surf.clone()), focus_serial);
+                            }
+                        }
+                    }
+                }
+
                 // 转发按钮事件给客户端
                 let serial = SERIAL_COUNTER.next_serial();
                 let time = (event.time() / 1000) as u32;
@@ -2639,6 +2761,10 @@ impl App {
             InputEvent::PointerAxis { event } => {
                 // 锁屏模式：阻止滚轮
                 if self.lock_state.locked {
+                    return;
+                }
+                // ── Settings Panel 模式：拦截滚轮 ──
+                if self.settings.is_active() {
                     return;
                 }
                 let time = (event.time() / 1000) as u32;
@@ -2879,6 +3005,11 @@ impl XdgShellHandler for App {
                 || app_id.contains("wl-paste");
             if !app_id.is_empty() && !is_clipboard {
                 info!("✅ pending → tiling (app_id='{}')", app_id);
+                // 全屏时打开新窗口 → 立刻退出全屏，让用户看到新窗口
+                if self.workspaces[self.active_ws].fullscreen.is_some() {
+                    self.workspaces[self.active_ws].fullscreen = None;
+                    info!("🪟 全屏退出（本桌面新窗口打开）");
+                }
                 self.workspaces[self.active_ws].tops.push(surface.clone());
                 let new_idx = self.workspaces[self.active_ws].tops.len() - 1;
                 // 智能插入：根据 split 方向，将新窗口放在焦点窗口旁边
@@ -2935,6 +3066,11 @@ impl XdgShellHandler for App {
                             let top = self.workspaces[ws_idx].tops.remove(idx);
                             self.remap_prev_after_remove(&WindowSlot::Wl(idx));
                             self.workspaces[ws_idx].rebuild_order();
+                            // 如果目标工作区在全屏，退出全屏让用户看到新窗口
+                            if self.workspaces[target_ws].fullscreen.is_some() {
+                                self.workspaces[target_ws].fullscreen = None;
+                                info!("🪟 全屏退出（窗口规则: '{}' → 工作区 {}）", app_id, target_ws + 1);
+                            }
                             self.workspaces[target_ws].tops.push(top);
                             self.workspaces[target_ws].rebuild_order();
                             self.switch_workspace(target_ws);
@@ -3264,25 +3400,49 @@ impl SeatHandler for App {
         // Update primary selection focus
         smithay::wayland::selection::primary_selection::set_primary_focus::<App>(&dh, seat, client);
 
-        // Deactivate all X11 surfaces first
+        // Deactivate all X11 surfaces first (tiled + floating)
         for ws in &self.workspaces {
             for xs in &ws.x11_surfaces {
                 let _ = xs.set_activated(false);
             }
         }
-        // Activate the focused X11 surface
+        for xs in &self.xw.or_surfaces {
+            let _ = xs.set_activated(false);
+        }
+        // Activate the focused X11 surface — check tiled surfaces
         if let Some(surf) = surface {
             for ws in &self.workspaces {
                 for xs in &ws.x11_surfaces {
                     if xs.wl_surface().as_ref() == Some(surf) {
                         let _ = xs.set_activated(true);
+                        // X11 surface activated: reset cursor — XWayland will set it via set_cursor
+                        self.cursor_image(seat, CursorImageStatus::Named(CursorIcon::Default));
                         return;
                     }
                 }
             }
+            // Also check floating OR surfaces (Dialog/Utility/etc.)
+            for xs in &self.xw.or_surfaces {
+                if xs.wl_surface().as_ref() == Some(surf) {
+                    let _ = xs.set_activated(true);
+                    return;
+                }
+            }
+        } else {
+            // Focus left all surfaces (e.g. pointer on desktop) — reset to default cursor
+            self.cursor_image(seat, CursorImageStatus::Named(CursorIcon::Default));
         }
     }
     fn cursor_image(&mut self, _: &Seat<Self>, status: CursorImageStatus) {
+        // 始终使用主题光标（自嘲熊）。拒绝 XWayland 的 Surface 光标——
+        // 它们的尺寸/缩放与合成器不匹配会导致拉伸变形，且 X11 应用
+        // 离开窗口边缘后不主动重设光标，导致光标卡住。
+        // 拒绝 Surface 后，所有光标都用 Named + 主题渲染，保证一致性。
+        let status = match status {
+            CursorImageStatus::Surface(_) => CursorImageStatus::Named(CursorIcon::Default),
+            other => other,
+        };
+
         // 如果是命名光标，尝试从主题加载对应光标图像并缓存
         if let CursorImageStatus::Named(ref icon) = status {
             let name = icon.name().to_string();
@@ -3543,6 +3703,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cursor_status: CursorImageStatus::Named(CursorIcon::Default),
         cursor_cache: std::collections::HashMap::new(),
         pointer_pos: (0.0, 0.0),
+        pointer_focus_surface: None,
         window_titles: std::collections::HashMap::new(),
         window_app_ids: std::collections::HashMap::new(),
         vblank_crtcs: std::collections::HashSet::new(),
@@ -3595,6 +3756,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         last_frame_time: std::time::Instant::now(),
         // Overview 状态机
         overview: OverviewState::default(),
+        // Settings Panel 状态机
+        settings: SettingsState::default(),
         session: session.clone(),
         vt_fd: std::fs::OpenOptions::new()
             .read(true)
@@ -4126,6 +4289,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         state.dirty = true;
                     }
                 }
+            }
+
+            // ── Settings Panel 状态更新 ──
+            if state.settings.is_active() {
+                state.settings.update_close();
+                state.settings.update_saving();
             }
 
             for oi in 0..anchor_outputs.len() {
@@ -5804,6 +5973,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             );
                         }
 
+                        // Step 7.5: Settings Panel — 可视化配置界面
+                        if is_focused_output && state.settings.is_active() {
+                            settings::render::render_settings_panel(
+                                &mut f,
+                                &state.cfg,
+                                ow,
+                                oh,
+                                &state.settings,
+                                state.frame,
+                            );
+                        }
+
                         // Step 8: Cursor — 只在鼠标所在的 output 上渲染（坐标需要转换）
                         if is_focused_output {
                             match &state.cursor_status {
@@ -6057,6 +6238,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if state.overview.is_active() {
                 state.dirty = true;
             }
+            // Settings Panel 动画进行中时持续请求渲染
+            if state.settings.is_active() {
+                state.dirty = true;
+            }
             // 弹簧滚动动画进行中时持续请求渲染（与 ws_anim 同模式）
             if !state.scroll_spring.is_settled(0.001) {
                 state.dirty = true;
@@ -6258,9 +6443,9 @@ impl smithay::xwayland::XwmHandler for App {
     ) {
         use smithay::xwayland::xwm::WmWindowType;
 
-        // is_aux: 只有真正的 OR 窗口（tooltip, popup menu）和 notification 才进 or_surfaces
-        // Dialog/Utility/Menu 等作为正常窗口进入 tiling 布局（确保能交互）
-        // is_transient_for 不再单独作为判断条件——transient dialog 应该能接收焦点和交互
+        // is_aux: tooltip/popup/notification → 浮动，不抢焦点
+        // is_floating: Dialog/Utility/Menu → 浮动，但需要焦点和交互
+        //      Dialog 不应进入 tiling（强制缩放会破坏内部布局，且菜单坐标系错乱）
         let is_aux = matches!(
             window.window_type(),
             Some(WmWindowType::Tooltip)
@@ -6268,14 +6453,22 @@ impl smithay::xwayland::XwmHandler for App {
                 | Some(WmWindowType::DropdownMenu)
                 | Some(WmWindowType::Notification)
         );
+        let is_floating = !is_aux && matches!(
+            window.window_type(),
+            Some(WmWindowType::Dialog)
+                | Some(WmWindowType::Utility)
+                | Some(WmWindowType::Menu)
+                | Some(WmWindowType::Splash)
+        );
 
         tracing::info!(
-            "🗺️  X11 map_request: class='{}' title='{}' type={:?} transient={:?} aux={} has_wl_surface={}",
+            "🗺️  X11 map_request: class='{}' title='{}' type={:?} transient={:?} aux={} floating={} has_wl_surface={}",
             window.class(),
             window.title(),
             window.window_type(),
             window.is_transient_for(),
             is_aux,
+            is_floating,
             window.wl_surface().is_some()
         );
 
@@ -6287,12 +6480,27 @@ impl smithay::xwayland::XwmHandler for App {
         let wid = window.window_id();
 
         if is_aux {
-            // 辅助窗口（IM候选框、对话框、菜单等）：
-            // 放入 or_surfaces 作为浮动窗口，接受客户端自己的位置，
-            // 不参与平铺布局，不抢焦点。
-            tracing::info!("📌 X11 aux → floating overlay");
+            // 辅助窗口（tooltip、IM候选框等）：浮动，不抢焦点
+            tracing::info!("📌 X11 aux → floating overlay (no focus)");
             if !self.xw.or_surfaces.iter().any(|s| s.window_id() == wid) {
                 self.xw.or_surfaces.push(window);
+            }
+        } else if is_floating {
+            // Dialog/Utility/Menu：浮动，但需要焦点和交互
+            // 不进入 tiling 避免被强制缩放（缩放会破坏内部菜单坐标系）
+            tracing::info!("🪟 X11 floating dialog → overlay (with focus): class='{}'", window.class());
+            if !self.xw.or_surfaces.iter().any(|s| s.window_id() == wid) {
+                // 接受客户端请求的尺寸和位置
+                let geo = window.geometry();
+                let _ = window.configure(Some(geo));
+                self.xw.or_surfaces.push(window.clone());
+            }
+            // 设置键盘焦点
+            if let Some(wl) = window.wl_surface() {
+                self.x11_saved_focus = self.workspaces[self.active_ws].focus.clone();
+                let kbd = self.kbd.clone();
+                let serial = SERIAL_COUNTER.next_serial();
+                kbd.set_focus(self, Some(wl), serial);
             }
         } else {
             // 普通窗口：跟随 transient_for 父窗口所在的 workspace
@@ -6337,6 +6545,11 @@ impl smithay::xwayland::XwmHandler for App {
             let ws = &mut self.workspaces[target_ws];
             let is_new = !ws.x11_surfaces.iter().any(|s| s.window_id() == wid);
             if is_new {
+                // 全屏时打开新窗口 → 立刻退出全屏
+                if ws.fullscreen.is_some() {
+                    ws.fullscreen = None;
+                    info!("🪟 全屏退出（本桌面新 X11 窗口打开）");
+                }
                 ws.x11_surfaces.push(window.clone());
                 ws.rebuild_order();
             }

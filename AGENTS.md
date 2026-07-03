@@ -26,6 +26,10 @@ src/
   auth.rs        — PAM authentication via FFI (lock screen password verification)
   wallpaper.rs   — Wallpaper loading and caching (gradient, image, random)
   cursor.rs      — XCursor theme loading and rendering
+  settings/
+    mod.rs        — SettingsState state machine (Active/Closing/Saving/Inactive, tab enum, config I/O)
+    widgets.rs    — UI primitives (Slider, Toggle, ColorSwatch, Button, Checkbox, glow_border)
+    render.rs     — Panel rendering (overlay, sidebar, content pages, bottom bar)
   notify.rs      — DBus notification listener (org.freedesktop.Notifications)
   screenshot.rs  — Screenshot capture (area selection, DRM framebuffer dump)
   overview.rs    — Overview/Task Panel state machine (Cover Flow, animation)
@@ -74,6 +78,7 @@ build.rs          — Build script (links libpam)
 | Lock screen | `Super+Esc` | 5 random animated styles, PAM password auth, shake on error |
 | Task Panel | `Super+Tab` | Real window thumbnails with titles + borders |
 | Overview | `Super+A` | Cover Flow 3D with hover pulse + window titles |
+| Settings | `Super+,` | Visual config panel (colors/layout/bar/wallpaper), live preview, Ctrl+Enter apply |
 
 ## Rendering Pipeline
 
@@ -91,6 +96,7 @@ Step 4.8: Overview/Task Panel (Cover Flow 3D / real thumbnails + titles + shadow
 Step 5:   Headbar (gradient ws blocks + sliding indicator + pulse clock + CPU/MEM glow)
 Step 6:   Notifications (toast overlay with shadow)
 Step 7:   App launcher (search with blinking cursor + glow border)
+Step 7.5: Settings Panel (visual config overlay — colors/layout/bar/wallpaper)
 Step 8:   Cursor
 Step 9:   Screenshot area selection overlay
 Step 10:  Screenshot capture (copy_framebuffer after finish, before drop target)
@@ -336,6 +342,22 @@ For SDDM: Create `/usr/share/wayland-sessions/anchor.desktop` with same content.
     打开的 MPV）进入 tiling 布局后：没有 focus → 无法交互、Super+Q 关不掉；
     没有 configure → 客户端不渲染 → 窗口透明。`surface_associated` 不能只
     设 `dirty = true`，必须完整处理 focus + layout。
+27. **X11 Dialog/Utility/Menu 窗口必须进入浮动层（or_surfaces），不能进 tiling。**
+    Dialog 类型的 X11 窗口（如 QQ 文件选择器、飞书弹窗等）如果被 tiling
+    强制缩放，内部菜单坐标系会错乱，右键菜单无法定位，导致无法交互。
+    必须把 Dialog/Utility/Menu/Splash 类型放入 `or_surfaces` 作为浮动窗口，
+    接受客户端请求的 geometry，并设置键盘焦点。
+    `focus_changed` 必须同时遍历 `ws.x11_surfaces` 和 `or_surfaces` 来设
+    `set_activated`，否则浮动 Dialog 永远拿不到激活状态。
+28. **Settings Panel 关闭动画需要两阶段清除。** Closing 状态的 `progress()`
+    从 1→0 渐隐，但最后一帧 elapsed≥durationms 时如果直接切 `Inactive`，
+    渲染停止时面板还有 ~23% 不透明度 → 鬼影永久残留。必须在 `done=true`
+    阶段保持 `Closing` 一帧让 `progress()` 返回 0 → 渲染 early return →
+    画面干净清除后再切 `Inactive`。
+29. **cursor alpha 不能硬编码为 1.0。** `CursorImage::render` 和
+    `render_batched` 中 `Color32F::new(r,g,b,1.0)` 丢失了像素的 alpha 通道，
+    导致自嘲熊光标的抗锯齿边缘变硬、阴影变实，视觉中心偏移看起来"位置不对"。
+    必须用 `Color32F::new(r,g,b,a)` 传入真实 alpha 值。
 
 ## 渲染循环与动画架构
 
