@@ -342,11 +342,12 @@ For SDDM: Create `/usr/share/wayland-sessions/anchor.desktop` with same content.
     打开的 MPV）进入 tiling 布局后：没有 focus → 无法交互、Super+Q 关不掉；
     没有 configure → 客户端不渲染 → 窗口透明。`surface_associated` 不能只
     设 `dirty = true`，必须完整处理 focus + layout。
-27. **X11 Dialog/Utility/Menu 窗口必须进入浮动层（or_surfaces），不能进 tiling。**
-    Dialog 类型的 X11 窗口（如 QQ 文件选择器、飞书弹窗等）如果被 tiling
-    强制缩放，内部菜单坐标系会错乱，右键菜单无法定位，导致无法交互。
-    必须把 Dialog/Utility/Menu/Splash 类型放入 `or_surfaces` 作为浮动窗口，
-    接受客户端请求的 geometry，并设置键盘焦点。
+27. **X11 Dialog 分流：有父 Dialog 平铺，无父/菜单类窗口浮动。**
+    XWayland 文件选择器通常是 `WmWindowType::Dialog` 且带 `transient_for`，
+    必须跟随父 X11 窗口所在 workspace/output 进入 `ws.x11_surfaces` 平铺；
+    否则会走全局 `or_surfaces` 浮动层，表现为固定在屏幕 1 悬浮。
+    无父 Dialog 以及 Utility/Menu/Splash 仍放入 `or_surfaces`，接受客户端
+    请求的 geometry，并设置键盘焦点，避免菜单/工具窗被强制缩放导致坐标错乱。
     `focus_changed` 必须同时遍历 `ws.x11_surfaces` 和 `or_surfaces` 来设
     `set_activated`，否则浮动 Dialog 永远拿不到激活状态。
 28. **Settings Panel 关闭动画需要两阶段清除。** Closing 状态的 `progress()`

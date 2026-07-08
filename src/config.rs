@@ -30,6 +30,8 @@ pub struct Config {
     pub outputs: Vec<OutputConfig>,
     #[serde(default)]
     pub scroll: ScrollConfig,
+    #[serde(default)]
+    pub idle: IdleConfig,
 }
 
 /// 窗口规则：根据 app-id 或 title 自动分配工作区/布局
@@ -269,6 +271,43 @@ impl ScrollConfig {
     }
 }
 
+/// 空闲与电源管理配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdleConfig {
+    /// 空闲超时（秒），0=禁用。超时后屏幕 DPMS off
+    #[serde(default = "IdleConfig::default_timeout")]
+    pub timeout: u64,
+    /// 空闲超时后是否自动锁屏
+    #[serde(default = "IdleConfig::default_lock_on_idle")]
+    pub lock_on_idle: bool,
+    /// DPMS 关闭延迟（秒，在 idle timeout 之后）。
+    /// 0=与 timeout 同时关闭。设为更大值则先锁屏再息屏。
+    #[serde(default = "IdleConfig::default_dpms_delay")]
+    pub dpms_delay: u64,
+}
+
+impl Default for IdleConfig {
+    fn default() -> Self {
+        Self {
+            timeout: IdleConfig::default_timeout(),
+            lock_on_idle: IdleConfig::default_lock_on_idle(),
+            dpms_delay: IdleConfig::default_dpms_delay(),
+        }
+    }
+}
+
+impl IdleConfig {
+    fn default_timeout() -> u64 {
+        300 // 5 分钟
+    }
+    fn default_lock_on_idle() -> bool {
+        true
+    }
+    fn default_dpms_delay() -> u64 {
+        0 // 与 timeout 同时
+    }
+}
+
 pub fn parse_color(hex: &str) -> (f32, f32, f32) {
     let hex = hex.trim_start_matches('#');
     if hex.len() < 6 {
@@ -360,6 +399,7 @@ impl Default for Config {
             gpu: Gpu::default(),
             cursor: Cursor::default(),
             scroll: ScrollConfig::default(),
+            idle: IdleConfig::default(),
             outputs: Vec::new(),
         }
     }

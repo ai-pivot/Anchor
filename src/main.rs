@@ -67,10 +67,11 @@ use smithay::{
         },
         session::{libseat::LibSeatSession, Event as SessionEvent, Session},
     },
-    delegate_compositor, delegate_data_device, delegate_input_method_manager, delegate_output,
-    delegate_primary_selection, delegate_seat, delegate_shm, delegate_text_input_manager,
-    delegate_virtual_keyboard_manager, delegate_xdg_activation, delegate_xdg_decoration,
-    delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_fractional_scale,
+    delegate_idle_inhibit, delegate_idle_notify, delegate_input_method_manager, delegate_layer_shell,
+    delegate_output, delegate_primary_selection, delegate_seat, delegate_shm,
+    delegate_text_input_manager, delegate_virtual_keyboard_manager, delegate_viewporter,
+    delegate_xdg_activation, delegate_xdg_decoration, delegate_xdg_shell,
     desktop::{PopupKind, PopupManager},
     input::{
         keyboard::{FilterResult, Keysym, ModifiersState, XkbConfig},
@@ -79,20 +80,23 @@ use smithay::{
     },
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
     reexports::{
-        calloop::EventLoop,
+        calloop::{EventLoop, LoopHandle},
         drm::control::{connector, crtc, Device as _},
         wayland_server::{
             protocol::{wl_seat, wl_surface::WlSurface},
             Display, DisplayHandle,
         },
     },
-    utils::{DeviceFd, Logical, Physical, Point, Rectangle, Size, Transform, SERIAL_COUNTER},
+    utils::{DeviceFd, IsAlive, Logical, Physical, Point, Rectangle, Size, Transform, SERIAL_COUNTER},
     wayland::{
         buffer::BufferHandler,
         compositor::{
             with_surface_tree_downward, CompositorClientState, CompositorHandler, CompositorState,
             SurfaceAttributes, TraversalAction,
         },
+        fractional_scale::{FractionalScaleHandler, FractionalScaleManagerState},
+        idle_inhibit::{IdleInhibitHandler, IdleInhibitManagerState},
+        idle_notify::{IdleNotifierHandler, IdleNotifierState},
         input_method::{
             InputMethodHandler, InputMethodManagerState, PopupSurface as ImPopupSurface,
         },
@@ -104,13 +108,20 @@ use smithay::{
             primary_selection::{PrimarySelectionHandler, PrimarySelectionState},
             SelectionHandler,
         },
-        shell::xdg::{
-            decoration::{XdgDecorationHandler, XdgDecorationState},
-            PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+        shell::{
+            wlr_layer::{
+                Anchor, Layer, LayerSurface, LayerSurfaceCachedState, LayerSurfaceData,
+                WlrLayerShellHandler, WlrLayerShellState,
+            },
+            xdg::{
+                decoration::{XdgDecorationHandler, XdgDecorationState},
+                PopupSurface, PositionerState, ToplevelSurface, XdgShellHandler, XdgShellState,
+            },
         },
         shm::{ShmHandler, ShmState},
         text_input::TextInputManagerState,
         virtual_keyboard::VirtualKeyboardManagerState,
+        viewporter::ViewporterState,
         xdg_activation::{
             XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
         },
@@ -121,6 +132,7 @@ use wayland_protocols::xdg::shell::server::xdg_toplevel;
 use wayland_server::{
     backend::{ClientData, ClientId, DisconnectReason},
     protocol::wl_buffer,
+    protocol::wl_data_source::WlDataSource,
     Client, ListeningSocket, Resource,
 };
 
@@ -140,6 +152,10 @@ struct AnchorOutput {
     active_ws: usize,
     /// Connector 名称（用于配置匹配）
     name: String,
+    /// 当前缩放因子
+    scale: f64,
+    /// DPMS 是否关闭
+    dpms_off: bool,
 }
 
 // ── App ──────────────────────────────────────────────────
@@ -264,6 +280,25 @@ struct App {
     session: Option<Arc<std::sync::Mutex<LibSeatSession>>>,
     /// VT 文件描述符（用于 VT mode 设置和切换）
     vt_fd: Option<std::os::unix::io::OwnedFd>,
+    // ── Layer Shell (wlr_layer_shell_v1) ──
+    layer_shell: WlrLayerShellState,
+    // ── Fractional Scale + Viewporter ──
+    fractional_scale_mgr: FractionalScaleManagerState,
+    viewporter: ViewporterState,
+    // ── 空闲 / 电源管理 ──
+    idle_notifier: IdleNotifierState<App>,
+    idle_inhibit_mgr: IdleInhibitManagerState,
+    /// 空闲计时器（calloop timer token）
+    idle_timer: Option<smithay::reexports::calloop::RegistrationToken>,
+    /// 是否处于空闲状态（用于 DPMS off）
+    idle_active: bool,
+    /// idle inhibit 计数（>0=有应用阻止空闲）
+    idle_inhibit_count: usize,
+    // ── DnD 拖放 ──
+    /// 当前 DnD 拖拽图标 surface（渲染在光标位置）
+    dnd_icon: Option<WlSurface>,
+    /// 上一次输入时间（用于空闲检测）
+    last_input_time: std::time::Instant,
 }
 
 /// 工作区切换动画状态
@@ -1534,6 +1569,14 @@ impl App {
         use smithay::backend::input::{
             Event as _, KeyboardKeyEvent as _, PointerButtonEvent as _, PointerMotionEvent as _,
         };
+        // ── 空闲检测：任何输入都重置空闲计时 ──
+        let was_idle = !self.idle_active;
+        self.last_input_time = std::time::Instant::now();
+        if was_idle {
+            self.idle_active = true;
+            self.dirty = true;
+        }
+        self.idle_notifier.notify_activity(&self.seat);
         match event {
             InputEvent::Keyboard { event } => {
                 let keycode = event.key_code();
@@ -1882,6 +1925,12 @@ impl App {
                                     info!("⌨️  启动终端");
                                     let mut cmd =
                                         std::process::Command::new(&data.cfg.terminal.command);
+                                    // 继承 anchor 自身的全部环境（含 GPU EGL 变量），
+                                    // 再覆盖 Wayland/输入法相关变量
+                                    cmd.env_clear();
+                                    for (k, v) in std::env::vars() {
+                                        cmd.env(k, v);
+                                    }
                                     cmd.env("WAYLAND_DISPLAY", "wayland-anchor")
                                         .env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"))
                                         .env("XMODIFIERS", "@im=fcitx")
@@ -2916,6 +2965,28 @@ impl XdgShellHandler for App {
     /// （浏览器等复杂应用内部 wl_surface 可能和 tops 中存储的不一致）
     fn toplevel_destroyed(&mut self, surface: ToplevelSurface) {
         let wl = surface.wl_surface().clone();
+
+        // 检查是否是 scratchpad surface 被销毁
+        let is_scratchpad = self
+            .scratchpad
+            .surface
+            .as_ref()
+            .map(|s| s.wl_surface() == &wl)
+            .unwrap_or(false);
+        if is_scratchpad {
+            info!("🗑️ Scratchpad surface destroyed");
+            self.scratchpad.surface = None;
+            self.scratchpad.visible = false;
+            // 尝试 kill 子进程（可能已经退出）
+            if let Some(ref mut child) = self.scratchpad.process {
+                let _ = child.kill();
+            }
+            self.scratchpad.process = None;
+            self.dirty = true;
+            // scratchpad surface 不在工作区 tops 中，直接返回
+            return;
+        }
+
         // 搜索所有工作区
         for ws_idx in 0..self.workspaces.len() {
             let closed_idx = self.workspaces[ws_idx]
@@ -3206,9 +3277,107 @@ impl PrimarySelectionHandler for App {
     }
 }
 impl smithay::wayland::output::OutputHandler for App {}
-impl ClientDndGrabHandler for App {}
+
+impl ClientDndGrabHandler for App {
+    fn started(
+        &mut self,
+        _source: Option<WlDataSource>,
+        icon: Option<WlSurface>,
+        _seat: Seat<Self>,
+    ) {
+        self.dnd_icon = icon;
+        self.dirty = true;
+    }
+
+    fn dropped(
+        &mut self,
+        _target: Option<WlSurface>,
+        _validated: bool,
+        _seat: Seat<Self>,
+    ) {
+        self.dnd_icon = None;
+        self.dirty = true;
+    }
+}
+
 impl ServerDndGrabHandler for App {
-    fn send(&mut self, _: String, _: OwnedFd, _: Seat<Self>) {}
+    fn send(&mut self, _mime_type: String, _fd: OwnedFd, _seat: Seat<Self>) {}
+    fn dropped(&mut self, _seat: Seat<Self>) {
+        self.dnd_icon = None;
+        self.dirty = true;
+    }
+}
+
+// ── Layer Shell Handler ──────────────────────────────────────────
+impl WlrLayerShellHandler for App {
+    fn shell_state(&mut self) -> &mut WlrLayerShellState {
+        &mut self.layer_shell
+    }
+
+    fn new_layer_surface(
+        &mut self,
+        surface: LayerSurface,
+        _output: Option<smithay::reexports::wayland_server::protocol::wl_output::WlOutput>,
+        _layer: Layer,
+        _namespace: String,
+    ) {
+        // 给 layer surface 发送初始 configure（全屏尺寸）
+        let (ow, oh) = self
+            .output_sizes
+            .first()
+            .map(|(_, _, w, h)| (*w, *h))
+            .unwrap_or((1920, 1080));
+        surface.with_pending_state(|state| {
+            state.size = Some((ow, oh).into());
+        });
+        let _ = surface.send_configure();
+        info!("🪟 layer surface: new (namespace={})", _namespace);
+        self.dirty = true;
+    }
+
+    fn layer_destroyed(&mut self, _surface: LayerSurface) {
+        info!("🪟 layer surface: destroyed");
+        self.dirty = true;
+    }
+}
+
+// ── Fractional Scale Handler ─────────────────────────────────────
+impl FractionalScaleHandler for App {
+    fn new_fractional_scale(&mut self, surface: WlSurface) {
+        // 发送当前输出缩放因子给客户端
+        // 用 focused output 的 scale（存储在 output_sizes 对应的 AnchorOutput 中）
+        let scale: f64 = 1.0; // 默认 1.0，渲染管线中按实际 scale 绘制
+        use smithay::wayland::fractional_scale::with_fractional_scale;
+        smithay::wayland::compositor::with_states(&surface, |states| {
+            with_fractional_scale(states, |fs_state| {
+                fs_state.set_preferred_scale(scale);
+            });
+        });
+    }
+}
+
+// ── Idle Notifier Handler ────────────────────────────────────────
+impl IdleNotifierHandler for App {
+    fn idle_notifier_state(&mut self) -> &mut IdleNotifierState<Self> {
+        &mut self.idle_notifier
+    }
+}
+
+// ── Idle Inhibit Handler ─────────────────────────────────────────
+impl IdleInhibitHandler for App {
+    fn inhibit(&mut self, _surface: WlSurface) {
+        self.idle_inhibit_count += 1;
+        self.idle_notifier.set_is_inhibited(self.idle_inhibit_count > 0);
+        info!("🚫 idle inhibit: count={}", self.idle_inhibit_count);
+    }
+
+    fn uninhibit(&mut self, _surface: WlSurface) {
+        if self.idle_inhibit_count > 0 {
+            self.idle_inhibit_count -= 1;
+        }
+        self.idle_notifier.set_is_inhibited(self.idle_inhibit_count > 0);
+        info!("✅ idle uninhibit: count={}", self.idle_inhibit_count);
+    }
 }
 
 impl InputMethodHandler for App {
@@ -3660,6 +3829,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("✅ text-input / input-method / virtual-keyboard");
     info!("✅ dmabuf handler ready");
 
+    // ─── 新协议注册 ───
+    let layer_shell_state = WlrLayerShellState::new::<App>(&dh);
+    info!("✅ wlr_layer_shell");
+    let fractional_scale_mgr = FractionalScaleManagerState::new::<App>(&dh);
+    info!("✅ wp_fractional_scale");
+    let viewporter = ViewporterState::new::<App>(&dh);
+    info!("✅ wp_viewporter");
+    let idle_inhibit_mgr = IdleInhibitManagerState::new::<App>(&dh);
+    info!("✅ idle_inhibit");
+
+    // ─── 提前创建 EventLoop（IdleNotifierState 需要 loop handle）───
+    let mut eloop: EventLoop<App> = EventLoop::try_new()?;
+
     // 加载光标
     let cursor_img = if !cfg.cursor.theme.is_empty() {
         cursor::CursorImage::load_from_theme(&cfg.cursor.theme, &cfg.cursor.name, cfg.cursor.size)
@@ -3765,6 +3947,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .open("/dev/tty0")
             .ok()
             .map(|f| std::os::unix::io::OwnedFd::from(f)),
+        layer_shell: layer_shell_state,
+        fractional_scale_mgr,
+        viewporter,
+        idle_notifier: IdleNotifierState::new(&dh, eloop.handle()),
+        idle_inhibit_mgr,
+        idle_timer: None,
+        idle_active: true,
+        idle_inhibit_count: 0,
+        dnd_icon: None,
+        last_input_time: std::time::Instant::now(),
     };
     let listener = ListeningSocket::bind("wayland-anchor")?;
     std::env::set_var("WAYLAND_DISPLAY", "wayland-anchor");
@@ -3774,12 +3966,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             format!("/run/user/{}", unsafe { libc::getuid() }),
         );
     }
+    // ── XDG Portal 支持 ──
+    std::env::set_var("XDG_CURRENT_DESKTOP", "anchor");
+    std::env::set_var("XDG_SESSION_TYPE", "wayland");
 
-    info!("✅ wayland-anchor");
+    info!("✅ wayland-anchor (XDG_CURRENT_DESKTOP=anchor)");
 
-    // ─── EventLoop + 等 DRM master 就绪（必须在 EGL 之前！）───
-    // NVIDIA 上 EGL 初始化需要 DRM master，GDM 切换 session 时需要 dispatch 才能收到 ActivateSession
-    let mut eloop: EventLoop<App> = EventLoop::try_new()?;
+    // ─── EventLoop 已在上面创建，这里注册 source ───
     state.loop_handle = Some(eloop.handle());
     let mut clients: Vec<Client> = vec![];
     eloop
@@ -3848,6 +4041,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         crtc: crtc::Handle,
         mode: smithay::reexports::drm::control::Mode,
         name: String,
+        /// 物理尺寸（mm），用于 DPI/缩放计算
+        physical_mm: (u32, u32),
     }
     let mut connector_infos: Vec<ConnectorInfo> = Vec::new();
 
@@ -3877,10 +4072,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let Some(crtc_h) = found_crtc else { continue };
                 used_crtcs.insert(crtc_h);
 
+                let phys_mm = info.size().unwrap_or((0, 0));
                 let conn_name = format!("{:?}", c);
                 info!(
-                    "🖥️  Connector {} (CRTC {:?}): {}x{}",
-                    conn_name, crtc_h, mw, mh
+                    "🖥️  Connector {} (CRTC {:?}): {}x{} ({}x{}mm)",
+                    conn_name, crtc_h, mw, mh, phys_mm.0, phys_mm.1
                 );
 
                 connector_infos.push(ConnectorInfo {
@@ -3888,6 +4084,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     crtc: crtc_h,
                     mode,
                     name: conn_name,
+                    physical_mm: phys_mm,
                 });
                 break;
             }
@@ -3948,7 +4145,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let wl_output = Output::new(
             ci.name.clone(),
             PhysicalProperties {
-                size: (mw as i32 / 10, mh as i32 / 10).into(),
+                size: (ci.physical_mm.0 as i32, ci.physical_mm.1 as i32).into(),
                 subpixel: Subpixel::Unknown,
                 make: gpu_vendor.clone(),
                 model: ci.name.clone(),
@@ -3960,15 +4157,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         wl_output.add_mode(output_mode);
         wl_output.set_preferred(output_mode);
-        wl_output.change_current_state(
-            Some(output_mode),
-            Some(Transform::Normal),
-            Some(Scale::Integer(1)),
-            Some(Point::from((output_x_offset, 0))),
-        );
-        wl_output.create_global::<App>(&dh);
 
-        // 匹配配置中的 output 设置（工作区、位置）
+        // 匹配配置中的 output 设置（工作区、位置、缩放）
         let output_cfg = state.cfg.outputs.iter().find(|oc| {
             if oc.connector.is_empty() {
                 false
@@ -3976,6 +4166,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ci.name.contains(&oc.connector)
             }
         });
+
+        // ── 计算缩放因子（HiDPI）──
+        let output_scale = output_cfg
+            .map(|oc| oc.scale)
+            .filter(|&s| s > 0.0)
+            .unwrap_or_else(|| {
+                let (pw_mm, ph_mm) = ci.physical_mm;
+                if pw_mm > 0 && ph_mm > 0 {
+                    let dpi_x = mw as f64 / (pw_mm as f64 / 25.4);
+                    let dpi_y = mh as f64 / (ph_mm as f64 / 25.4);
+                    let dpi = (dpi_x + dpi_y) / 2.0;
+                    let raw = dpi / 96.0;
+                    (raw * 4.0).round() / 4.0
+                } else {
+                    if mw >= 3400 { 2.0 }
+                    else if mw >= 2400 { 1.5 }
+                    else if mw >= 1900 { 1.25 }
+                    else { 1.0 }
+                }
+            })
+            .max(1.0);
+        info!("🖥️  {} 缩放: {:.2}", ci.name, output_scale);
+        wl_output.change_current_state(
+            Some(output_mode),
+            Some(Transform::Normal),
+            Some(Scale::Fractional(output_scale)),
+            Some(Point::from((output_x_offset, 0))),
+        );
+        wl_output.create_global::<App>(&dh);
+
         let default_ws = output_cfg.map(|oc| oc.workspace).unwrap_or(idx);
         let cfg_x = output_cfg.map(|oc| oc.x).unwrap_or(output_x_offset);
         let cfg_y = output_cfg.map(|oc| oc.y).unwrap_or(0);
@@ -3999,6 +4219,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             position: (out_x, cfg_y),
             active_ws: default_ws.min(NUM_WORKSPACES - 1),
             name: ci.name.clone(),
+            scale: output_scale,
+            dpms_off: false,
         });
         output_x_offset += mw as i32;
     }
@@ -5100,6 +5322,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             );
                         }
 
+                        // ── 收集 Layer Shell 元素（需要在 bind 之前用 renderer）──
+                        let mut layer_bg_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
+                        let mut layer_top_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
+                        for ls in state.layer_shell.layer_surfaces() {
+                            if !ls.alive() { continue; }
+                            let wl_surf = ls.wl_surface().clone();
+                            let (lx, ly, is_top) = smithay::wayland::compositor::with_states(
+                                &wl_surf,
+                                |states| {
+                                    let mut guard = states.cached_state.get::<LayerSurfaceCachedState>();
+                                    let cached = guard.current();
+                                    let anchor = cached.anchor;
+                                    let margin = cached.margin;
+                                    let size = cached.size;
+                                    let layer = cached.layer;
+                                    let w = if anchor.anchored_horizontally() { ow - margin.left - margin.right } else { size.w.max(1) };
+                                    let h = if anchor.anchored_vertically() { oh - margin.top - margin.bottom } else { size.h.max(1) };
+                                    let x = if anchor.contains(Anchor::LEFT) { margin.left }
+                                        else if anchor.contains(Anchor::RIGHT) { ow - w - margin.right }
+                                        else { (ow - w) / 2 };
+                                    let y = if anchor.contains(Anchor::TOP) { margin.top }
+                                        else if anchor.contains(Anchor::BOTTOM) { oh - h - margin.bottom }
+                                        else { (oh - h) / 2 };
+                                    let is_top = matches!(layer, Layer::Top | Layer::Overlay);
+                                    (x, y, is_top)
+                                },
+                            );
+                            let loc = Point::<i32, Physical>::from((lx, ly));
+                            let elems = render_elements_from_surface_tree(
+                                &mut renderer, &wl_surf, loc, 1.0, 1.0, Kind::Unspecified,
+                            );
+                            if is_top { layer_top_elems.extend(elems); }
+                            else { layer_bg_elems.extend(elems); }
+                        }
+
+                        // ── 收集 DnD 图标元素 ──
+                        let mut dnd_elems: Vec<WaylandSurfaceRenderElement<GlesRenderer>> = Vec::new();
+                        if let Some(icon) = &state.dnd_icon {
+                            if icon.alive() {
+                                let (ox, oy, _, _) = state.output_sizes.get(oi).copied().unwrap_or((0, 0, 0, 0));
+                                let icon_surf = icon.clone();
+                                let icon_pos = Point::<i32, Physical>::from((
+                                    state.pointer_pos.0 as i32 - ox,
+                                    state.pointer_pos.1 as i32 - oy,
+                                ));
+                                dnd_elems = render_elements_from_surface_tree(
+                                    &mut renderer, &icon_surf, icon_pos, 1.0, 1.0, Kind::Unspecified,
+                                );
+                            }
+                        }
+
                         let mut target = renderer.bind(&mut dmabuf)?;
                         let sp_size = Size::<i32, Physical>::new(ow, oh);
                         let mut f = renderer.render(&mut target, sp_size, Transform::Normal)?;
@@ -5924,6 +6197,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             );
                         }
 
+                        // Step 5.5: Layer Shell surfaces (draw pre-collected elements)
+                        {
+                            let scale_f = if ow > 0 { out.scale } else { 1.0 };
+                            if !layer_bg_elems.is_empty() {
+                                let _ = draw_render_elements(&mut f, scale_f, &layer_bg_elems, &[dmg]);
+                            }
+                            if !layer_top_elems.is_empty() {
+                                let _ = draw_render_elements(&mut f, scale_f, &layer_top_elems, &[dmg]);
+                            }
+                        }
+
                         // Step 6: Notifications — 只在鼠标所在的 output 上显示
                         if is_focused_output && !state.notifications.is_empty() {
                             let accent = state.cached_focus_color;
@@ -6031,6 +6315,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     img.render_batched(&mut f, cx, cy);
                                 }
                             }
+                        }
+
+                        // Step 8.5: DnD drag icon — draw pre-collected elements at cursor
+                        if !dnd_elems.is_empty() {
+                            let _ = draw_render_elements(&mut f, 1.0, &dnd_elems, &[dmg]);
                         }
 
                         // Step 9: Screenshot area selection overlay
@@ -6291,6 +6580,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             state.dirty = true;
         }
 
+        // ── 空闲检测：检查是否超时 → 触发锁屏/DPMS ──
+        if state.frame % 60 == 0
+            && state.idle_active
+            && state.idle_inhibit_count == 0
+            && state.cfg.idle.timeout > 0
+            && !state.lock_state.locked
+        {
+            if state.last_input_time.elapsed() >= Duration::from_secs(state.cfg.idle.timeout) {
+                state.idle_active = false;
+                if state.cfg.idle.lock_on_idle {
+                    state.lock_state.lock(state.pointer_pos.0);
+                    info!("💤 空闲锁屏 ({}s)", state.cfg.idle.timeout);
+                }
+            }
+        }
+
         if let Ok(Some(stream)) = listener.accept() {
             clients.push(
                 display
@@ -6318,6 +6623,11 @@ delegate_output!(App);
 delegate_input_method_manager!(App);
 delegate_text_input_manager!(App);
 delegate_virtual_keyboard_manager!(App);
+delegate_layer_shell!(App);
+delegate_fractional_scale!(App);
+delegate_viewporter!(App);
+delegate_idle_notify!(App);
+delegate_idle_inhibit!(App);
 smithay::delegate_xwayland_shell!(App);
 
 // ── XWayland Handlers ──────────────────────────────────────
@@ -6444,8 +6754,9 @@ impl smithay::xwayland::XwmHandler for App {
         use smithay::xwayland::xwm::WmWindowType;
 
         // is_aux: tooltip/popup/notification → 浮动，不抢焦点
-        // is_floating: Dialog/Utility/Menu → 浮动，但需要焦点和交互
-        //      Dialog 不应进入 tiling（强制缩放会破坏内部布局，且菜单坐标系错乱）
+        // is_floating: Utility/Menu/Splash 和无父 Dialog → 浮动，但需要焦点和交互
+        // 带 transient_for 的 Dialog（如 XWayland 文件选择器）跟随父窗口进入 tiling，
+        // 否则会固定走全局浮动层，看起来总是在屏幕 1 上悬浮。
         let is_aux = matches!(
             window.window_type(),
             Some(WmWindowType::Tooltip)
@@ -6453,7 +6764,9 @@ impl smithay::xwayland::XwmHandler for App {
                 | Some(WmWindowType::DropdownMenu)
                 | Some(WmWindowType::Notification)
         );
-        let is_floating = !is_aux && matches!(
+        let is_transient_dialog = matches!(window.window_type(), Some(WmWindowType::Dialog))
+            && window.is_transient_for().is_some();
+        let is_floating = !is_aux && !is_transient_dialog && matches!(
             window.window_type(),
             Some(WmWindowType::Dialog)
                 | Some(WmWindowType::Utility)
@@ -6462,12 +6775,13 @@ impl smithay::xwayland::XwmHandler for App {
         );
 
         tracing::info!(
-            "🗺️  X11 map_request: class='{}' title='{}' type={:?} transient={:?} aux={} floating={} has_wl_surface={}",
+            "🗺️  X11 map_request: class='{}' title='{}' type={:?} transient={:?} aux={} transient_dialog={} floating={} has_wl_surface={}",
             window.class(),
             window.title(),
             window.window_type(),
             window.is_transient_for(),
             is_aux,
+            is_transient_dialog,
             is_floating,
             window.wl_surface().is_some()
         );

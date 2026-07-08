@@ -63,7 +63,7 @@ header_bar_height = 0
 "super+w" = "wallpaper_next"
 
 [terminal]
-command = "kitty"
+command = "wezterm-anchor"
 font = "monospace"
 font_size = 12
 

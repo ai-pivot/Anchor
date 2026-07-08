@@ -131,8 +131,13 @@ impl LauncherState {
             info!("🚀 启动器: {}", exec_cmd);
             let mut cmd = std::process::Command::new("sh");
             cmd.arg("-c")
-                .arg(&exec_cmd)
-                .env("WAYLAND_DISPLAY", "wayland-anchor")
+                .arg(&exec_cmd);
+            // 继承 anchor 的完整环境（含 GPU 变量）
+            cmd.env_clear();
+            for (k, v) in std::env::vars() {
+                cmd.env(k, v);
+            }
+            cmd.env("WAYLAND_DISPLAY", "wayland-anchor")
                 .env(
                     "XDG_RUNTIME_DIR",
                     format!("/run/user/{}", unsafe { libc::getuid() }),
