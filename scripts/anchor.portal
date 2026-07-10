@@ -1,0 +1,4 @@
+[portal]
+ID=anchor
+interfaces=org.freedesktop.impl.portal.Screenshot;org.freedesktop.impl.portal.ScreenCast;org.freedesktop.impl.portal.RemoteDesktop;org.freedesktop.impl.portal.FileChooser;org.freedesktop.impl.portal.Notification;org.freedesktop.impl.portal.Inhibit
+useIn=anchor

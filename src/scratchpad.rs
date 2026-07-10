@@ -27,14 +27,49 @@ impl ScratchpadState {
         }
     }
 
+    /// Check if the scratchpad's child process is still alive.
+    /// If it has exited, clean up the stale state.
+    fn cleanup_dead(&mut self) {
+        if let Some(ref mut child) = self.process {
+            match child.try_wait() {
+                Ok(Some(_)) => {
+                    // Process has exited — reset everything
+                    info!("🧹 Scratchpad process exited, cleaning up");
+                    self.process = None;
+                    self.surface = None;
+                    self.visible = false;
+                }
+                Ok(None) => {} // still running
+                Err(_) => {
+                    info!("🧹 Scratchpad process error, cleaning up");
+                    self.process = None;
+                    self.surface = None;
+                    self.visible = false;
+                }
+            }
+        }
+        // Also clean up if surface is gone but process somehow remains
+        if self.surface.is_none() && self.process.is_some() {
+            info!("🧹 Scratchpad surface gone but process alive, killing & cleaning up");
+            if let Some(ref mut child) = self.process {
+                let _ = child.kill();
+            }
+            self.process = None;
+            self.visible = false;
+        }
+    }
+
     /// Toggle scratchpad visibility. On first toggle, launches the terminal.
     /// Returns a notification message to display.
     pub fn toggle(&mut self, terminal_cmd: &str, xdisplay: Option<u32>) -> &'static str {
+        // First, clean up any dead state
+        self.cleanup_dead();
+
         if self.visible {
             // Hide: keep the terminal running, just stop rendering
             self.visible = false;
             "Scratchpad hidden"
-        } else if self.process.is_some() {
+        } else if self.process.is_some() && self.surface.is_some() {
             // Show: already have a running terminal, just toggle visibility
             self.visible = true;
             "Scratchpad"
@@ -43,6 +78,10 @@ impl ScratchpadState {
             self.pending = true;
             let uid = unsafe { libc::getuid() };
             let mut cmd = std::process::Command::new(terminal_cmd);
+            cmd.env_clear();
+            for (k, v) in std::env::vars() {
+                cmd.env(k, v);
+            }
             cmd.env("WAYLAND_DISPLAY", "wayland-anchor")
                 .env("XDG_RUNTIME_DIR", format!("/run/user/{uid}"));
             if let Some(d) = xdisplay {

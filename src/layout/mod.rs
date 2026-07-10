@@ -19,6 +19,7 @@ pub mod headbar;
 pub mod launcher;
 pub mod lock_screen;
 pub mod notifications;
+pub mod overview;
 pub mod util;
 pub mod wallpaper;
 
@@ -31,6 +32,7 @@ pub use headbar::*;
 pub use launcher::*;
 pub use lock_screen::*;
 pub use notifications::*;
+pub use overview::*;
 pub use util::*;
 pub use wallpaper::*;
 

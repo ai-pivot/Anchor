@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<protocol name="anchor_header_bar_v1">
+  <copyright>
+    Copyright © 2024 Anchor Compositor
+
+    Permission is hereby granted, free of charge, to any person obtaining a
+    copy of this software and associated documentation files (the "Software"),
+    to deal in the Software without restriction, including without limitation
+    the rights to use, copy, modify, merge, publish, distribute, sublicense,
+    and/or sell copies of the Software, and to permit persons to whom the
+    Software is furnished to do so, subject to the following conditions:
+
+    The above copyright notice and this permission notice shall be included
+    in all copies or substantial portions of the Software.
+
+    THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+    OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+    FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL
+    THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+    LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+    FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+    DEALINGS IN THE SOFTWARE.
+  </copyright>
+
+  <interface name="anchor_header_bar_manager_v1" version="1">
+    <description summary="allow clients to request header bar area">
+      This protocol allows clients to inform the compositor that they want
+      to render their own header bar (title bar) content within the
+      compositor's decoration area.
+
+      The client declares a desired header bar height. The compositor
+      reserves this space above the window content area (within the SSD
+      border region). The client's xdg_toplevel surface will be configured
+      with a reduced height, and the client should render its header bar
+      content (title, buttons, tabs, etc.) in the top portion of the
+      toplevel surface.
+
+      If the compositor does not support client header bars, or the
+      requested height is invalid, the compositor may ignore the request
+      and the client will fall back to standard SSD decorations.
+    </description>
+
+    <request name="get_header_bar">
+      <description summary="request a header bar for a toplevel">
+        Create a header bar object for the given xdg_toplevel surface.
+        The client can then set the desired header bar height.
+
+        This request must be made before the first xdg_surface.configure
+        for the toplevel. If made after, the compositor may ignore it.
+      </description>
+      <arg name="id" type="new_id" interface="anchor_header_bar_v1"/>
+      <arg name="toplevel" type="object" interface="xdg_toplevel"/>
+    </request>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the header bar manager">
+        Destroy the header bar manager. This does not affect existing
+        header bar objects.
+      </description>
+    </request>
+  </interface>
+
+  <interface name="anchor_header_bar_v1" version="1">
+    <description summary="a client-managed header bar">
+      Represents a header bar area managed by the client. The client
+      can set the desired height, and the compositor will adjust the
+      window layout accordingly.
+
+      The header bar height is the space reserved above the main content
+      area but within the window's xdg_toplevel surface. The client
+      should render title text, window control buttons, tab bars, etc.
+      in this area.
+
+      The compositor will still draw its SSD border around the entire
+      window (including the header bar area), but will skip its own
+      title/button rendering for windows that have a client header bar.
+    </description>
+
+    <enum name="error">
+      <entry name="invalid_height" value="0"
+        summary="the requested header bar height is invalid (zero or negative)"/>
+      <entry name="already_set" value="1"
+        summary="the header bar height has already been committed"/>
+    </enum>
+
+    <request name="set_height">
+      <description summary="set the desired header bar height">
+        Request a specific height (in logical pixels) for the header bar
+        area. The compositor will configure the xdg_toplevel with a
+        content area reduced by this height.
+
+        The client should call this once. The height cannot be changed
+        after set_height is called.
+
+        A height of 0 means the client wants to use the full SSD
+        decoration (no client header bar).
+      </description>
+      <arg name="height" type="int" summary="header bar height in logical pixels"/>
+    </request>
+
+    <event name="configured">
+      <description summary="header bar configuration acknowledged">
+        Sent in response to set_height. The compositor acknowledges the
+        header bar configuration. The actual_height may differ from the
+        requested height if the compositor has constraints.
+
+        After this event, the client knows the header bar area size
+        and can render accordingly in the top portion of the toplevel
+        surface.
+      </description>
+      <arg name="actual_height" type="int"
+        summary="the actual header bar height granted by the compositor"/>
+    </event>
+
+    <request name="destroy" type="destructor">
+      <description summary="destroy the header bar object">
+        Destroy this header bar object. The compositor will revert
+        to standard SSD decorations for this window.
+      </description>
+    </request>
+  </interface>
+</protocol>

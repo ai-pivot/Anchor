@@ -3,7 +3,7 @@
 
 use super::util::{opaque, rect};
 use crate::text_render;
-use smithay::backend::renderer::Frame;
+use smithay::backend::renderer::{Color32F, Frame};
 
 /// 自动换行：将文本按 maxWidth 切分为多行
 fn wrap_text(text: &str, max_width: i32, font_size: f32) -> Vec<String> {
@@ -94,6 +94,15 @@ pub fn render_notifications(
             &[rect(nx, ny, actual_w, content_h)],
         )
         .ok();
+
+        // ── 底部阴影 ──
+        for (si, sb) in [(0i32, 0.15f32), (1, 0.10), (2, 0.05)].iter() {
+            f.clear(
+                Color32F::new(0.0, 0.0, 0.0, sb * alpha),
+                &[rect(nx - 2, ny + content_h + si, actual_w + 4, 2)],
+            )
+            .ok();
+        }
 
         // ── 左侧 accent 竖条 + 发光 ──
         let accent_br = alpha * 0.7;

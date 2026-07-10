@@ -150,7 +150,8 @@ fi
 
 if command -v gnome-keyring-daemon &>/dev/null && \
    [ -z "$GNOME_KEYRING_CONTROL" ]; then
-    eval $(gnome-keyring-daemon --start --replace --components=secrets,ssh 2>/dev/null)
+    # --start: 只在没运行时启动，不替换已有实例（避免杀掉 PAM 解锁过的 daemon）
+    eval $(gnome-keyring-daemon --start --components=secrets,ssh 2>/dev/null)
 fi
 
 exec "$ANCHOR_BIN" 2>&1 | tee /tmp/anchor-session.log

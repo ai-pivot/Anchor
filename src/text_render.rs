@@ -1,12 +1,68 @@
 //! TTF 字体渲染（fontdue）— 正常文字
 
-use fontdue::layout::{CoordinateSystem, Layout, TextStyle};
+use fontdue::layout::{CoordinateSystem, GlyphRasterConfig, Layout, TextStyle};
 use fontdue::Font;
 use smithay::backend::renderer::{Color32F, Frame};
 use smithay::utils::{Physical, Point, Rectangle, Size};
+use std::collections::HashMap;
 use std::sync::OnceLock;
 
 static FONT: OnceLock<Font> = OnceLock::new();
+
+// ---------------------------------------------------------------------------
+// Glyph bitmap 缓存 — 避免每帧重复 CPU 光栅化
+// ---------------------------------------------------------------------------
+
+struct CachedGlyph {
+    width: usize,
+    height: usize,
+    bitmap: Vec<u8>,
+}
+
+struct GlyphCache {
+    entries: HashMap<(char, u32), CachedGlyph>,
+}
+
+thread_local! {
+    static GLYPH_CACHE: std::cell::RefCell<GlyphCache> = std::cell::RefCell::new(GlyphCache {
+        entries: HashMap::new(),
+    });
+}
+
+/// 获取 glyph bitmap（命中缓存时零 CPU 光栅化）
+fn cached_rasterize(
+    font: &Font,
+    ch: char,
+    size: f32,
+    key: GlyphRasterConfig,
+) -> (usize, usize, Vec<u8>) {
+    GLYPH_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let cache_key = (ch, size.to_bits());
+        let entry = cache.entries.entry(cache_key);
+        match entry {
+            std::collections::hash_map::Entry::Occupied(e) => {
+                let g = e.get();
+                (g.width, g.height, g.bitmap.clone())
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                let (metrics, bitmap) = font.rasterize_config(key);
+                let w = metrics.width;
+                let h = metrics.height;
+                e.insert(CachedGlyph {
+                    width: w,
+                    height: h,
+                    bitmap: bitmap.clone(),
+                });
+                // 缓存膨胀保护：超过 2000 条目时清空
+                if cache.entries.len() > 2000 {
+                    cache.entries.clear();
+                }
+                (w, h, bitmap)
+            }
+        }
+    })
+}
 
 fn get_font() -> &'static Font {
     FONT.get_or_init(|| {
@@ -106,15 +162,15 @@ pub fn draw_text(
     for glyph in layout.glyphs() {
         let gx = x + glyph.x as i32;
         let gy = y + glyph.y as i32;
-        let (w, h) = (glyph.width, glyph.height);
-        if w == 0 || h == 0 {
+        if glyph.width == 0 || glyph.height == 0 {
             continue;
         }
 
-        let (_metrics, bitmap) = font.rasterize_config(glyph.key);
+        let (w, h, bitmap) = cached_rasterize(font, glyph.parent, size, glyph.key);
 
         // Collect all run rectangles for this glyph, then issue one f.clear
-        let mut glyph_rects: Vec<Rectangle<i32, Physical>> = Vec::with_capacity(h);
+        // 大部分 glyph 的非透明行数不超过 32，预分配避免反复扩容
+        let mut glyph_rects: Vec<Rectangle<i32, Physical>> = Vec::with_capacity(h.min(32));
         for row in 0..h {
             let mut run_start: Option<usize> = None;
             for col in 0..=w {

@@ -33,6 +33,10 @@ pub struct LockState {
     pub style: u8,
     /// Pending async PAM verification result.
     auth_result: Option<Arc<Mutex<AuthResult>>>,
+    /// Timestamp of the last unlock (prevents Escape key-repeat oscillation).
+    pub last_unlock: Option<std::time::Instant>,
+    /// Timestamp when the compositor started (prevents spurious lock during init).
+    pub startup: std::time::Instant,
 }
 
 impl LockState {
@@ -45,11 +49,18 @@ impl LockState {
             wrong: false,
             style: 0,
             auth_result: None,
+            last_unlock: None,
+            startup: std::time::Instant::now(),
         }
     }
 
     /// Activate the lock screen.
     pub fn lock(&mut self, pointer_x: f64) {
+        // Startup guard: 忽略启动后 5 秒内的 lock 请求（防止 GDM/input 初始化干扰）
+        if self.startup.elapsed().as_millis() < 5000 {
+            info!("🔒 Lock request ignored (startup guard, {}ms)", self.startup.elapsed().as_millis());
+            return;
+        }
         info!("🔒 Locking screen");
         self.locked = true;
         self.input.clear();

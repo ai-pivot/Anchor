@@ -13,7 +13,7 @@ use smithay::{
 pub const NUM_WORKSPACES: usize = 9;
 
 /// Identifies a window in the unified window list.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum WindowSlot {
     /// Wayland toplevel (index into `Workspace::tops`)
     Wl(usize),

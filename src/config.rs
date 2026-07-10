@@ -28,6 +28,10 @@ pub struct Config {
     pub cursor: Cursor,
     #[serde(default)]
     pub outputs: Vec<OutputConfig>,
+    #[serde(default)]
+    pub scroll: ScrollConfig,
+    #[serde(default)]
+    pub idle: IdleConfig,
 }
 
 /// 窗口规则：根据 app-id 或 title 自动分配工作区/布局
@@ -133,6 +137,12 @@ pub struct Layout {
     pub gap: i32,
     #[serde(default = "Layout::default_margin")]
     pub margin: i32,
+    /// Header bar 高度（逻辑像素）。
+    /// 0 = 不预留 header bar 空间（默认）。
+    /// >0 = 在每个窗口顶部预留该高度的区域，客户端可在其中渲染自定义标题栏。
+    /// 客户端可通过 anchor-header-bar-v1 协议覆盖此值。
+    #[serde(default = "Layout::default_header_bar_height")]
+    pub header_bar_height: i32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -211,6 +221,93 @@ impl OutputConfig {
     }
 }
 
+/// 无限滚动工作区配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ScrollConfig {
+    /// 是否启用无限滚动（弹簧吸附 + 惯性 + 触摸板手势）
+    #[serde(default = "ScrollConfig::default_enabled")]
+    pub enabled: bool,
+    /// 弹簧刚度（k）— 越大吸附越快。默认 300
+    #[serde(default = "ScrollConfig::default_stiffness")]
+    pub spring_stiffness: f64,
+    /// 弹簧阻尼（c）— 越大振荡越少。默认 30
+    #[serde(default = "ScrollConfig::default_damping")]
+    pub spring_damping: f64,
+    /// 惯性摩擦系数（per-frame @60fps）— 0.92 = 保留92%速度每帧
+    #[serde(default = "ScrollConfig::default_friction")]
+    pub friction: f64,
+    /// 触摸板滑动触发阈值（屏幕宽度的比例）
+    #[serde(default = "ScrollConfig::default_swipe_threshold")]
+    pub swipe_threshold: f64,
+}
+
+impl Default for ScrollConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            spring_stiffness: 300.0,
+            spring_damping: 30.0,
+            friction: 0.92,
+            swipe_threshold: 0.15,
+        }
+    }
+}
+
+impl ScrollConfig {
+    fn default_enabled() -> bool {
+        true
+    }
+    fn default_stiffness() -> f64 {
+        300.0
+    }
+    fn default_damping() -> f64 {
+        30.0
+    }
+    fn default_friction() -> f64 {
+        0.92
+    }
+    fn default_swipe_threshold() -> f64 {
+        0.15
+    }
+}
+
+/// 空闲与电源管理配置
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IdleConfig {
+    /// 空闲超时（秒），0=禁用。超时后屏幕 DPMS off
+    #[serde(default = "IdleConfig::default_timeout")]
+    pub timeout: u64,
+    /// 空闲超时后是否自动锁屏
+    #[serde(default = "IdleConfig::default_lock_on_idle")]
+    pub lock_on_idle: bool,
+    /// DPMS 关闭延迟（秒，在 idle timeout 之后）。
+    /// 0=与 timeout 同时关闭。设为更大值则先锁屏再息屏。
+    #[serde(default = "IdleConfig::default_dpms_delay")]
+    pub dpms_delay: u64,
+}
+
+impl Default for IdleConfig {
+    fn default() -> Self {
+        Self {
+            timeout: IdleConfig::default_timeout(),
+            lock_on_idle: IdleConfig::default_lock_on_idle(),
+            dpms_delay: IdleConfig::default_dpms_delay(),
+        }
+    }
+}
+
+impl IdleConfig {
+    fn default_timeout() -> u64 {
+        300 // 5 分钟
+    }
+    fn default_lock_on_idle() -> bool {
+        true
+    }
+    fn default_dpms_delay() -> u64 {
+        0 // 与 timeout 同时
+    }
+}
+
 pub fn parse_color(hex: &str) -> (f32, f32, f32) {
     let hex = hex.trim_start_matches('#');
     if hex.len() < 6 {
@@ -281,6 +378,11 @@ fn dirs() -> std::path::PathBuf {
     Path::new(&base).join("anchor").to_path_buf()
 }
 
+/// 返回配置文件路径 (~/.config/anchor/config.toml)
+pub fn config_path() -> std::path::PathBuf {
+    dirs().join("config.toml")
+}
+
 // ── Defaults ────────────────────────────────────────
 
 impl Default for Config {
@@ -296,6 +398,8 @@ impl Default for Config {
             window_rules: Vec::new(),
             gpu: Gpu::default(),
             cursor: Cursor::default(),
+            scroll: ScrollConfig::default(),
+            idle: IdleConfig::default(),
             outputs: Vec::new(),
         }
     }
@@ -355,6 +459,7 @@ impl Default for Layout {
             border_width: 2,
             gap: 6,
             margin: 0,
+            header_bar_height: 0,
         }
     }
 }
@@ -514,6 +619,9 @@ impl Layout {
         6
     }
     fn default_margin() -> i32 {
+        0
+    }
+    fn default_header_bar_height() -> i32 {
         0
     }
 }
