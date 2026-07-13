@@ -359,6 +359,11 @@ For SDDM: Create `/usr/share/wayland-sessions/anchor.desktop` with same content.
     `render_batched` 中 `Color32F::new(r,g,b,1.0)` 丢失了像素的 alpha 通道，
     导致自嘲熊光标的抗锯齿边缘变硬、阴影变实，视觉中心偏移看起来"位置不对"。
     必须用 `Color32F::new(r,g,b,a)` 传入真实 alpha 值。
+30. **输入法 popup 必须按目标 output 裁剪。** Wayland `InputMethod` popup
+    渲染前要用真实 render element bounds 回退到当前 output 可视区域内；
+    X11/fcitx 候选框通常是 `or_surfaces` override-redirect 窗口，
+    `configure_request` 不能用全局 `self.osize` 裁剪，否则多显示器会被拉回屏幕 1
+    或在边缘输入时超出屏幕。应按 popup 左上角所在 output（中心点兜底）计算边界。
 
 ## 渲染循环与动画架构
 

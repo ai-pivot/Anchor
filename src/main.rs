@@ -59,7 +59,7 @@ use smithay::{
         renderer::{
             element::{
                 surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement},
-                Kind, RenderElement,
+                Element, Kind, RenderElement,
             },
             gles::GlesRenderer,
             utils::{draw_render_elements, on_commit_buffer_handler},
@@ -436,6 +436,72 @@ impl App {
             }
         }
         0 // fallback 到主输出
+    }
+
+    fn clamp_rect_to_bounds(
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        bounds_w: i32,
+        bounds_h: i32,
+        margin: i32,
+    ) -> (i32, i32) {
+        let w = w.max(1);
+        let h = h.max(1);
+        let min_x = margin.min(bounds_w.saturating_sub(1).max(0));
+        let min_y = 0;
+        let max_x = (bounds_w - w - margin).max(min_x);
+        let max_y = (bounds_h - h).max(min_y);
+        (x.clamp(min_x, max_x), y.clamp(min_y, max_y))
+    }
+
+    fn output_for_rect(&self, x: i32, y: i32, w: i32, h: i32) -> (i32, i32, i32, i32) {
+        let cx = x + w.max(1) / 2;
+        let cy = y + h.max(1) / 2;
+        self.output_sizes
+            .iter()
+            .copied()
+            .find(|(ox, oy, ow, oh)| x >= *ox && x < *ox + *ow && y >= *oy && y < *oy + *oh)
+            .or_else(|| {
+                self.output_sizes
+                    .iter()
+                    .copied()
+                    .find(|(ox, oy, ow, oh)| cx >= *ox && cx < *ox + *ow && cy >= *oy && cy < *oy + *oh)
+            })
+            .unwrap_or((0, 0, self.osize.w, self.osize.h))
+    }
+
+    fn clamp_global_rect_to_output(
+        &self,
+        x: i32,
+        y: i32,
+        w: i32,
+        h: i32,
+        margin: i32,
+    ) -> (i32, i32) {
+        let (ox, oy, ow, oh) = self.output_for_rect(x, y, w, h);
+        let (local_x, local_y) = Self::clamp_rect_to_bounds(x - ox, y - oy, w, h, ow, oh, margin);
+        (ox + local_x, oy + local_y)
+    }
+
+    fn render_bounds_size(elems: &[WaylandSurfaceRenderElement<GlesRenderer>]) -> Option<(i32, i32)> {
+        let mut min_x = i32::MAX;
+        let mut min_y = i32::MAX;
+        let mut max_x = i32::MIN;
+        let mut max_y = i32::MIN;
+        for elem in elems {
+            let geo = elem.geometry(1.0.into());
+            min_x = min_x.min(geo.loc.x);
+            min_y = min_y.min(geo.loc.y);
+            max_x = max_x.max(geo.loc.x + geo.size.w);
+            max_y = max_y.max(geo.loc.y + geo.size.h);
+        }
+        if min_x <= max_x && min_y <= max_y {
+            Some(((max_x - min_x).max(1), (max_y - min_y).max(1)))
+        } else {
+            None
+        }
     }
 
     /// 获取鼠标所在 output 的活跃工作区索引
@@ -4888,10 +4954,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                             // IM popup (fcitx5 candidate box) — collected separately (rendered on top of windows)
                             if let Some(ref im_popup) = state.im_popup {
                                 if im_popup.alive() {
-                                    let mut popup_pos = (
+                                    let mut popup_pos = Point::<i32, Physical>::from((
                                         state.pointer_pos.0 as i32,
                                         state.pointer_pos.1 as i32 + 20,
-                                    );
+                                    ));
                                     if let Some(parent) = im_popup.get_parent() {
                                         let popup_loc = im_popup.location();
                                         let im_order = &out_order;
@@ -4940,14 +5006,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         WindowSlot::X11(_) => (x, y),
                                                     }
                                                 };
-                                                popup_pos = (bx + popup_loc.x, by + popup_loc.y);
+                                                popup_pos = Point::<i32, Physical>::from((bx + popup_loc.x, by + popup_loc.y));
                                                 break;
                                             }
                                         }
                                     }
-                                    im_popup_pos = popup_pos;
+                                    im_popup_pos = (popup_pos.x, popup_pos.y);
                                     if is_focused_output {
-                                        im_elems = render_elements_from_surface_tree(
+                                        let mut elems = render_elements_from_surface_tree(
                                             &mut renderer,
                                             im_popup.wl_surface(),
                                             popup_pos,
@@ -4955,6 +5021,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             1.0,
                                             Kind::Unspecified,
                                         );
+                                        let fallback_rect = im_popup.text_input_rectangle();
+                                        let (popup_w, popup_h) = App::render_bounds_size(&elems)
+                                            .unwrap_or((fallback_rect.size.w.max(240), fallback_rect.size.h.max(32)));
+                                        let (clamped_x, clamped_y) = App::clamp_rect_to_bounds(
+                                            popup_pos.x,
+                                            popup_pos.y,
+                                            popup_w,
+                                            popup_h,
+                                            ow,
+                                            oh,
+                                            8,
+                                        );
+                                        let clamped_pos = Point::<i32, Physical>::from((clamped_x, clamped_y));
+                                        if clamped_pos != popup_pos {
+                                            elems = render_elements_from_surface_tree(
+                                                &mut renderer,
+                                                im_popup.wl_surface(),
+                                                clamped_pos,
+                                                1.0,
+                                                1.0,
+                                                Kind::Unspecified,
+                                            );
+                                        }
+                                        im_popup_pos = (clamped_pos.x, clamped_pos.y);
+                                        im_elems = elems;
                                     }
                                 }
                             }
@@ -7042,13 +7133,14 @@ impl smithay::xwayland::XwmHandler for App {
             let new_w = w.map(|v| v as i32).unwrap_or(geo.size.w);
             let new_h = h.map(|v| v as i32).unwrap_or(geo.size.h);
 
-            // 找到包含此窗口（或最近的）output 来计算 clamp 范围
-            let screen_w = self.osize.w;
-            let screen_h = self.osize.h;
-            let margin: i32 = 8; // 留 8px 边距
-
-            let clamp_x = new_x.max(margin).min(screen_w - new_w.max(100) - margin);
-            let clamp_y = new_y.max(0).min(screen_h - new_h.max(20) - margin);
+            let margin: i32 = 8;
+            let (clamp_x, clamp_y) = self.clamp_global_rect_to_output(
+                new_x,
+                new_y,
+                new_w.max(100),
+                new_h.max(20),
+                margin,
+            );
 
             if clamp_x != new_x || clamp_y != new_y {
                 let _ = window.configure(Some(Rectangle::from_loc_and_size(
