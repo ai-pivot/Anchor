@@ -45,36 +45,20 @@ pub fn rounded_rect(
         .ok();
     // 上下边
     f.clear(color, &[rect(x + r, y, w - 2 * r, r)]).ok();
-    f.clear(color, &[rect(x + r, y + h - r, w - 2 * r, r)])
-        .ok();
+    f.clear(color, &[rect(x + r, y + h - r, w - 2 * r, r)]).ok();
     // 左右边
     f.clear(color, &[rect(x, y + r, r, h - 2 * r)]).ok();
-    f.clear(color, &[rect(x + w - r, y + r, r, h - 2 * r)])
-        .ok();
+    f.clear(color, &[rect(x + w - r, y + r, r, h - 2 * r)]).ok();
     // 四角（简单的填充方块）
     f.clear(color, &[rect(x, y, r, r)]).ok();
     f.clear(color, &[rect(x + w - r, y, r, r)]).ok();
     f.clear(color, &[rect(x, y + h - r, r, r)]).ok();
-    f.clear(color, &[rect(x + w - r, y + h - r, r, r)])
-        .ok();
+    f.clear(color, &[rect(x + w - r, y + h - r, r, r)]).ok();
 }
 
 /// 绘制发光边框（多层，与 launcher glow 同）+ 实心 accent 内边框
-pub fn glow_border(
-    f: &mut impl Frame,
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-    accent: (f32, f32, f32),
-) {
-    let layers: [(i32, f32); 5] = [
-        (5, 0.03),
-        (4, 0.07),
-        (3, 0.14),
-        (2, 0.28),
-        (1, 0.50),
-    ];
+pub fn glow_border(f: &mut impl Frame, x: i32, y: i32, w: i32, h: i32, accent: (f32, f32, f32)) {
+    let layers: [(i32, f32); 5] = [(5, 0.03), (4, 0.07), (3, 0.14), (2, 0.28), (1, 0.50)];
     for (expand, brightness) in layers {
         let glow = opaque(
             accent.0 * brightness,
@@ -83,24 +67,11 @@ pub fn glow_border(
         );
         f.clear(
             glow,
-            &[rect(
-                x - expand,
-                y - expand,
-                w + 2 * expand,
-                expand,
-            )],
+            &[rect(x - expand, y - expand, w + 2 * expand, expand)],
         )
         .ok();
-        f.clear(
-            glow,
-            &[rect(
-                x - expand,
-                y + h,
-                w + 2 * expand,
-                expand,
-            )],
-        )
-        .ok();
+        f.clear(glow, &[rect(x - expand, y + h, w + 2 * expand, expand)])
+            .ok();
         f.clear(glow, &[rect(x - expand, y, expand, h)]).ok();
         f.clear(glow, &[rect(x + w, y, expand, h)]).ok();
     }
@@ -122,7 +93,7 @@ pub fn render_slider(
     x: i32,
     y: i32,
     w: i32,
-    value: f32,   // 0.0 .. 1.0
+    value: f32, // 0.0 .. 1.0
     accent: (f32, f32, f32),
     focused: bool,
 ) {
@@ -131,21 +102,14 @@ pub fn render_slider(
     let handle_r: i32 = 6;
 
     // 轨道背景
-    f.clear(
-        opaque(0.1, 0.1, 0.18),
-        &[rect(x, track_y, w, track_h)],
-    )
-    .ok();
+    f.clear(opaque(0.1, 0.1, 0.18), &[rect(x, track_y, w, track_h)])
+        .ok();
 
     // 轨道已填充部分
     let fill_w = (w as f32 * value) as i32;
     if fill_w > 0 {
         f.clear(
-            opaque(
-                accent.0 * 0.6,
-                accent.1 * 0.6,
-                accent.2 * 0.6,
-            ),
+            opaque(accent.0 * 0.6, accent.1 * 0.6, accent.2 * 0.6),
             &[rect(x, track_y, fill_w, track_h)],
         )
         .ok();
@@ -167,7 +131,8 @@ pub fn render_slider(
         f.clear(
             opaque(accent.0 * 0.9, accent.1 * 0.9, accent.2 * 0.9),
             &[rect(x - 4, y - 4, 3, 32)],
-        ).ok();
+        )
+        .ok();
     }
 }
 
@@ -198,11 +163,7 @@ pub fn render_toggle(
 
     // 滑块
     let knob_r = r - 4;
-    let knob_x = if on {
-        x + tw - knob_r * 2 - 4
-    } else {
-        x + 4
-    };
+    let knob_x = if on { x + tw - knob_r * 2 - 4 } else { x + 4 };
     rounded_rect(
         f,
         knob_x,
@@ -220,7 +181,8 @@ pub fn render_toggle(
         f.clear(
             opaque(accent.0 * 0.9, accent.1 * 0.9, accent.2 * 0.9),
             &[rect(x - 4, y - 4, 3, th + 8)],
-        ).ok();
+        )
+        .ok();
     }
 
     tw
@@ -253,25 +215,21 @@ pub fn render_color_swatch(
         f.clear(
             opaque(accent.0 * 0.9, accent.1 * 0.9, accent.2 * 0.9),
             &[rect(x, y + size + 2, size, 2)],
-        ).ok();
+        )
+        .ok();
     } else {
         // 静态边框
-        f.clear(
-            opaque(0.15, 0.15, 0.25),
-            &[rect(x - 1, y - 1, size + 2, 1)],
-        ).ok();
+        f.clear(opaque(0.15, 0.15, 0.25), &[rect(x - 1, y - 1, size + 2, 1)])
+            .ok();
         f.clear(
             opaque(0.15, 0.15, 0.25),
             &[rect(x - 1, y + size, size + 2, 1)],
-        ).ok();
-        f.clear(
-            opaque(0.15, 0.15, 0.25),
-            &[rect(x - 1, y, 1, size)],
-        ).ok();
-        f.clear(
-            opaque(0.15, 0.15, 0.25),
-            &[rect(x + size, y, 1, size)],
-        ).ok();
+        )
+        .ok();
+        f.clear(opaque(0.15, 0.15, 0.25), &[rect(x - 1, y, 1, size)])
+            .ok();
+        f.clear(opaque(0.15, 0.15, 0.25), &[rect(x + size, y, 1, size)])
+            .ok();
     }
 
     // Label below — 聚焦时更亮
@@ -298,7 +256,11 @@ pub fn render_color_swatch(
         x + size / 2 - hw / 2,
         y + size + 20,
         10.0,
-        if focused { (lr * 0.7, lg * 0.7, lb * 0.7) } else { (0.3, 0.3, 0.45) },
+        if focused {
+            (lr * 0.7, lg * 0.7, lb * 0.7)
+        } else {
+            (0.3, 0.3, 0.45)
+        },
     );
 }
 
@@ -332,14 +294,7 @@ pub fn render_button(
     } else {
         (accent.0 * 0.8, accent.1 * 0.8, accent.2 * 0.8)
     };
-    text_render::draw_text(
-        f,
-        text,
-        x + 12,
-        y + 8,
-        13.0,
-        tcolor,
-    );
+    text_render::draw_text(f, text, x + 12, y + 8, 13.0, tcolor);
 
     // 聚焦发光
     if focused {
@@ -375,26 +330,20 @@ pub fn render_checkbox(
     } else {
         opaque(0.2, 0.2, 0.35)
     };
-    f.clear(
-        border_color,
-        &[rect(x, y, box_size, 1)],
-    ).ok();
-    f.clear(
-        border_color,
-        &[rect(x, y + box_size - 1, box_size, 1)],
-    ).ok();
+    f.clear(border_color, &[rect(x, y, box_size, 1)]).ok();
+    f.clear(border_color, &[rect(x, y + box_size - 1, box_size, 1)])
+        .ok();
     f.clear(border_color, &[rect(x, y, 1, box_size)]).ok();
-    f.clear(
-        border_color,
-        &[rect(x + box_size - 1, y, 1, box_size)],
-    ).ok();
+    f.clear(border_color, &[rect(x + box_size - 1, y, 1, box_size)])
+        .ok();
 
     // 填充（如果选中）
     if checked {
         f.clear(
             opaque(accent.0 * 0.7, accent.1 * 0.7, accent.2 * 0.7),
             &[rect(x + 3, y + 3, box_size - 6, box_size - 6)],
-        ).ok();
+        )
+        .ok();
     }
 
     // Label — 聚焦时更亮
@@ -403,14 +352,7 @@ pub fn render_checkbox(
     } else {
         (0.7, 0.7, 0.85)
     };
-    text_render::draw_text(
-        f,
-        label,
-        x + box_size + 8,
-        y + 2,
-        13.0,
-        label_color,
-    );
+    text_render::draw_text(f, label, x + box_size + 8, y + 2, 13.0, label_color);
 
     let lw = text_render::text_width(label, 13.0);
     box_size + 8 + lw
@@ -431,7 +373,8 @@ pub fn render_section_header(
     f.clear(
         opaque(accent.0 * 0.4, accent.1 * 0.4, accent.2 * 0.4),
         &[rect(x, y + 10, 3, 14)],
-    ).ok();
+    )
+    .ok();
 
     text_render::draw_text(
         f,
@@ -443,10 +386,8 @@ pub fn render_section_header(
     );
 
     // 下划线
-    f.clear(
-        opaque(0.08, 0.08, 0.16),
-        &[rect(x, y + 26, 400, 1)],
-    ).ok();
+    f.clear(opaque(0.08, 0.08, 0.16), &[rect(x, y + 26, 400, 1)])
+        .ok();
 
     32 // section height
 }

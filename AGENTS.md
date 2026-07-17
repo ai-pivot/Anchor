@@ -16,6 +16,10 @@
 ```
 src/
   main.rs        — Main compositor loop, App struct, keyboard/mouse handling, GPU auto-detect
+  appctl.rs      — Agent control command execution, desktop state snapshots, event emission
+  ipc.rs         — Local Unix socket JSON-line IPC server (`$XDG_RUNTIME_DIR/anchor/ctl.sock`)
+  bin/
+    anchorctl.rs — Agent-native CLI client (JSON/NDJSON output, event wait/filter support)
   workspace.rs   — Workspace struct, WindowSlot enum, unified render order
   lock.rs        — Lock screen state machine (PAM auth, shake animation, random styles)
   launcher.rs    — Built-in app launcher (XDG .desktop scanning, search filter)
@@ -79,6 +83,7 @@ build.rs          — Build script (links libpam)
 | Task Panel | `Super+Tab` | Real window thumbnails with titles + borders |
 | Overview | `Super+A` | Cover Flow 3D with hover pulse + window titles |
 | Settings | `Super+,` | Visual config panel (colors/layout/bar/wallpaper), live preview, Ctrl+Enter apply |
+| Agent control | `anchorctl` | Local authenticated JSON IPC for state queries, window/workspace/layout control, screenshots, recording, app launch, and event streams |
 
 ## Rendering Pipeline
 
@@ -342,14 +347,16 @@ For SDDM: Create `/usr/share/wayland-sessions/anchor.desktop` with same content.
     打开的 MPV）进入 tiling 布局后：没有 focus → 无法交互、Super+Q 关不掉；
     没有 configure → 客户端不渲染 → 窗口透明。`surface_associated` 不能只
     设 `dirty = true`，必须完整处理 focus + layout。
-27. **X11 Dialog 分流：有父 Dialog 平铺，无父/菜单类窗口浮动。**
-    XWayland 文件选择器通常是 `WmWindowType::Dialog` 且带 `transient_for`，
-    必须跟随父 X11 窗口所在 workspace/output 进入 `ws.x11_surfaces` 平铺；
-    否则会走全局 `or_surfaces` 浮动层，表现为固定在屏幕 1 悬浮。
-    无父 Dialog 以及 Utility/Menu/Splash 仍放入 `or_surfaces`，接受客户端
-    请求的 geometry，并设置键盘焦点，避免菜单/工具窗被强制缩放导致坐标错乱。
-    `focus_changed` 必须同时遍历 `ws.x11_surfaces` 和 `or_surfaces` 来设
-    `set_activated`，否则浮动 Dialog 永远拿不到激活状态。
+27. **X11 transient 分流：带父窗口的 Dialog/Menu/Utility/Splash 跟随父窗口平铺。**
+    XWayland 文件选择器及其“打开方式”等二级窗口可能分别使用 `Dialog`、`Menu`、
+    `Utility` 或 `Splash`，只要带 `transient_for`，就必须跟随父 X11 窗口所在
+    workspace/output 进入 `ws.x11_surfaces`；否则会走全局 `or_surfaces` 浮动层，
+    表现为固定在屏幕 1 左上角。无父的这些类型仍放入 `or_surfaces`，但
+    `map_window_request` 不能立即确认初始 `window.geometry()`：该阶段 geometry
+    可能仍是 `(0,0)`，过早 `configure` 会将错误坐标固化。应等待客户端后续
+    `configure_request`，再按目标 output 裁剪。浮动窗口仍需设置键盘焦点；
+    `focus_changed` 必须同时遍历 `ws.x11_surfaces` 和 `or_surfaces` 调用
+    `set_activated`。
 28. **Settings Panel 关闭动画需要两阶段清除。** Closing 状态的 `progress()`
     从 1→0 渐隐，但最后一帧 elapsed≥durationms 时如果直接切 `Inactive`，
     渲染停止时面板还有 ~23% 不透明度 → 鬼影永久残留。必须在 `done=true`

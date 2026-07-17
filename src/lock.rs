@@ -58,7 +58,10 @@ impl LockState {
     pub fn lock(&mut self, pointer_x: f64) {
         // Startup guard: 忽略启动后 5 秒内的 lock 请求（防止 GDM/input 初始化干扰）
         if self.startup.elapsed().as_millis() < 5000 {
-            info!("🔒 Lock request ignored (startup guard, {}ms)", self.startup.elapsed().as_millis());
+            info!(
+                "🔒 Lock request ignored (startup guard, {}ms)",
+                self.startup.elapsed().as_millis()
+            );
             return;
         }
         info!("🔒 Locking screen");

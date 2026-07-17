@@ -57,9 +57,7 @@ pub fn render_settings_panel(
     .ok();
 
     // ── 面板背景 ──
-    let panel_bg = smithay::backend::renderer::Color32F::new(
-        0.08, 0.08, 0.14, alpha,
-    );
+    let panel_bg = smithay::backend::renderer::Color32F::new(0.08, 0.08, 0.14, alpha);
     rounded_rect(f, sx, sy, scaled_w, scaled_h, 12, panel_bg);
 
     // ── 发光边框 ──
@@ -111,16 +109,7 @@ pub fn render_settings_panel(
     // 裁剪（只渲染内容区内的元素）
     // 注意：Frame::clear 不支持裁剪，但我们可以通过不画外部元素来模拟
     render_content(
-        f,
-        cfg,
-        content_x,
-        content_y,
-        content_w,
-        content_h,
-        settings,
-        accent,
-        alpha,
-        frame,
+        f, cfg, content_x, content_y, content_w, content_h, settings, accent, alpha, frame,
     );
 
     // 底部栏
@@ -158,7 +147,11 @@ fn render_title_bar(
         px + 20,
         py + 14,
         16.0,
-        (accent.0 * 0.9 * alpha, accent.1 * 0.9 * alpha, accent.2 * 0.9 * alpha),
+        (
+            accent.0 * 0.9 * alpha,
+            accent.1 * 0.9 * alpha,
+            accent.2 * 0.9 * alpha,
+        ),
     );
 
     // 底部亮线
@@ -305,17 +298,18 @@ fn render_bottom_bar(
                 accent.2 * 0.8,
                 alpha,
             );
-            f.clear(
-                dot_color,
-                &[rect(px + 16, py + 14, 8, 8)],
-            ).ok();
+            f.clear(dot_color, &[rect(px + 16, py + 14, 8, 8)]).ok();
             text_render::draw_text(
                 f,
                 "Unsaved changes",
                 px + 32,
                 py + 14,
                 12.0,
-                (accent.0 * 0.6 * alpha, accent.1 * 0.6 * alpha, accent.2 * 0.6 * alpha),
+                (
+                    accent.0 * 0.6 * alpha,
+                    accent.1 * 0.6 * alpha,
+                    accent.2 * 0.6 * alpha,
+                ),
             );
         }
     }
@@ -326,11 +320,15 @@ fn render_bottom_bar(
         if !focus_name.is_empty() {
             text_render::draw_text(
                 f,
-                &format!("\u{2190}\u{2192} {}", focus_name),  // ←→ label
+                &format!("\u{2190}\u{2192} {}", focus_name), // ←→ label
                 px + 200,
                 py + 14,
                 12.0,
-                (accent.0 * 0.7 * alpha, accent.1 * 0.7 * alpha, accent.2 * 0.7 * alpha),
+                (
+                    accent.0 * 0.7 * alpha,
+                    accent.1 * 0.7 * alpha,
+                    accent.2 * 0.7 * alpha,
+                ),
             );
         }
     }
@@ -371,10 +369,14 @@ fn render_content(
     };
 
     match tab {
-        SettingsTab::Colors => render_page_colors(f, cfg, cx, cy, cw, ch, edit, accent, alpha, frame),
+        SettingsTab::Colors => {
+            render_page_colors(f, cfg, cx, cy, cw, ch, edit, accent, alpha, frame)
+        }
         SettingsTab::Layout => render_page_layout(f, cfg, cx, cy, cw, ch, edit, accent, alpha),
         SettingsTab::Bar => render_page_bar(f, cfg, cx, cy, cw, ch, edit, accent, alpha),
-        SettingsTab::Wallpaper => render_page_wallpaper(f, cfg, cx, cy, cw, ch, edit, accent, alpha),
+        SettingsTab::Wallpaper => {
+            render_page_wallpaper(f, cfg, cx, cy, cw, ch, edit, accent, alpha)
+        }
         _ => render_page_placeholder(f, cx, cy, cw, ch, tab, accent, alpha),
     }
 }
@@ -410,7 +412,13 @@ fn render_page_colors(
     for (i, (label, hex)) in swatches.iter().enumerate() {
         let sx = cx + (i as i32) * (swatch_size + col_gap + 50);
         render_color_swatch(
-            f, sx, iy + 8, swatch_size, hex, label, accent,
+            f,
+            sx,
+            iy + 8,
+            swatch_size,
+            hex,
+            label,
+            accent,
             i == edit.focus_idx,
         );
     }
@@ -430,7 +438,13 @@ fn render_page_colors(
         let col = i % 3;
         let sx = cx + (col as i32) * (swatch_size + col_gap + 50);
         render_color_swatch(
-            f, sx, iy + 8 + row as i32 * (swatch_size + 30), swatch_size, hex, label, accent,
+            f,
+            sx,
+            iy + 8 + row as i32 * (swatch_size + 30),
+            swatch_size,
+            hex,
+            label,
+            accent,
             i + 3 == edit.focus_idx,
         );
     }
@@ -456,60 +470,48 @@ fn render_page_layout(
     iy += render_section_header(f, cx, iy, "Spacing", accent);
 
     // Border Width
-    text_render::draw_text(
-        f, "Border Width", cx, iy + 6, 13.0,
-        (0.7, 0.7, 0.85),
-    );
+    text_render::draw_text(f, "Border Width", cx, iy + 6, 13.0, (0.7, 0.7, 0.85));
     render_slider(
-        f, cx + 140, iy,
+        f,
+        cx + 140,
+        iy,
         200,
         edit.cfg.layout.border_width as f32 / 32.0,
         accent,
         edit.focus_idx == 0,
     );
     let val_text = format!("{} px", edit.cfg.layout.border_width);
-    text_render::draw_text(
-        f, &val_text, cx + 350, iy + 6, 12.0,
-        (0.5, 0.5, 0.65),
-    );
+    text_render::draw_text(f, &val_text, cx + 350, iy + 6, 12.0, (0.5, 0.5, 0.65));
     iy += 36;
 
     // Gap
-    text_render::draw_text(
-        f, "Gap", cx, iy + 6, 13.0,
-        (0.7, 0.7, 0.85),
-    );
+    text_render::draw_text(f, "Gap", cx, iy + 6, 13.0, (0.7, 0.7, 0.85));
     render_slider(
-        f, cx + 140, iy,
+        f,
+        cx + 140,
+        iy,
         200,
         edit.cfg.layout.gap as f32 / 48.0,
         accent,
         edit.focus_idx == 1,
     );
     let val_text2 = format!("{} px", edit.cfg.layout.gap);
-    text_render::draw_text(
-        f, &val_text2, cx + 350, iy + 6, 12.0,
-        (0.5, 0.5, 0.65),
-    );
+    text_render::draw_text(f, &val_text2, cx + 350, iy + 6, 12.0, (0.5, 0.5, 0.65));
     iy += 36;
 
     // Margin
-    text_render::draw_text(
-        f, "Margin", cx, iy + 6, 13.0,
-        (0.7, 0.7, 0.85),
-    );
+    text_render::draw_text(f, "Margin", cx, iy + 6, 13.0, (0.7, 0.7, 0.85));
     render_slider(
-        f, cx + 140, iy,
+        f,
+        cx + 140,
+        iy,
         200,
         edit.cfg.layout.margin as f32 / 48.0,
         accent,
         edit.focus_idx == 2,
     );
     let val_text3 = format!("{} px", edit.cfg.layout.margin);
-    text_render::draw_text(
-        f, &val_text3, cx + 350, iy + 6, 12.0,
-        (0.5, 0.5, 0.65),
-    );
+    text_render::draw_text(f, &val_text3, cx + 350, iy + 6, 12.0, (0.5, 0.5, 0.65));
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -532,12 +534,11 @@ fn render_page_bar(
     iy += render_section_header(f, cx, iy, "Top Bar", accent);
 
     // Enabled toggle
-    text_render::draw_text(
-        f, "Enabled", cx, iy + 10, 13.0,
-        (0.7, 0.7, 0.85),
-    );
+    text_render::draw_text(f, "Enabled", cx, iy + 10, 13.0, (0.7, 0.7, 0.85));
     render_toggle(
-        f, cx + 140, iy + 2,
+        f,
+        cx + 140,
+        iy + 2,
         edit.cfg.bar.enabled,
         accent,
         edit.focus_idx == 0,
@@ -545,48 +546,42 @@ fn render_page_bar(
     iy += 36;
 
     // Height
-    text_render::draw_text(
-        f, "Height", cx, iy + 6, 13.0,
-        (0.7, 0.7, 0.85),
-    );
+    text_render::draw_text(f, "Height", cx, iy + 6, 13.0, (0.7, 0.7, 0.85));
     render_slider(
-        f, cx + 140, iy,
+        f,
+        cx + 140,
+        iy,
         200,
         edit.cfg.bar.height as f32 / 80.0,
         accent,
         edit.focus_idx == 1,
     );
     let val_text = format!("{} px", edit.cfg.bar.height);
-    text_render::draw_text(
-        f, &val_text, cx + 350, iy + 6, 12.0,
-        (0.5, 0.5, 0.65),
-    );
+    text_render::draw_text(f, &val_text, cx + 350, iy + 6, 12.0, (0.5, 0.5, 0.65));
     iy += 36;
 
     // Opacity
-    text_render::draw_text(
-        f, "Opacity", cx, iy + 6, 13.0,
-        (0.7, 0.7, 0.85),
-    );
+    text_render::draw_text(f, "Opacity", cx, iy + 6, 13.0, (0.7, 0.7, 0.85));
     render_slider(
-        f, cx + 140, iy,
+        f,
+        cx + 140,
+        iy,
         200,
         edit.cfg.bar.opacity,
         accent,
         edit.focus_idx == 2,
     );
     let val_text2 = format!("{:.0}%", edit.cfg.bar.opacity * 100.0);
-    text_render::draw_text(
-        f, &val_text2, cx + 350, iy + 6, 12.0,
-        (0.5, 0.5, 0.65),
-    );
+    text_render::draw_text(f, &val_text2, cx + 350, iy + 6, 12.0, (0.5, 0.5, 0.65));
     iy += 36;
 
     // ── 显示元素 ──
     iy += render_section_header(f, cx, iy, "Display", accent);
 
     render_checkbox(
-        f, cx, iy + 8,
+        f,
+        cx,
+        iy + 8,
         edit.cfg.bar.show_date,
         "Date & Time",
         accent,
@@ -594,7 +589,9 @@ fn render_page_bar(
     );
     iy += 30;
     render_checkbox(
-        f, cx, iy + 8,
+        f,
+        cx,
+        iy + 8,
         edit.cfg.bar.show_cpu,
         "CPU Usage",
         accent,
@@ -602,7 +599,9 @@ fn render_page_bar(
     );
     iy += 30;
     render_checkbox(
-        f, cx, iy + 8,
+        f,
+        cx,
+        iy + 8,
         edit.cfg.bar.show_memory,
         "Memory Usage",
         accent,
@@ -651,7 +650,8 @@ fn render_page_wallpaper(
         f.clear(
             opaque(border_alpha, border_alpha, 0.35),
             &[rect(mx - 1, my + 3, 12, 12)],
-        ).ok();
+        )
+        .ok();
 
         let display = match *mode {
             "color" => "Solid",
@@ -665,10 +665,7 @@ fn render_page_wallpaper(
         } else {
             (0.7, 0.7, 0.85)
         };
-        text_render::draw_text(
-            f, display, mx + 18, my + 2, 12.0,
-            label_color,
-        );
+        text_render::draw_text(f, display, mx + 18, my + 2, 12.0, label_color);
     }
     iy += 40;
 
@@ -695,17 +692,15 @@ fn render_page_wallpaper(
         f.clear(
             opaque(border_alpha, border_alpha, 0.35),
             &[rect(mx - 1, iy + 11, 12, 12)],
-        ).ok();
+        )
+        .ok();
 
         let label_color = if focused {
             (accent.0 * 0.9, accent.1 * 0.9, accent.2 * 0.9)
         } else {
             (0.7, 0.7, 0.85)
         };
-        text_render::draw_text(
-            f, sc, mx + 18, iy + 10, 12.0,
-            label_color,
-        );
+        text_render::draw_text(f, sc, mx + 18, iy + 10, 12.0, label_color);
     }
 }
 
@@ -734,14 +729,7 @@ fn render_page_placeholder(
     );
 
     let hint = "← Use sidebar to switch tabs";
-    text_render::draw_text(
-        f,
-        hint,
-        cx + 20,
-        cy + 70,
-        12.0,
-        (0.25, 0.25, 0.4),
-    );
+    text_render::draw_text(f, hint, cx + 20, cy + 70, 12.0, (0.25, 0.25, 0.4));
 }
 
 // ═══════════════════════════════════════════════════════════════════

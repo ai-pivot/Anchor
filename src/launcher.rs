@@ -29,13 +29,10 @@ impl LauncherState {
     /// Scan system and user XDG desktop files to discover applications.
     pub fn load_apps(terminal_cmd: &str) -> Vec<(String, String)> {
         let mut apps = Vec::new();
-        let dirs = [
-            "/usr/share/applications".to_string(),
-            format!(
-                "{}/.local/share/applications",
-                std::env::var("HOME").unwrap_or_default()
-            ),
-        ];
+        let mut dirs = vec!["/usr/share/applications".to_string()];
+        if let Ok(home) = std::env::var("HOME") {
+            dirs.push(format!("{}/.local/share/applications", home));
+        }
         for dir in &dirs {
             if let Ok(entries) = std::fs::read_dir(dir) {
                 for entry in entries.flatten() {
@@ -52,12 +49,11 @@ impl LauncherState {
                                     }
                                     if line.starts_with("Exec=") && app_exec.is_empty() {
                                         let exec = &line[5..];
-                                        // Remove % parameter placeholders
                                         app_exec = exec
                                             .split_whitespace()
-                                            .next()
-                                            .unwrap_or(exec)
-                                            .to_string();
+                                            .filter(|arg| !arg.starts_with('%'))
+                                            .collect::<Vec<_>>()
+                                            .join(" ");
                                     }
                                     if line.starts_with("Terminal=true") {
                                         is_terminal = true;
@@ -122,34 +118,60 @@ impl LauncherState {
         }
     }
 
+    fn spawn_exec(exec_cmd: &str, xdisplay: Option<u32>) {
+        info!("🚀 启动器: {}", exec_cmd);
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg(exec_cmd);
+        // 继承 anchor 的完整环境（含 GPU 变量）
+        cmd.env_clear();
+        for (k, v) in std::env::vars() {
+            cmd.env(k, v);
+        }
+        cmd.env("WAYLAND_DISPLAY", "wayland-anchor").env(
+            "XDG_RUNTIME_DIR",
+            format!("/run/user/{}", unsafe { libc::getuid() }),
+        );
+        if let Some(d) = xdisplay {
+            cmd.env("DISPLAY", format!(":{}", d));
+        }
+        cmd.spawn().ok();
+    }
+
     /// Execute the currently selected application.
     /// Returns `true` if an app was launched.
     pub fn select_and_launch(&mut self, xdisplay: Option<u32>) -> bool {
         let filtered = self.filtered();
         if let Some((_, (_, exec))) = filtered.get(self.selected) {
-            let exec_cmd = exec.clone();
-            info!("🚀 启动器: {}", exec_cmd);
-            let mut cmd = std::process::Command::new("sh");
-            cmd.arg("-c")
-                .arg(&exec_cmd);
-            // 继承 anchor 的完整环境（含 GPU 变量）
-            cmd.env_clear();
-            for (k, v) in std::env::vars() {
-                cmd.env(k, v);
-            }
-            cmd.env("WAYLAND_DISPLAY", "wayland-anchor")
-                .env(
-                    "XDG_RUNTIME_DIR",
-                    format!("/run/user/{}", unsafe { libc::getuid() }),
-                );
-            if let Some(d) = xdisplay {
-                cmd.env("DISPLAY", format!(":{}", d));
-            }
-            cmd.spawn().ok();
+            Self::spawn_exec(exec, xdisplay);
+            self.visible = false;
+            self.query.clear();
+            return true;
         }
-        self.visible = false;
-        self.query.clear();
-        true
+        false
+    }
+
+    /// Launch an app by display name.
+    pub fn launch_by_name(
+        &mut self,
+        app_name: &str,
+        xdisplay: Option<u32>,
+        terminal_cmd: &str,
+    ) -> bool {
+        if self.apps.is_empty() {
+            self.apps = Self::load_apps(terminal_cmd);
+        }
+        if let Some((_, exec)) = self
+            .apps
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(app_name))
+            .cloned()
+        {
+            Self::spawn_exec(&exec, xdisplay);
+            self.visible = false;
+            self.query.clear();
+            return true;
+        }
+        false
     }
 
     /// Handle a printable character key in the launcher.

@@ -7,8 +7,8 @@
 //! - Super + ,  →  打开
 //! - Esc         →  关闭
 
-pub mod widgets;
 pub mod render;
+pub mod widgets;
 
 use crate::config::Config;
 use std::time::Instant;
@@ -175,9 +175,7 @@ impl SettingsState {
     pub fn close(&mut self) {
         match self {
             Self::Active {
-                active_tab,
-                edit,
-                ..
+                active_tab, edit, ..
             } => {
                 *self = Self::Closing {
                     start: Instant::now(),
@@ -236,9 +234,7 @@ impl SettingsState {
     /// 是否需要持续请求渲染（动画进行中）
     pub fn is_animating(&self) -> bool {
         match self {
-            Self::Active { start, .. } => {
-                start.elapsed().as_millis() < 280
-            }
+            Self::Active { start, .. } => start.elapsed().as_millis() < 280,
             Self::Closing { done, .. } => {
                 // done=true 时仍需一帧释放，下一帧 update_close 会切到 Inactive
                 if *done {
@@ -304,7 +300,10 @@ impl SettingsState {
 
     /// 切换标签页
     pub fn switch_tab(&mut self, tab: SettingsTab) {
-        if let Self::Active { active_tab, scroll, .. } = self {
+        if let Self::Active {
+            active_tab, scroll, ..
+        } = self
+        {
             *active_tab = tab;
             *scroll = 0.0;
         }
@@ -313,8 +312,8 @@ impl SettingsState {
     /// 应用配置：写入 config.toml
     pub fn apply(&mut self) -> Result<(), String> {
         if let Self::Active { edit, .. } = self {
-            let toml_str = toml::to_string_pretty(&edit.cfg)
-                .map_err(|e| format!("TOML serialize: {}", e))?;
+            let toml_str =
+                toml::to_string_pretty(&edit.cfg).map_err(|e| format!("TOML serialize: {}", e))?;
             let path = crate::config::config_path();
             std::fs::write(&path, &toml_str)
                 .map_err(|e| format!("write {}: {}", path.display(), e))?;
@@ -341,7 +340,10 @@ impl SettingsState {
 
     /// 切换聚焦控件（向上）
     pub fn prev_focus(&mut self) {
-        if let Self::Active { active_tab, edit, .. } = self {
+        if let Self::Active {
+            active_tab, edit, ..
+        } = self
+        {
             let max = controls_count(*active_tab);
             if max > 0 {
                 if edit.focus_idx == 0 {
@@ -355,7 +357,10 @@ impl SettingsState {
 
     /// 切换聚焦控件（向下）
     pub fn next_focus(&mut self) {
-        if let Self::Active { active_tab, edit, .. } = self {
+        if let Self::Active {
+            active_tab, edit, ..
+        } = self
+        {
             let max = controls_count(*active_tab);
             if max > 0 {
                 edit.focus_idx = (edit.focus_idx + 1) % max;
@@ -366,9 +371,7 @@ impl SettingsState {
     /// 调整当前聚焦控件的值（← →）
     pub fn adjust_focus(&mut self, delta: f64) {
         if let Self::Active {
-            active_tab,
-            edit,
-            ..
+            active_tab, edit, ..
         } = self
         {
             let fi = edit.focus_idx;
@@ -390,13 +393,11 @@ impl SettingsState {
                         edit.dirty = true;
                     }
                     1 => {
-                        edit.cfg.bar.height =
-                            (edit.cfg.bar.height + delta as i32).clamp(12, 80);
+                        edit.cfg.bar.height = (edit.cfg.bar.height + delta as i32).clamp(12, 80);
                         edit.dirty = true;
                     }
                     2 => {
-                        let v = (edit.cfg.bar.opacity as f64 + delta * 0.05)
-                            .clamp(0.1, 1.0);
+                        let v = (edit.cfg.bar.opacity as f64 + delta * 0.05).clamp(0.1, 1.0);
                         edit.cfg.bar.opacity = v as f32;
                         edit.dirty = true;
                     }
@@ -423,9 +424,7 @@ impl SettingsState {
     /// 激活当前聚焦控件（Enter）
     pub fn activate_focus(&mut self) {
         if let Self::Active {
-            active_tab,
-            edit,
-            ..
+            active_tab, edit, ..
         } = self
         {
             let fi = edit.focus_idx;
@@ -471,10 +470,10 @@ impl SettingsState {
 /// 每个标签页的可聚焦控件数量
 fn controls_count(tab: SettingsTab) -> usize {
     match tab {
-        SettingsTab::Colors => 7,   // 3 core + 4 bar swatches
-        SettingsTab::Layout => 3,   // border_width, gap, margin
-        SettingsTab::Bar => 6,      // enabled, height, opacity, show_date, show_cpu, show_memory
+        SettingsTab::Colors => 7,    // 3 core + 4 bar swatches
+        SettingsTab::Layout => 3,    // border_width, gap, margin
+        SettingsTab::Bar => 6,       // enabled, height, opacity, show_date, show_cpu, show_memory
         SettingsTab::Wallpaper => 8, // 4 mode + 4 scaling radios
-        _ => 3, // placeholder for unimplemented tabs
+        _ => 3,                      // placeholder for unimplemented tabs
     }
 }
