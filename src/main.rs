@@ -71,13 +71,17 @@ use smithay::{
     },
     delegate_compositor, delegate_data_device, delegate_fractional_scale, delegate_idle_inhibit,
     delegate_idle_notify, delegate_input_method_manager, delegate_layer_shell, delegate_output,
-    delegate_primary_selection, delegate_seat, delegate_shm, delegate_text_input_manager,
-    delegate_viewporter, delegate_virtual_keyboard_manager, delegate_xdg_activation,
-    delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_pointer_constraints, delegate_primary_selection, delegate_relative_pointer,
+    delegate_seat, delegate_shm, delegate_text_input_manager, delegate_viewporter,
+    delegate_virtual_keyboard_manager, delegate_xdg_activation, delegate_xdg_decoration,
+    delegate_xdg_shell,
     desktop::{PopupKind, PopupManager},
     input::{
         keyboard::{FilterResult, Keysym, ModifiersState, XkbConfig},
-        pointer::{AxisFrame, CursorIcon, CursorImageStatus, MotionEvent, PointerHandle},
+        pointer::{
+            AxisFrame, CursorIcon, CursorImageStatus, MotionEvent, PointerHandle,
+            RelativeMotionEvent,
+        },
         Seat, SeatHandler, SeatState,
     },
     output::{Mode, Output, PhysicalProperties, Scale, Subpixel},
@@ -105,6 +109,11 @@ use smithay::{
             InputMethodHandler, InputMethodManagerState, PopupSurface as ImPopupSurface,
         },
         output::OutputManagerState,
+        pointer_constraints::{
+            with_pointer_constraint, PointerConstraint, PointerConstraintsHandler,
+            PointerConstraintsState,
+        },
+        relative_pointer::RelativePointerManagerState,
         selection::{
             data_device::{
                 ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
@@ -2478,6 +2487,45 @@ impl App {
                 self.gesture_dy = 0.0;
             }
             InputEvent::PointerMotion { event } => {
+                // 捕获相对运动数据（relative_pointer 协议用，游戏视角控制）
+                let rel_delta = event.delta();
+                let rel_delta_unaccel = event.delta_unaccel();
+                let utime = event.time();
+
+                // 检查当前焦点 surface 是否有活跃的指针锁定约束（游戏 pointer lock）
+                let focus_now = self.pointer_focus();
+                let mut ptr_lock = self.pointer.clone();
+                let is_locked = focus_now.as_ref().map_or(false, |(surface, _)| {
+                    with_pointer_constraint(surface, &ptr_lock, |constraint| {
+                        constraint.map_or(false, |c| {
+                            matches!(&*c, PointerConstraint::Locked(_)) && c.is_active()
+                        })
+                    })
+                });
+
+                if is_locked {
+                    // 指针锁定模式（游戏）：不移动可见光标，只发送相对运动给客户端。
+                    // 游戏通过 zwp_relative_pointer 的 delta 来旋转人物视角。
+                    ptr_lock.relative_motion(
+                        self,
+                        focus_now,
+                        &RelativeMotionEvent {
+                            delta: rel_delta,
+                            delta_unaccel: rel_delta_unaccel,
+                            utime,
+                        },
+                    );
+                    ptr_lock.frame(self);
+                    self.dirty = true;
+                    return;
+                }
+
+                // 非锁定模式：若光标被游戏隐藏则恢复
+                if matches!(self.cursor_status, CursorImageStatus::Hidden) {
+                    self.cursor_status = CursorImageStatus::Named(CursorIcon::Default);
+                }
+
+                // ── 正常路径：更新光标位置 ──
                 self.pointer_pos.0 += event.delta_x();
                 self.pointer_pos.1 += event.delta_y();
 
@@ -2599,7 +2647,7 @@ impl App {
                 let (ox, oy, _, _) = self.output_sizes.get(oi).copied().unwrap_or_default();
                 ptr.motion(
                     self,
-                    focus,
+                    focus.clone(),
                     &MotionEvent {
                         location: Point::from((
                             self.pointer_pos.0 - ox as f64,
@@ -2607,6 +2655,16 @@ impl App {
                         )),
                         serial,
                         time,
+                    },
+                );
+                // 同时发送相对运动（对不使用 relative_pointer 的客户端是 no-op）
+                ptr.relative_motion(
+                    self,
+                    focus,
+                    &RelativeMotionEvent {
+                        delta: rel_delta,
+                        delta_unaccel: rel_delta_unaccel,
+                        utime,
                     },
                 );
                 ptr.frame(self);
@@ -4006,6 +4064,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("✅ wp_viewporter");
     let idle_inhibit_mgr = IdleInhibitManagerState::new::<App>(&dh);
     info!("✅ idle_inhibit");
+
+    // ─── 游戏鼠标支持：pointer_constraints（指针锁定）+ relative_pointer（相对运动）───
+    // Minecraft 等游戏通过 wp_pointer_constraints 的 LockedPointer 锁定鼠标，
+    // 通过 zwp_relative_pointer 获取相对运动来控制视角。
+    PointerConstraintsState::new::<App>(&dh);
+    info!("✅ wp_pointer_constraints");
+    RelativePointerManagerState::new::<App>(&dh);
+    info!("✅ zwp_relative_pointer");
 
     // ─── 提前创建 EventLoop（IdleNotifierState 需要 loop handle）───
     let mut eloop: EventLoop<App> = EventLoop::try_new()?;
@@ -6898,6 +6964,37 @@ delegate_viewporter!(App);
 delegate_idle_notify!(App);
 delegate_idle_inhibit!(App);
 smithay::delegate_xwayland_shell!(App);
+
+// ── Pointer Constraints + Relative Pointer（游戏鼠标支持）─────────
+// Minecraft 等游戏通过 wp_pointer_constraints 的 LockedPointer 锁定鼠标隐藏光标，
+// 通过 zwp_relative_pointer 获取相对运动来旋转视角。
+delegate_pointer_constraints!(App);
+delegate_relative_pointer!(App);
+
+impl PointerConstraintsHandler for App {
+    fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
+        // Anchor 不拒绝任何指针约束请求——游戏需要 pointer lock 才能控制视角。
+        // 约束存储在 surface 的 data_map 中（由 PointerConstraintsState 管理），
+        // 激活后会向客户端发送 locked/confined 事件。
+        with_pointer_constraint(surface, pointer, |constraint| {
+            if let Some(constraint) = constraint {
+                constraint.activate();
+            }
+        });
+        // 隐藏系统光标——游戏会自己绘制准星，系统光标会干扰
+        self.cursor_status = CursorImageStatus::Hidden;
+        self.dirty = true;
+    }
+
+    fn cursor_position_hint(
+        &mut self,
+        _surface: &WlSurface,
+        _pointer: &PointerHandle<Self>,
+        _location: Point<f64, Logical>,
+    ) {
+        // Anchor 不使用 cursor position hint（游戏自己管理准星位置）
+    }
+}
 
 // ── XWayland Handlers ──────────────────────────────────────
 

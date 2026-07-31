@@ -371,6 +371,15 @@ For SDDM: Create `/usr/share/wayland-sessions/anchor.desktop` with same content.
     X11/fcitx 候选框通常是 `or_surfaces` override-redirect 窗口，
     `configure_request` 不能用全局 `self.osize` 裁剪，否则多显示器会被拉回屏幕 1
     或在边缘输入时超出屏幕。应按 popup 左上角所在 output（中心点兜底）计算边界。
+31. **游戏 pointer lock 需要 `wp_pointer_constraints` + `zwp_relative_pointer` 协议。**
+    Minecraft 等 3D 游戏通过 `wp_pointer_constraints` 的 `LockedPointer` 隐藏并锁定
+    鼠标，通过 `zwp_relative_pointer_manager_v1` 获取相对运动来旋转视角。缺少这两个
+    协议时，游戏无法锁定鼠标 → 鼠标移动到窗口边缘就"跑出去" → 视角无法持续转动。
+    实现：在 `PointerMotion` 事件处理中，先用 `with_pointer_constraint` 检查焦点 surface
+    是否有活跃的 `LockedPointer`。若是 → 只发送 `relative_motion`（不更新 `pointer_pos`、
+    不发送普通 `motion`），并在 `new_constraint` 回调中隐藏光标。若否 → 正常路径 +
+    附带发送 `relative_motion`（对不用该协议的客户端是 no-op）+ 恢复光标。约束在
+    `PointerConstraintsHandler::new_constraint` 中立即 `activate()`。
 
 ## 渲染循环与动画架构
 
